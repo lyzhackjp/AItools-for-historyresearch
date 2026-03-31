@@ -1,0 +1,183 @@
+{
+  "search_keywords": [
+    "huggingface ner",
+    "entity extraction",
+    "ner",
+    "spacy",
+    "named entity recognition"
+  ],
+  "total_github_results": 6,
+  "total_huggingface_results": 6,
+  "github_repos": [
+    {
+      "name": "example-huggingface ner-repo",
+      "full_name": "testuser/example-huggingface ner",
+      "description": "An example repository for huggingface ner with high stars",
+      "stars": 2500,
+      "forks": 300,
+      "language": "Python",
+      "url": "https://github.com/testuser/example-huggingface ner",
+      "topics": [
+        "huggingface ner",
+        "machine-learning",
+        "nlp"
+      ],
+      "score": 85.5
+    },
+    {
+      "name": "awesome-huggingface ner",
+      "full_name": "awesome/awesome-huggingface ner",
+      "description": "Awesome list for huggingface ner",
+      "stars": 1500,
+      "forks": 150,
+      "language": "Python",
+      "url": "https://github.com/awesome/awesome-huggingface ner",
+      "topics": [
+        "huggingface ner",
+        "awesome-list"
+      ],
+      "score": 72.0
+    },
+    {
+      "name": "example-entity extraction-repo",
+      "full_name": "testuser/example-entity extraction",
+      "description": "An example repository for entity extraction with high stars",
+      "stars": 2500,
+      "forks": 300,
+      "language": "Python",
+      "url": "https://github.com/testuser/example-entity extraction",
+      "topics": [
+        "entity extraction",
+        "machine-learning",
+        "nlp"
+      ],
+      "score": 85.5
+    },
+    {
+      "name": "awesome-entity extraction",
+      "full_name": "awesome/awesome-entity extraction",
+      "description": "Awesome list for entity extraction",
+      "stars": 1500,
+      "forks": 150,
+      "language": "Python",
+      "url": "https://github.com/awesome/awesome-entity extraction",
+      "topics": [
+        "entity extraction",
+        "awesome-list"
+      ],
+      "score": 72.0
+    },
+    {
+      "name": "example-ner-repo",
+      "full_name": "testuser/example-ner",
+      "description": "An example repository for ner with high stars",
+      "stars": 2500,
+      "forks": 300,
+      "language": "Python",
+      "url": "https://github.com/testuser/example-ner",
+      "topics": [
+        "ner",
+        "machine-learning",
+        "nlp"
+      ],
+      "score": 85.5
+    },
+    {
+      "name": "awesome-ner",
+      "full_name": "awesome/awesome-ner",
+      "description": "Awesome list for ner",
+      "stars": 1500,
+      "forks": 150,
+      "language": "Python",
+      "url": "https://github.com/awesome/awesome-ner",
+      "topics": [
+        "ner",
+        "awesome-list"
+      ],
+      "score": 72.0
+    }
+  ],
+  "huggingface_models": [
+    {
+      "model_id": "testuser/huggingface ner-model",
+      "model_name": "huggingface ner-model",
+      "description": "A powerful model for huggingface ner",
+      "downloads": 50000,
+      "likes": 200,
+      "tags": [
+        "huggingface ner",
+        "transformer",
+        "nlp"
+      ],
+      "pipeline_tag": "text-generation",
+      "score": 88.0
+    },
+    {
+      "model_id": "testorg/huggingface ner-base",
+      "model_name": "huggingface ner-base",
+      "description": "Base model for huggingface ner tasks",
+      "downloads": 30000,
+      "likes": 150,
+      "tags": [
+        "huggingface ner",
+        "base-model"
+      ],
+      "pipeline_tag": "fill-mask",
+      "score": 75.0
+    },
+    {
+      "model_id": "testuser/entity extraction-model",
+      "model_name": "entity extraction-model",
+      "description": "A powerful model for entity extraction",
+      "downloads": 50000,
+      "likes": 200,
+      "tags": [
+        "entity extraction",
+        "transformer",
+        "nlp"
+      ],
+      "pipeline_tag": "text-generation",
+      "score": 88.0
+    },
+    {
+      "model_id": "testorg/entity extraction-base",
+      "model_name": "entity extraction-base",
+      "description": "Base model for entity extraction tasks",
+      "downloads": 30000,
+      "likes": 150,
+      "tags": [
+        "entity extraction",
+        "base-model"
+      ],
+      "pipeline_tag": "fill-mask",
+      "score": 75.0
+    },
+    {
+      "model_id": "testuser/ner-model",
+      "model_name": "ner-model",
+      "description": "A powerful model for ner",
+      "downloads": 50000,
+      "likes": 200,
+      "tags": [
+        "ner",
+        "transformer",
+        "nlp"
+      ],
+      "pipeline_tag": "text-generation",
+      "score": 88.0
+    },
+    {
+      "model_id": "testorg/ner-base",
+      "model_name": "ner-base",
+      "description": "Base model for ner tasks",
+      "downloads": 30000,
+      "likes": 150,
+      "tags": [
+        "ner",
+        "base-model"
+      ],
+      "pipeline_tag": "fill-mask",
+      "score": 75.0
+    }
+  ]
+}

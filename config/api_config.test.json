@@ -1,0 +1,365 @@
+{
+  "_comment": "AI史学工具 - 测试环境API配置文件",
+  "_version": "1.0.0",
+  "_created": "2026-03-28",
+  "_description": "测试环境专用配置，使用模拟数据和测试服务器，不影响生产环境",
+  
+  "environment": {
+    "name": "test",
+    "mode": "test",
+    "debug": true,
+    "_comment": "测试环境：启用调试模式"
+  },
+  
+  "api": {
+    "_comment": "API通用配置项（测试环境）",
+    
+    "base_settings": {
+      "timeout": 30,
+      "_timeout_comment": "测试环境超时时间（较短）",
+      "connect_timeout": 5,
+      "_connect_timeout_comment": "连接超时时间",
+      "read_timeout": 30,
+      "_read_timeout_comment": "读取超时时间",
+      "max_retries": 1,
+      "_max_retries_comment": "测试环境重试次数（较少）",
+      "retry_delay": 0.5,
+      "_retry_delay_comment": "重试延迟时间（较短）",
+      "retry_backoff_factor": 1.5,
+      "_retry_backoff_factor_comment": "指数退避因子（较小）"
+    },
+    
+    "headers": {
+      "User-Agent": "AI-History-Research-Tools/1.0-TEST",
+      "_User-Agent_comment": "测试环境用户代理标识",
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "Accept-Encoding": "gzip, deflate",
+      "X-Test-Environment": "true",
+      "_X_Test_Environment_comment": "测试环境标识"
+    },
+    
+    "rate_limiting": {
+      "enabled": false,
+      "_enabled_comment": "测试环境禁用速率限制",
+      "requests_per_minute": 1000,
+      "requests_per_second": 100,
+      "burst_size": 200
+    }
+  },
+  
+  "authentication": {
+    "_comment": "认证配置（测试环境）",
+    
+    "methods": {
+      "api_key": {
+        "enabled": true,
+        "env_var": "TEST_API_KEY",
+        "_env_var_comment": "测试专用API密钥环境变量"
+      },
+      "oauth": {
+        "enabled": true,
+        "_enabled_comment": "启用OAuth进行测试"
+      },
+      "bearer_token": {
+        "enabled": true,
+        "_enabled_comment": "启用Bearer Token进行测试"
+      }
+    },
+    
+    "security": {
+      "encrypt_api_keys": false,
+      "_encrypt_api_keys_comment": "测试环境不加密",
+      "secure_storage": false,
+      "_secure_storage_comment": "测试环境不使用安全存储",
+      "key_rotation_days": 30,
+      "_key_rotation_days_comment": "测试环境密钥轮换（较短）"
+    }
+  },
+  
+  "providers": {
+    "_comment": "各AI服务提供商的测试环境配置",
+    
+    "openai": {
+      "_comment": "OpenAI测试配置",
+      "enabled": true,
+      "base_url": "https://api.openai.com/v1",
+      "_base_url_comment": "使用官方API端点",
+      "default_model": "gpt-3.5-turbo",
+      "_default_model_comment": "测试环境使用较便宜的模型",
+      "available_models": [
+        "gpt-3.5-turbo",
+        "gpt-4"
+      ],
+      "api_key_env": "TEST_OPENAI_API_KEY",
+      "_api_key_env_comment": "测试专用API密钥",
+      "organization": "",
+      "stream": true,
+      "temperature_range": [0.0, 2.0],
+      "mock_responses": true,
+      "_mock_responses_comment": "启用模拟响应以节省成本"
+    },
+    
+    "dashscope": {
+      "_comment": "通义千问测试配置",
+      "enabled": true,
+      "base_url": "https://dashscope.aliyuncs.com/api/v1",
+      "_base_url_comment": "使用官方API端点",
+      "default_model": "qwen-turbo",
+      "_default_model_comment": "测试环境使用Turbo模型",
+      "available_models": [
+        "qwen-turbo"
+      ],
+      "api_key_env": "TEST_DASHSCOPE_API_KEY",
+      "_api_key_env_comment": "测试专用API密钥",
+      "stream": true,
+      "temperature_range": [0.0, 1.0],
+      "max_tokens": 2000,
+      "_max_tokens_comment": "测试环境限制token数",
+      "mock_responses": false,
+      "_mock_responses_comment": "不使用模拟响应"
+    },
+    
+    "minimax": {
+      "_comment": "MiniMax测试配置",
+      "enabled": true,
+      "base_url": "https://api.minimax.chat/v1",
+      "_base_url_comment": "使用官方API端点",
+      "default_model": "abab6-chat",
+      "available_models": [
+        "abab6-chat"
+      ],
+      "api_key_env": "TEST_MINIMAX_API_KEY",
+      "_api_key_env_comment": "测试专用API密钥",
+      "group_id_env": "TEST_MINIMAX_GROUP_ID",
+      "_group_id_env_comment": "测试Group ID",
+      "stream": true,
+      "temperature_range": [0.0, 1.0],
+      "mock_responses": false
+    },
+    
+    "anthropic": {
+      "_comment": "Anthropic测试配置",
+      "enabled": true,
+      "base_url": "https://api.anthropic.com/v1",
+      "_base_url_comment": "使用官方API端点",
+      "default_model": "claude-3-haiku-20240307",
+      "_default_model_comment": "测试环境使用Haiku模型",
+      "available_models": [
+        "claude-3-haiku-20240307"
+      ],
+      "api_key_env": "TEST_ANTHROPIC_API_KEY",
+      "_api_key_env_comment": "测试专用API密钥",
+      "stream": true,
+      "temperature_range": [0.0, 1.0],
+      "max_tokens": 1024,
+      "_max_tokens_comment": "测试环境限制token数",
+      "mock_responses": true,
+      "_mock_responses_comment": "启用模拟响应"
+    },
+    
+    "gemini": {
+      "_comment": "Gemini测试配置",
+      "enabled": true,
+      "base_url": "https://generativelanguage.googleapis.com/v1beta",
+      "_base_url_comment": "使用官方API端点",
+      "default_model": "gemini-pro",
+      "available_models": [
+        "gemini-pro"
+      ],
+      "api_key_env": "TEST_GEMINI_API_KEY",
+      "_api_key_env_comment": "测试专用API密钥",
+      "stream": true,
+      "temperature_range": [0.0, 1.0],
+      "mock_responses": false
+    },
+    
+    "deepseek": {
+      "_comment": "DeepSeek测试配置",
+      "enabled": true,
+      "base_url": "https://api.deepseek.com",
+      "_base_url_comment": "使用官方API端点",
+      "default_model": "deepseek-chat",
+      "available_models": [
+        "deepseek-chat"
+      ],
+      "api_key_env": "TEST_DEEPSEEK_API_KEY",
+      "_api_key_env_comment": "测试专用API密钥",
+      "stream": true,
+      "temperature_range": [0.0, 2.0],
+      "mock_responses": false
+    },
+    
+    "volcano": {
+      "_comment": "火山引擎测试配置",
+      "enabled": true,
+      "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "_base_url_comment": "使用官方API端点",
+      "default_model": "doubao-seed-1-8-251228",
+      "available_models": [
+        "doubao-seed-1-8-251228"
+      ],
+      "api_key_env": "TEST_VOLCANO_API_KEY",
+      "_api_key_env_comment": "测试专用API密钥",
+      "endpoint_id_env": "TEST_VOLCANO_ENDPOINT_ID",
+      "_endpoint_id_env_comment": "测试接入点ID",
+      "stream": true,
+      "temperature_range": [0.0, 1.0],
+      "mock_responses": false
+    },
+    
+    "ollama": {
+      "_comment": "Ollama本地测试配置",
+      "enabled": true,
+      "base_url": "http://localhost:11434",
+      "_base_url_comment": "本地测试服务器",
+      "default_model": "llama2",
+      "_default_model_comment": "使用本地模型",
+      "available_models": [
+        "llama2",
+        "qwen"
+      ],
+      "stream": true,
+      "temperature_range": [0.0, 2.0],
+      "keep_alive": "10m",
+      "_keep_alive_comment": "测试环境保持时间较长"
+    }
+  },
+  
+  "modules": {
+    "_comment": "各模块的测试配置",
+    
+    "academic_note_generator": {
+      "provider": "dashscope",
+      "_provider_comment": "测试环境使用通义千问",
+      "model": "qwen-turbo",
+      "temperature": 0.3,
+      "max_tokens": 1000,
+      "_max_tokens_comment": "测试环境限制token数",
+      "test_mode": true,
+      "_test_mode_comment": "测试模式：使用模拟数据"
+    },
+    
+    "academic_summarizer": {
+      "provider": "dashscope",
+      "model": "qwen-turbo",
+      "temperature": 0.3,
+      "max_tokens": 500,
+      "_max_tokens_comment": "测试环境限制token数",
+      "test_mode": true
+    },
+    
+    "virtual_persona_chatbot": {
+      "provider": "dashscope",
+      "model": "qwen-turbo",
+      "_model_comment": "测试环境使用Turbo模型",
+      "temperature": 0.7,
+      "max_tokens": 500,
+      "_max_tokens_comment": "测试环境限制token数",
+      "test_mode": true
+    },
+    
+    "style_transfer": {
+      "provider": "dashscope",
+      "model": "qwen-turbo",
+      "temperature": 0.3,
+      "max_tokens": 1000,
+      "_max_tokens_comment": "测试环境限制token数",
+      "test_mode": true
+    },
+    
+    "ner_processor": {
+      "provider": "dashscope",
+      "model": "qwen-turbo",
+      "temperature": 0.1,
+      "max_tokens": 500,
+      "_max_tokens_comment": "测试环境限制token数",
+      "test_mode": true
+    },
+    
+    "embedding_manager": {
+      "_comment": "嵌入模型测试配置",
+      "default_model": "ollama-local",
+      "_default_model_comment": "测试环境使用本地模型",
+      "available_models": [
+        "ollama-local"
+      ],
+      "dimension": 384,
+      "_dimension_comment": "测试环境使用较小维度",
+      "batch_size": 8,
+      "_batch_size_comment": "测试环境使用较小批次"
+    }
+  },
+  
+  "logging": {
+    "_comment": "日志配置（测试环境）",
+    
+    "level": "DEBUG",
+    "_level_comment": "测试环境使用DEBUG级别",
+    "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    "file": "logs/api.test.log",
+    "_file_comment": "测试环境日志文件",
+    "max_bytes": 5242880,
+    "_max_bytes_comment": "测试环境日志文件较小（5MB）",
+    "backup_count": 2,
+    "_backup_count_comment": "测试环境保留较少备份",
+    "log_api_requests": true,
+    "log_api_responses": true,
+    "_log_api_responses_comment": "测试环境记录所有响应"
+  },
+  
+  "monitoring": {
+    "_comment": "监控配置（测试环境）",
+    
+    "enabled": true,
+    "track_latency": true,
+    "track_errors": true,
+    "track_costs": false,
+    "_track_costs_comment": "测试环境不追踪成本",
+    "alert_thresholds": {
+      "latency_ms": 10000,
+      "_latency_ms_comment": "测试环境延迟阈值较高",
+      "error_rate": 0.10,
+      "_error_rate_comment": "测试环境错误率阈值较高"
+    }
+  },
+  
+  "test_data": {
+    "_comment": "测试数据配置",
+    
+    "use_mock_data": true,
+    "_use_mock_data_comment": "默认使用模拟数据",
+    "mock_delay": 0.1,
+    "_mock_delay_comment": "模拟响应延迟（秒）",
+    "include_sample_texts": true,
+    "_include_sample_texts_comment": "包含示例文本",
+    "sample_texts": {
+      "japanese_history": "明治維新は、日本の近代化において重要な転換点であった。福沢諭吉は文明開化の代表的な思想家である。",
+      "academic_abstract": "本研究探讨了近代日本政治思想的形成与发展，分析了国体论的历史演变。",
+      "citation": "丸山真男,《日本政治思想史研究》,東京大学出版会,1969年。"
+    },
+    
+    "test_scenarios": {
+      "academic_note_generation": {
+        "enabled": true,
+        "input_length": 500,
+        "expected_entities": 10
+      },
+      "summarization": {
+        "enabled": true,
+        "input_length": 1000,
+        "summary_length": 200
+      },
+      "ner_extraction": {
+        "enabled": true,
+        "expected_persons": 5,
+        "expected_locations": 3,
+        "expected_events": 2
+      },
+      "style_transfer": {
+        "enabled": true,
+        "input_length": 300
+      }
+    }
+  }
+}

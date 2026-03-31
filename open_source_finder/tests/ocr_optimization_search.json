@@ -1,0 +1,183 @@
+{
+  "search_keywords": [
+    "handwriting recognition",
+    "ocr",
+    "easyocr",
+    "tesseract",
+    "text recognition"
+  ],
+  "total_github_results": 6,
+  "total_huggingface_results": 6,
+  "github_repos": [
+    {
+      "name": "example-handwriting recognition-repo",
+      "full_name": "testuser/example-handwriting recognition",
+      "description": "An example repository for handwriting recognition with high stars",
+      "stars": 2500,
+      "forks": 300,
+      "language": "Python",
+      "url": "https://github.com/testuser/example-handwriting recognition",
+      "topics": [
+        "handwriting recognition",
+        "machine-learning",
+        "nlp"
+      ],
+      "score": 85.5
+    },
+    {
+      "name": "example-ocr-repo",
+      "full_name": "testuser/example-ocr",
+      "description": "An example repository for ocr with high stars",
+      "stars": 2500,
+      "forks": 300,
+      "language": "Python",
+      "url": "https://github.com/testuser/example-ocr",
+      "topics": [
+        "ocr",
+        "machine-learning",
+        "nlp"
+      ],
+      "score": 85.5
+    },
+    {
+      "name": "example-easyocr-repo",
+      "full_name": "testuser/example-easyocr",
+      "description": "An example repository for easyocr with high stars",
+      "stars": 2500,
+      "forks": 300,
+      "language": "Python",
+      "url": "https://github.com/testuser/example-easyocr",
+      "topics": [
+        "easyocr",
+        "machine-learning",
+        "nlp"
+      ],
+      "score": 85.5
+    },
+    {
+      "name": "awesome-handwriting recognition",
+      "full_name": "awesome/awesome-handwriting recognition",
+      "description": "Awesome list for handwriting recognition",
+      "stars": 1500,
+      "forks": 150,
+      "language": "Python",
+      "url": "https://github.com/awesome/awesome-handwriting recognition",
+      "topics": [
+        "handwriting recognition",
+        "awesome-list"
+      ],
+      "score": 72.0
+    },
+    {
+      "name": "awesome-ocr",
+      "full_name": "awesome/awesome-ocr",
+      "description": "Awesome list for ocr",
+      "stars": 1500,
+      "forks": 150,
+      "language": "Python",
+      "url": "https://github.com/awesome/awesome-ocr",
+      "topics": [
+        "ocr",
+        "awesome-list"
+      ],
+      "score": 72.0
+    },
+    {
+      "name": "awesome-easyocr",
+      "full_name": "awesome/awesome-easyocr",
+      "description": "Awesome list for easyocr",
+      "stars": 1500,
+      "forks": 150,
+      "language": "Python",
+      "url": "https://github.com/awesome/awesome-easyocr",
+      "topics": [
+        "easyocr",
+        "awesome-list"
+      ],
+      "score": 72.0
+    }
+  ],
+  "huggingface_models": [
+    {
+      "model_id": "testuser/handwriting recognition-model",
+      "model_name": "handwriting recognition-model",
+      "description": "A powerful model for handwriting recognition",
+      "downloads": 50000,
+      "likes": 200,
+      "tags": [
+        "handwriting recognition",
+        "transformer",
+        "nlp"
+      ],
+      "pipeline_tag": "text-generation",
+      "score": 88.0
+    },
+    {
+      "model_id": "testuser/ocr-model",
+      "model_name": "ocr-model",
+      "description": "A powerful model for ocr",
+      "downloads": 50000,
+      "likes": 200,
+      "tags": [
+        "ocr",
+        "transformer",
+        "nlp"
+      ],
+      "pipeline_tag": "text-generation",
+      "score": 88.0
+    },
+    {
+      "model_id": "testuser/easyocr-model",
+      "model_name": "easyocr-model",
+      "description": "A powerful model for easyocr",
+      "downloads": 50000,
+      "likes": 200,
+      "tags": [
+        "easyocr",
+        "transformer",
+        "nlp"
+      ],
+      "pipeline_tag": "text-generation",
+      "score": 88.0
+    },
+    {
+      "model_id": "testorg/handwriting recognition-base",
+      "model_name": "handwriting recognition-base",
+      "description": "Base model for handwriting recognition tasks",
+      "downloads": 30000,
+      "likes": 150,
+      "tags": [
+        "handwriting recognition",
+        "base-model"
+      ],
+      "pipeline_tag": "fill-mask",
+      "score": 75.0
+    },
+    {
+      "model_id": "testorg/ocr-base",
+      "model_name": "ocr-base",
+      "description": "Base model for ocr tasks",
+      "downloads": 30000,
+      "likes": 150,
+      "tags": [
+        "ocr",
+        "base-model"
+      ],
+      "pipeline_tag": "fill-mask",
+      "score": 75.0
+    },
+    {
+      "model_id": "testorg/easyocr-base",
+      "model_name": "easyocr-base",
+      "description": "Base model for easyocr tasks",
+      "downloads": 30000,
+      "likes": 150,
+      "tags": [
+        "easyocr",
+        "base-model"
+      ],
+      "pipeline_tag": "fill-mask",
+      "score": 75.0
+    }
+  ]
+}

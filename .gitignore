@@ -1,0 +1,147 @@
+# AI史学工具 - .gitignore 配置文件
+
+# ===========================================
+# 敏感信息 - 绝对不要上传
+# ===========================================
+secrets/
+secrets/**
+*.pem
+*.key
+.env
+.env.local
+.env.*.local
+
+# API密钥文件
+api_key.txt
+api_keys.txt
+**/api_key.txt
+**/api_keys.txt
+
+# ===========================================
+# Python 相关
+# ===========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+venv/
+ENV/
+env/
+.venv/
+TraeAI-*/
+
+# ===========================================
+# IDE 和编辑器
+# ===========================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# ===========================================
+# 日志和临时文件
+# ===========================================
+*.log
+logs/
+*.tmp
+*.temp
+.cache/
+
+# ===========================================
+# 数据文件
+# ===========================================
+data/output/
+data/logs/
+*.pdf
+*.docx
+*.doc
+*.xlsx
+*.xls
+*.pptx
+*.ppt
+
+# 但保留示例文件
+!data/input/test_pdf/
+!data/dictionaries/
+
+# ===========================================
+# 训练相关 - 不上传
+# ===========================================
+training_output*/
+training_workflow_output/
+data/training_data_final/
+data/training_output_v*/
+*.pth
+*.pt
+*.h5
+*.pkl
+*.pickle
+*.onnx
+
+# ===========================================
+# 归档目录
+# ===========================================
+archives/
+archive/
+
+# ===========================================
+# 系统文件
+# ===========================================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===========================================
+# 测试相关
+# ===========================================
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# ===========================================
+# Jupyter Notebook
+# ===========================================
+.ipynb_checkpoints/
+
+# ===========================================
+# MyPy
+# ===========================================
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ===========================================
+# 外部工具 - 不上传
+# ===========================================
+ndlocr-lite/
+ndl-search/
+external/ndlkotenocr-lite/
+external/ndlkotenocr-lite/ocrenv/
+external/ndlkotenocr-lite/ndlkotenocr-lite-gui/build/
+external/ndlkotenocr-lite/ndlkotenocr-lite-gui/src/
+external/ndlkotenocr-lite/ndlkotenocr-lite-gui/userconf.yaml
+external/ndlkotenocr-lite/ndlkotenocr-lite-gui/debug.log

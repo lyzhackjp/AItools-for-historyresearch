@@ -1,0 +1,60 @@
+{
+    "interface_name": "NDLoCR Interface",
+    "version": "1.0.0",
+    "description": "NDLoCR接口适配配置",
+    "adapter_config": {
+        "base_path": "external/ndlkotenocr-lite",
+        "model_dir": "src/model",
+        "config_dir": "src/config"
+    },
+    "required_components": {
+        "detection": {
+            "model_file": "rtmdet-s-1280x1280.onnx",
+            "config_file": "ndl.yaml",
+            "input_size": [1280, 1280],
+            "description": "文本检测模型"
+        },
+        "recognition": {
+            "model_file": "parseq-ndl-32x384-tiny-10.onnx",
+            "config_file": "NDLmoji.yaml",
+            "input_size": [32, 384],
+            "description": "文本识别模型"
+        }
+    },
+    "fallback_config": {
+        "use_mock": true,
+        "mock_detection_output": {
+            "boxes": [[0, 0, 100, 50]],
+            "scores": [0.9]
+        },
+        "mock_recognition_output": {
+            "text": "模拟识别结果",
+            "confidence": 0.95
+        }
+    },
+    "installation_guide": {
+        "source": "https://github.com/ndl-lab/ndlkotenocr-lite",
+        "steps": [
+            "git clone https://github.com/ndl-lab/ndlkotenocr-lite.git external/ndlkotenocr-lite",
+            "cd external/ndlkotenocr-lite",
+            "pip install -r requirements.txt",
+            "下载模型文件到 src/model/ 目录"
+        ],
+        "model_download": {
+            "detection": "https://github.com/ndl-lab/ndlkotenocr-lite/releases",
+            "recognition": "https://github.com/ndl-lab/ndlkotenocr-lite/releases"
+        }
+    },
+    "api_endpoints": {
+        "detect_text": {
+            "function": "detect_text_regions",
+            "module": "src.inference.detector",
+            "params": ["image", "conf_threshold"]
+        },
+        "recognize_text": {
+            "function": "recognize_text",
+            "module": "src.inference.recognizer",
+            "params": ["image", "model_path"]
+        }
+    }
+}

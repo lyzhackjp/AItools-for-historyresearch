@@ -1,0 +1,40 @@
+{
+    "ndlocr_path": "external/ndlkotenocr-lite",
+    "output_base": "output",
+    "temp_dir": "temp",
+    "cache_dir": "cache",
+    "log_dir": "logs",
+    "data_dir": "data",
+    "models_dir": "models",
+    "auto_install_dependencies": false,
+    "required_packages": [
+        "torch>=2.0.0",
+        "torchvision>=0.15.0",
+        "Pillow>=9.0.0",
+        "opencv-python>=4.5.0",
+        "numpy>=1.20.0",
+        "PyYAML>=6.0",
+        "tqdm>=4.64.0",
+        "fitz",
+        "lmdb>=1.4.0"
+    ],
+    "optional_packages": [
+        "mmdet>=3.0.0",
+        "mmcv>=2.0.0",
+        "pytorch-lightning>=2.0.0",
+        "onnx>=1.16.0",
+        "onnxruntime>=1.18.0"
+    ],
+    "training": {
+        "default_epochs": 10,
+        "default_batch_size": 4,
+        "default_learning_rate": 0.001,
+        "device": "auto"
+    },
+    "ocr": {
+        "detection_model": "rtmdet-s-1280x1280.onnx",
+        "recognition_model": "parseq-ndl-32x384-tiny-10.onnx",
+        "input_size": [1024, 1024],
+        "confidence_threshold": 0.5
+    }
+}
