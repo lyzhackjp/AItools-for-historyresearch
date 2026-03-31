@@ -79,6 +79,9 @@
 ### 12. 开源模块搜索器
 在GitHub和HuggingFace上搜索相关开源模块，评估质量和适用性。
 
+### 13. RAG检索增强生成
+完整的检索增强生成功能，支持文档加载、文本分块、向量检索和生成式问答。支持多种向量数据库（ChromaDB、FAISS），专为历史研究场景优化。
+
 ---
 
 ## 重要说明：NDL OCR模型
@@ -275,6 +278,58 @@ if result.status == 'success':
     print(f'下载成功: {result.file_path}')
 ```
 
+### 示例7：RAG检索增强生成
+
+```python
+from rag_module.core import RAGEngine, RAGConfig
+
+# 创建RAG引擎
+config = RAGConfig(
+    chunk_size=500,
+    chunk_overlap=50,
+    store_type='chroma'
+)
+engine = RAGEngine(config)
+
+# 加载文档
+engine.load_document('史料.pdf')
+
+# 检索相关内容
+results = engine.retrieve('明治维新的影响', top_k=5)
+for result in results:
+    print(f"相关度: {result.score:.2f}")
+    print(f"内容: {result.content[:100]}...")
+
+# 生成回答
+answer = engine.query('明治维新对日本社会产生了哪些影响？')
+print(answer)
+```
+
+### 示例8：RAG后端切换（Dify/Ragflow）
+
+```python
+from rag_module.adapters import RAGFactory, RAGBackend
+
+# 查看可用后端
+available = RAGFactory.get_available_backends()
+for backend, info in available.items():
+    print(f"{backend.value}: {info['message']}")
+
+# 切换到Ragflow（需先安装并启动Ragflow服务）
+adapter = RAGFactory.switch_backend(
+    RAGBackend.RAGFLOW,
+    config={
+        'api_key': 'your-api-key',
+        'base_url': 'http://localhost',
+        'dataset_name': 'history-research'
+    }
+)
+
+# 使用统一接口
+response = adapter.query('明治维新的历史意义是什么？')
+print(response.answer)
+```
+
 ---
 
 ## 项目结构
@@ -323,6 +378,27 @@ AItools-for-historyresearch/
 │   ├── src/
 │   │   └── open_source_finder.py  # GitHub/HF搜索
 │   └── README.md
+├── rag_module/                    # RAG检索增强生成模块
+│   ├── core/                      # 核心组件
+│   │   ├── rag_engine.py         # RAG主引擎
+│   │   ├── config.py             # 配置管理
+│   │   └── types.py              # 类型定义
+│   ├── loaders/                   # 文档加载器
+│   │   ├── pdf_loader.py         # PDF加载
+│   │   ├── markdown_loader.py    # Markdown加载
+│   │   └── text_loader.py        # 文本加载
+│   ├── splitters/                 # 文本分块器
+│   │   ├── recursive_splitter.py # 递归分块
+│   │   └── semantic_splitter.py  # 语义分块
+│   ├── stores/                    # 向量存储
+│   │   ├── chroma_store.py       # ChromaDB存储
+│   │   ├── faiss_store.py        # FAISS存储
+│   │   └── memory_store.py       # 内存存储
+│   ├── retrievers/                # 检索器
+│   │   ├── vector_retriever.py   # 向量检索
+│   │   └── hybrid_retriever.py   # 混合检索
+│   ├── tests/                     # 测试
+│   └── docs/                      # 文档
 ├── ndl-search/                   # NDL搜索模块
 │   ├── core/
 │   │   └── dl_searcher.py       # NDL搜索器核心
@@ -339,7 +415,9 @@ AItools-for-historyresearch/
 │   └── dictionaries/
 │       ├── historical_entities.json  # 历史实体词典
 │       └── historical_entities_manager.py
-├── external/                     # 外部工具（需单独下载）
+├── external/                     # 外部工具（不纳入Git，需单独下载）
+│   ├── dify/                     # Dify LLM应用平台（可选）
+│   ├── ragflow/                  # Ragflow RAG引擎（可选）
 │   ├── ndlocr-lite/             # NDL OCR-Lite模型
 │   └── ndlkotenocr-lite/        # NDL古典籍OCR-Lite模型
 ├── docs/                         # 文档目录
@@ -480,6 +558,8 @@ AItools-for-historyresearch/
 - **学习模块文档**：[learning_module/README.md](learning_module/README.md)
 - **开源搜索器文档**：[open_source_finder/README.md](open_source_finder/README.md)
 - **NDL搜索模块文档**：[ndl-search/docs/README.md](ndl-search/docs/README.md)
+- **RAG模块文档**：[rag_module/docs/RAG_MODULE_GUIDE.md](rag_module/docs/RAG_MODULE_GUIDE.md)
+- **RAG工具选型报告**：[rag_module/docs/TOOL_SELECTION_REPORT.md](rag_module/docs/TOOL_SELECTION_REPORT.md)
 
 ---
 

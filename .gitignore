@@ -137,6 +137,11 @@ dmypy.json
 # ===========================================
 # 外部工具 - 不上传
 # ===========================================
+# external目录下的所有内容都不上传，但保留README.md
+external/*
+!external/README.md
+
+# 具体排除项（兼容旧配置）
 ndlocr-lite/
 ndl-search/
 external/ndlkotenocr-lite/
@@ -145,3 +150,7 @@ external/ndlkotenocr-lite/ndlkotenocr-lite-gui/build/
 external/ndlkotenocr-lite/ndlkotenocr-lite-gui/src/
 external/ndlkotenocr-lite/ndlkotenocr-lite-gui/userconf.yaml
 external/ndlkotenocr-lite/ndlkotenocr-lite-gui/debug.log
+
+# Dify和Ragflow完整排除
+external/dify/
+external/ragflow/

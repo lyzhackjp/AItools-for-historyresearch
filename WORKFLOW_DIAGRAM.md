@@ -1440,6 +1440,14 @@ graph TB
 | 19.3 | 归档执行流程 | 项目维护 | 高 |
 | 19.4 | 项目清理验证 | 项目维护 | 高 |
 | 19.5 | 归档恢复流程 | 项目维护 | 中 |
+| 20.1 | RAG模块完整工作流 | rag_module | 高 |
+| 20.2 | RAG引擎初始化流程 | rag_module | 高 |
+| 20.3 | 文档加载与处理流程 | rag_module | 高 |
+| 20.4 | 文本分块处理流程 | rag_module | 高 |
+| 20.5 | 向量存储流程 | rag_module | 高 |
+| 20.6 | 检索流程 | rag_module | 高 |
+| 20.7 | RAG模块系统架构 | rag_module | 高 |
+| 20.8 | RAG与历史研究集成 | rag_module | 高 |
 
 ---
 
@@ -2426,7 +2434,413 @@ flowchart TD
 
 ---
 
-**文档版本**：2.3.0  
+## 第二十部分：RAG检索增强生成模块流程
+
+> **详细文档**：[rag_module/docs/RAG_MODULE_GUIDE.md](rag_module/docs/RAG_MODULE_GUIDE.md)
+
+本部分展示RAG模块的核心调用流程，详细API说明请参阅独立文档。
+
+### 20.1 RAG模块完整工作流
+
+```mermaid
+flowchart TD
+    A[输入文档/查询] --> B[RAGEngine]
+    B --> C{操作类型}
+    
+    C -->|文档加载| D[DocumentLoader]
+    C -->|查询检索| E[Retriever]
+    C -->|生成回答| F[生成模块]
+    
+    D --> G{文档格式}
+    G -->|PDF| H[PDFLoader]
+    G -->|Markdown| I[MarkdownLoader]
+    G -->|TXT| J[TextLoader]
+    
+    H --> K[提取文本内容]
+    I --> K
+    J --> K
+    
+    K --> L[TextSplitter]
+    L --> M{分块策略}
+    M -->|递归| N[RecursiveSplitter]
+    M -->|语义| O[SemanticSplitter]
+    
+    N --> P[生成文本块]
+    O --> P
+    
+    P --> Q[VectorStore]
+    Q --> R{存储类型}
+    R -->|ChromaDB| S[ChromaStore]
+    R -->|FAISS| T[FAISSStore]
+    R -->|内存| U[MemoryStore]
+    
+    S --> V[存储向量]
+    T --> V
+    U --> V
+    
+    E --> W[VectorRetriever]
+    E --> X[HybridRetriever]
+    
+    W --> Y[相似度检索]
+    X --> Z[混合检索]
+    
+    Y --> AA[返回相关文档块]
+    Z --> AA
+    
+    AA --> F
+    F --> AB[调用LLM生成]
+    AB --> AC[输出回答]
+```
+
+### 20.2 RAG引擎初始化流程
+
+```mermaid
+flowchart TD
+    A[创建RAGEngine] --> B[加载RAGConfig]
+    B --> C[初始化EmbeddingManager]
+    C --> D{选择嵌入模型}
+    D -->|BGE-M3| E[bge-m3模型]
+    D -->|Qwen3| F[qwen3-embedding]
+    D -->|OpenAI| G[text-embedding-3]
+    
+    E --> H[初始化VectorStore]
+    F --> H
+    G --> H
+    
+    H --> I{存储类型}
+    I -->|ChromaDB| J[ChromaStore]
+    I -->|FAISS| K[FAISSStore]
+    I -->|内存| L[MemoryStore]
+    
+    J --> M[初始化Retriever]
+    K --> M
+    L --> M
+    
+    M --> N[RAG引擎就绪]
+```
+
+### 20.3 文档加载与处理流程
+
+```mermaid
+flowchart TD
+    A[输入文档路径] --> B[DocumentLoader]
+    B --> C{检测文件类型}
+    
+    C -->|.pdf| D[PDFLoader]
+    C -->|.md| E[MarkdownLoader]
+    C -->|.txt| F[TextLoader]
+    
+    D --> G[PyMuPDF解析]
+    E --> H[Markdown解析]
+    F --> I[文本读取]
+    
+    G --> J[提取文本内容]
+    H --> J
+    I --> J
+    
+    J --> K[提取元数据]
+    K --> L[构建Document对象]
+    L --> M[返回文档列表]
+```
+
+### 20.4 文本分块处理流程
+
+```mermaid
+flowchart TD
+    A[输入Document] --> B[TextSplitter]
+    B --> C{选择分块策略}
+    
+    C -->|递归分块| D[RecursiveSplitter]
+    C -->|语义分块| E[SemanticSplitter]
+    
+    D --> F[按段落分割]
+    F --> G{块大小合适?}
+    G -->|否| H[继续分割]
+    H --> G
+    G -->|是| I[生成Chunk列表]
+    
+    E --> J[计算语义相似度]
+    J --> K[识别语义边界]
+    K --> L[按语义分割]
+    L --> I
+    
+    I --> M[添加块元数据]
+    M --> N[返回Chunk列表]
+```
+
+### 20.5 向量存储流程
+
+```mermaid
+flowchart TD
+    A[输入Chunk列表] --> B[VectorStore]
+    B --> C[生成嵌入向量]
+    C --> D[EmbeddingManager.embed]
+    
+    D --> E{存储后端}
+    E -->|ChromaDB| F[ChromaStore.add]
+    E -->|FAISS| G[FAISSStore.add]
+    E -->|内存| H[MemoryStore.add]
+    
+    F --> I[持久化到磁盘]
+    G --> J[构建FAISS索引]
+    H --> K[内存字典存储]
+    
+    I --> L[返回存储确认]
+    J --> L
+    K --> L
+```
+
+### 20.6 检索流程
+
+```mermaid
+flowchart TD
+    A[输入查询] --> B[Retriever]
+    B --> C[生成查询向量]
+    C --> D{检索策略}
+    
+    D -->|向量检索| E[VectorRetriever]
+    D -->|混合检索| F[HybridRetriever]
+    
+    E --> G[计算相似度]
+    G --> H[排序取Top-K]
+    H --> I[返回QueryResult]
+    
+    F --> J[向量检索]
+    F --> K[关键词检索]
+    J --> L[合并结果]
+    K --> L
+    L --> M[重排序]
+    M --> I
+```
+
+### 20.7 RAG模块在系统架构中的位置
+
+```mermaid
+graph TB
+    subgraph 用户层
+        A[用户查询]
+    end
+
+    subgraph RAG模块
+        B[RAGEngine]
+        C[DocumentLoader]
+        D[TextSplitter]
+        E[VectorStore]
+        F[Retriever]
+    end
+
+    subgraph 嵌入层
+        G[EmbeddingManager]
+        H[BGE-M3]
+        I[Qwen3-Embed]
+    end
+
+    subgraph 存储层
+        J[ChromaDB]
+        K[FAISS]
+        L[内存存储]
+    end
+
+    subgraph LLM层
+        M[LLMClient]
+        N[通义千问]
+        O[OpenAI]
+    end
+
+    A --> B
+    B --> C
+    B --> D
+    B --> E
+    B --> F
+    
+    C --> D
+    D --> E
+    E --> F
+    
+    E --> G
+    G --> H
+    G --> I
+    
+    E --> J
+    E --> K
+    E --> L
+    
+    F --> M
+    M --> N
+    M --> O
+
+    style B fill:#f9f,stroke:#333,stroke-width:2px
+    style G fill:#bbf,stroke:#333,stroke-width:1px
+    style M fill:#bfb,stroke:#333,stroke-width:1px
+```
+
+### 20.8 RAG与历史研究集成流程
+
+```mermaid
+flowchart TD
+    A[历史研究场景] --> B{应用类型}
+    
+    B -->|史料检索| C[史料知识库构建]
+    B -->|学术问答| D[文献问答系统]
+    B -->|研究辅助| E[研究笔记生成]
+    
+    C --> F[加载史料PDF]
+    F --> G[OCR处理]
+    G --> H[文本分块]
+    H --> I[向量化存储]
+    
+    D --> J[查询问题]
+    J --> K[语义检索]
+    K --> L[获取相关史料]
+    L --> M[LLM生成回答]
+    
+    E --> N[研究笔记模板]
+    N --> O[RAG检索相关内容]
+    O --> P[生成结构化笔记]
+    
+    I --> Q[知识库就绪]
+    M --> R[回答输出]
+    P --> S[笔记输出]
+```
+
+### 20.9 RAG后端切换流程
+
+```mermaid
+flowchart TD
+    A[应用启动] --> B{检查配置}
+    B --> C[读取external_config.json]
+    C --> D{选择RAG后端}
+    
+    D -->|built_in| E[自研RAG引擎]
+    D -->|dify| F[Dify适配器]
+    D -->|ragflow| G[Ragflow适配器]
+    D -->|auto| H[自动选择]
+    
+    E --> I[初始化RAGEngine]
+    F --> J{Dify可用?}
+    G --> K{Ragflow可用?}
+    
+    J -->|是| L[初始化DifyRAGAdapter]
+    J -->|否| M[回退到自研RAG]
+    
+    K -->|是| N[初始化RagflowRAGAdapter]
+    K -->|否| O[回退到自研RAG]
+    
+    H --> P[检查可用后端]
+    P --> Q{优先级选择}
+    Q -->|built_in可用| E
+    Q -->|ragflow可用| G
+    Q -->|dify可用| F
+    
+    I --> R[适配器就绪]
+    L --> R
+    N --> R
+    M --> I
+    O --> I
+    
+    R --> S[统一接口调用]
+    S --> T[load_document]
+    S --> U[retrieve]
+    S --> V[query]
+    
+    style D fill:#f9f,stroke:#333,stroke-width:2px
+    style R fill:#bfb,stroke:#333,stroke-width:2px
+    style S fill:#bbf,stroke:#333,stroke-width:1px
+```
+
+### 20.10 RAG适配器架构图
+
+```mermaid
+classDiagram
+    class BaseRAGAdapter {
+        <<abstract>>
+        +backend_type: RAGBackend
+        +is_initialized: bool
+        +initialize() bool
+        +health_check() Dict
+        +load_document(file_path, metadata) bool
+        +retrieve(query, top_k, threshold) List~RAGQueryResult~
+        +query(question, top_k) RAGResponse
+        +delete_document(doc_id) bool
+        +clear_index() bool
+        +get_stats() RAGIndexStats
+    }
+    
+    class BuiltInRAGAdapter {
+        -_engine: RAGEngine
+        -_rag_config: RAGConfig
+        +backend_type: BUILT_IN
+    }
+    
+    class DifyRAGAdapter {
+        -_api_key: str
+        -_base_url: str
+        -_dataset_id: str
+        +backend_type: DIFY
+    }
+    
+    class RagflowRAGAdapter {
+        -_api_key: str
+        -_base_url: str
+        -_dataset: DataSet
+        +backend_type: RAGFLOW
+    }
+    
+    class RAGFactory {
+        +_adapters: Dict
+        +_current_adapter: BaseRAGAdapter
+        +create_adapter(backend, config)$ BaseRAGAdapter
+        +switch_backend(backend, config)$ BaseRAGAdapter
+        +get_available_backends()$ Dict
+        +auto_select_backend(prefer)$ BaseRAGAdapter
+    }
+    
+    BaseRAGAdapter <|-- BuiltInRAGAdapter
+    BaseRAGAdapter <|-- DifyRAGAdapter
+    BaseRAGAdapter <|-- RagflowRAGAdapter
+    RAGFactory --> BaseRAGAdapter : creates
+```
+
+### 20.11 External目录管理流程
+
+```mermaid
+flowchart TD
+    A[克隆项目] --> B{检查external目录}
+    B --> C[目录存在但为空]
+    B --> D[目录不存在]
+    
+    C --> E[阅读external/README.md]
+    D --> E
+    
+    E --> F{需要哪些外部工具?}
+    
+    F -->|需要Dify| G[git clone Dify]
+    F -->|需要Ragflow| H[git clone Ragflow]
+    F -->|需要NDLoCR| I[下载OCR模型]
+    
+    G --> J[配置Dify]
+    H --> K[配置Ragflow]
+    I --> L[放置模型文件]
+    
+    J --> M[更新.env文件]
+    K --> M
+    L --> N[更新external_config.json]
+    M --> N
+    
+    N --> O[外部工具就绪]
+    
+    O --> P{Git提交?}
+    P --> Q[external目录被.gitignore排除]
+    Q --> R[仅README.md可提交]
+    
+    style F fill:#f9f,stroke:#333,stroke-width:2px
+    style O fill:#bfb,stroke:#333,stroke-width:2px
+    style Q fill:#bbf,stroke:#333,stroke-width:1px
+```
+
+---
+
+**文档版本**：2.4.0  
 **创建日期**：2026年3月28日  
 **更新日期**：2026年3月31日  
 **用途**：模块开发与测试工作的重要参考依据  
@@ -2441,3 +2855,9 @@ flowchart TD
 - 新增 通用板式分析工作流（第十八部分）
 - 添加版面分析、内容分类、日期解析详细流程图
 - **新增 项目归档与清理工作流程（第十九部分）**
+- **新增 RAG检索增强生成模块流程（第二十部分）**
+- 添加RAG引擎初始化、文档加载、文本分块、向量存储、检索等详细流程图
+- **新增 RAG后端切换流程（20.9节）**
+- **新增 RAG适配器架构图（20.10节）**
+- **新增 External目录管理流程（20.11节）**
+- **更新external目录说明（不纳入Git版本控制）**

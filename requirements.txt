@@ -39,3 +39,12 @@ onnxruntime>=1.18.0
 # 可选: MMDetection (需要CUDA)
 # mmdet>=3.0.0
 # mmcv>=2.0.0
+
+# RAG模块依赖
+chromadb>=0.4.0
+pdfplumber>=0.10.0
+sentence-transformers>=2.2.0
+
+# 可选: FAISS向量检索
+# faiss-cpu>=1.7.0
+# faiss-gpu>=1.7.0

@@ -3557,21 +3557,467 @@ result = adapter.recognize("文本内容...")
 
 ---
 
+## 第十八部分：RAG检索增强生成模块
+
+### 18.1 模块概述
+
+RAG（Retrieval-Augmented Generation）模块为项目提供完整的检索增强生成功能，支持文档加载、文本分块、向量检索和生成式问答，专为历史研究场景优化。
+
+**核心组件**：
+
+| 组件 | 文件路径 | 功能说明 |
+|------|----------|----------|
+| RAG引擎 | `rag_module/core/rag_engine.py` | RAG主引擎，协调各组件工作 |
+| 配置管理 | `rag_module/core/config.py` | RAGConfig配置类及预设配置 |
+| 类型定义 | `rag_module/core/types.py` | Document、Chunk、QueryResult等核心类型 |
+| 文档加载器 | `rag_module/loaders/` | PDF、Markdown、TXT文档加载 |
+| 文本分块器 | `rag_module/splitters/` | 递归分块、语义分块策略 |
+| 向量存储 | `rag_module/stores/` | ChromaDB、FAISS、内存存储 |
+| 检索器 | `rag_module/retrievers/` | 向量检索、混合检索 |
+
+### 18.2 快速开始
+
+#### 18.2.1 基本使用
+
+```python
+from rag_module import RAGEngine, RAGConfig
+
+# 创建RAG引擎（使用默认配置）
+config = RAGConfig.default()
+engine = RAGEngine(config)
+
+# 添加文档
+engine.add_documents(['document.pdf', 'notes.md'])
+
+# 或直接添加文本
+engine.add_text('明治维新是日本历史上的重要改革运动，发生在1868年。')
+
+# 执行查询
+result = engine.query('明治维新是什么？')
+print(result.answer)
+print(f"置信度: {result.confidence:.2f}")
+print(f"来源数量: {len(result.source_chunks)}")
+```
+
+#### 18.2.2 预设配置
+
+```python
+# 日本史研究专用配置
+config = RAGConfig.for_japanese_history()
+
+# 学术论文专用配置
+config = RAGConfig.for_academic_papers()
+
+# 轻量级配置（测试用）
+config = RAGConfig.lightweight()
+```
+
+### 18.3 配置参数详解
+
+#### 18.3.1 RAGConfig参数
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| embedding_model | str | 'bge-m3' | 嵌入模型名称 |
+| embedding_dimension | int | 1024 | 向量维度 |
+| vector_store | VectorStoreType | CHROMA | 向量存储类型 |
+| vector_store_path | str | './data/rag_vectors' | 向量存储路径 |
+| chunk_size | int | 512 | 文本块大小 |
+| chunk_overlap | int | 50 | 块重叠字符数 |
+| retrieval_top_k | int | 5 | 检索返回数量 |
+| retrieval_threshold | float | 0.0 | 相似度阈值 |
+| llm_provider | str | 'qwen' | LLM服务商 |
+| llm_model | str | 'qwen-turbo' | LLM模型名称 |
+| enable_reranking | bool | False | 是否启用重排序 |
+
+#### 18.3.2 预设配置对比
+
+| 配置 | 块大小 | 重叠 | 检索数量 | 重排序 | 适用场景 |
+|------|--------|------|----------|--------|----------|
+| default | 512 | 50 | 5 | 否 | 通用场景 |
+| for_japanese_history | 768 | 100 | 7 | 是 | 日本史研究 |
+| for_academic_papers | 1024 | 150 | 10 | 是 | 学术论文 |
+| lightweight | 256 | 30 | 3 | 否 | 测试/原型 |
+
+### 18.4 文档加载器
+
+#### 18.4.1 PDF加载器
+
+```python
+from rag_module.loaders import PDFLoader
+
+loader = PDFLoader({
+    'extract_tables': True,      # 提取表格
+    'pdf_use_ocr': False,        # OCR识别
+    'pdf_ocr_language': 'jpn+eng'
+})
+
+documents = loader.load('document.pdf')
+for doc in documents:
+    print(f"页码: {doc.metadata['page_number']}")
+    print(f"内容: {doc.content[:100]}...")
+```
+
+#### 18.4.2 Markdown加载器
+
+```python
+from rag_module.loaders import MarkdownLoader
+
+loader = MarkdownLoader({
+    'markdown_extract_links': True,
+    'markdown_extract_code_blocks': True
+})
+
+documents = loader.load('notes.md')
+for doc in documents:
+    print(f"章节: {doc.metadata['section_title']}")
+```
+
+#### 18.4.3 批量加载
+
+```python
+from rag_module.loaders import DocumentLoaderManager
+
+manager = DocumentLoaderManager()
+
+# 加载多个文件
+documents = manager.load_batch(['doc1.pdf', 'doc2.md', 'doc3.txt'])
+
+# 加载目录
+documents = manager.load_directory('./documents', recursive=True)
+```
+
+### 18.5 文本分块策略
+
+#### 18.5.1 递归分块
+
+```python
+from rag_module.splitters import RecursiveSplitter
+
+splitter = RecursiveSplitter(
+    chunk_size=512,
+    chunk_overlap=50,
+    language='japanese'  # 支持中日文优化
+)
+
+chunks = splitter.split(document)
+```
+
+#### 18.5.2 语义分块
+
+```python
+from rag_module.splitters import SemanticSplitter
+
+splitter = SemanticSplitter(
+    chunk_size=512,
+    similarity_threshold=0.7
+)
+
+chunks = splitter.split(document)
+```
+
+### 18.6 向量存储
+
+#### 18.6.1 ChromaDB存储（默认）
+
+```python
+from rag_module.stores import ChromaStore
+
+store = ChromaStore(
+    store_path='./data/vectors',
+    embedding_dimension=1024
+)
+
+# 添加向量
+store.add_vectors(vectors, chunks)
+
+# 搜索
+results = store.search(query_vector, top_k=5)
+```
+
+#### 18.6.2 FAISS存储（高性能）
+
+```python
+from rag_module.stores import FAISSStore
+
+store = FAISSStore(
+    store_path='./data/faiss',
+    embedding_dimension=1024,
+    index_type='IndexFlatIP'
+)
+```
+
+#### 18.6.3 内存存储（测试）
+
+```python
+from rag_module.stores import MemoryStore
+
+store = MemoryStore(embedding_dimension=384)
+```
+
+### 18.7 检索策略
+
+#### 18.7.1 向量检索
+
+```python
+from rag_module.retrievers import VectorRetriever
+
+retriever = VectorRetriever(
+    vector_store=store,
+    embedder=embedder,
+    top_k=5
+)
+
+result = retriever.retrieve('明治维新的背景是什么？')
+```
+
+#### 18.7.2 混合检索
+
+```python
+from rag_module.retrievers import HybridRetriever
+
+retriever = HybridRetriever(
+    vector_store=store,
+    embedder=embedder,
+    alpha=0.5  # 向量检索权重，1-alpha为关键词权重
+)
+
+result = retriever.retrieve('伊藤博文的历史贡献')
+```
+
+### 18.8 高级用法
+
+#### 18.8.1 索引管理
+
+```python
+# 保存索引
+engine.save_index('./saved_index')
+
+# 加载索引
+engine.load_index('./saved_index')
+
+# 清空索引
+engine.clear_index()
+
+# 删除特定文档
+engine.delete_document('doc_id')
+
+# 获取统计信息
+stats = engine.get_stats()
+print(f"总文档数: {stats.total_documents}")
+print(f"总块数: {stats.total_chunks}")
+```
+
+#### 18.8.2 带过滤的检索
+
+```python
+result = engine._retriever_manager._retriever.retrieve_with_filter(
+    query='明治维新',
+    filter_dict={'topic': '日本史'},
+    top_k=10
+)
+```
+
+#### 18.8.3 自定义提示词
+
+```python
+class CustomRAGEngine(RAGEngine):
+    def _build_prompt(self, question, context):
+        return f"""你是日本史研究专家。请根据以下资料回答问题。
+
+资料：
+{context}
+
+问题：{question}
+
+请提供专业、准确的回答，并引用相关史料。"""
+```
+
+### 18.9 与项目集成
+
+#### 18.9.1 与LLM客户端集成
+
+```python
+from modules.llm_client import LLMClient
+
+llm = LLMClient({'provider': 'qwen'})
+
+config = RAGConfig(
+    llm_provider='qwen',
+    llm_model='qwen-turbo'
+)
+
+engine = RAGEngine(config)
+```
+
+#### 18.9.2 与嵌入管理器集成
+
+```python
+from modules.embedding_manager import EmbeddingManager
+
+embedder = EmbeddingManager()
+embedder.load_embedding_model('bge-m3')
+
+config = RAGConfig(embedding_model='bge-m3')
+engine = RAGEngine(config)
+```
+
+### 18.10 性能优化建议
+
+| 场景 | 优化策略 |
+|------|----------|
+| 大规模数据 | 使用FAISS存储，启用IVF索引 |
+| 精确检索 | 增大chunk_size，启用重排序 |
+| 快速响应 | 使用内存存储，减少top_k |
+| 多语言 | 使用BGE-M3嵌入模型 |
+
+### 18.11 外部RAG工具
+
+项目支持集成外部RAG工具作为备选方案：
+
+| 工具 | 路径 | 说明 |
+|------|------|------|
+| Dify | `external/dify/` | LLM应用开发平台，内置RAG功能 |
+| Ragflow | `external/ragflow/` | 开源RAG引擎，支持深度文档理解 |
+
+**重要说明**：`external/`目录下的内容不纳入Git版本控制，用户需自行下载安装。详见 [external/README.md](external/README.md)。
+
+### 18.12 RAG适配器与后端切换
+
+项目提供统一的RAG接口适配器，支持在自研RAG、Dify、Ragflow之间无缝切换。
+
+#### 18.12.1 适配器架构
+
+```python
+from rag_module.adapters import RAGFactory, RAGBackend
+
+# 查看可用后端
+available = RAGFactory.get_available_backends()
+for backend, info in available.items():
+    print(f"{backend.value}: 可用={info['available']}, 消息={info['message']}")
+```
+
+#### 18.12.2 切换RAG后端
+
+```python
+from rag_module.adapters import RAGFactory, RAGBackend
+
+# 切换到Dify
+dify_adapter = RAGFactory.switch_backend(
+    RAGBackend.DIFY,
+    config={
+        'api_key': 'your-dify-api-key',
+        'base_url': 'http://localhost/v1',
+        'dataset_id': 'your-dataset-id'
+    }
+)
+
+# 切换到Ragflow
+ragflow_adapter = RAGFactory.switch_backend(
+    RAGBackend.RAGFLOW,
+    config={
+        'api_key': 'your-ragflow-api-key',
+        'base_url': 'http://localhost',
+        'dataset_name': 'my-dataset'
+    }
+)
+
+# 切换回自研RAG
+builtin_adapter = RAGFactory.switch_backend(
+    RAGBackend.BUILT_IN,
+    config={
+        'vector_store': 'chroma',
+        'embedding_model': 'bge-m3'
+    }
+)
+```
+
+#### 18.12.3 自动选择后端
+
+```python
+from rag_module.adapters import RAGFactory, RAGBackend
+
+# 自动选择第一个可用的后端（优先级：built_in > ragflow > dify）
+adapter = RAGFactory.auto_select_backend()
+
+# 指定首选后端
+adapter = RAGFactory.auto_select_backend(prefer=RAGBackend.RAGFLOW)
+```
+
+#### 18.12.4 统一接口使用
+
+所有适配器提供统一的接口：
+
+```python
+# 加载文档
+adapter.load_document('史料.pdf')
+
+# 检索相关内容
+results = adapter.retrieve('明治维新的影响', top_k=5)
+for r in results:
+    print(f"相关度: {r.score:.2f}")
+    print(f"内容: {r.content[:100]}...")
+
+# 执行RAG查询
+response = adapter.query('明治维新对日本社会产生了哪些影响？')
+print(f"回答: {response.answer}")
+print(f"来源数量: {len(response.sources)}")
+
+# 检查健康状态
+health = adapter.health_check()
+print(f"状态: {health['status']}")
+```
+
+#### 18.12.5 适配器配置
+
+外部工具配置存放在 `config/external_config.json`：
+
+```json
+{
+    "dify": {
+        "enabled": false,
+        "base_url": "http://localhost/v1",
+        "api_key_env": "DIFY_API_KEY",
+        "dataset_id": "",
+        "timeout": 60
+    },
+    "ragflow": {
+        "enabled": false,
+        "base_url": "http://localhost",
+        "api_key_env": "RAGFLOW_API_KEY",
+        "dataset_name": "history-research",
+        "timeout": 60
+    }
+}
+```
+
+API密钥应配置在 `.env` 文件中：
+
+```env
+DIFY_API_KEY=your-dify-api-key
+RAGFLOW_API_KEY=your-ragflow-api-key
+```
+
+---
+
 ## 文档结束
 
 本技术指南涵盖了AItools-for-historyresearch工作区的所有核心功能和使用方法。如有任何疑问，请查阅相关模块的源代码或提交Issue。
 
-**文档版本**：2.3.0  
+**文档版本**：2.4.0  
 **更新日期**：2026年3月31日
 
 **本次更新内容**：
-- 新增 第十七部分：统一LLM API集成框架
-- 添加双模式执行机制说明
-- 添加各模块LLM API提示词模板
-- 添加API密钥安全管理机制
-- 添加命令行和批量处理使用方法
+- 新增 第十八部分：RAG检索增强生成模块
+- 添加RAG引擎核心功能说明
+- 添加文档加载器、分块器、向量存储、检索器详细文档
+- 添加外部RAG工具（Dify、Ragflow）集成说明
+- **新增 RAG适配器与后端切换机制（18.12节）**
+- **添加统一RAG接口适配器文档**
+- **更新external目录说明（不纳入Git版本控制）**
 
 **历史更新内容**：
+- 新增 第十七部分：统一LLM API集成框架
 - 新增 第十五部分：古典籍OCR训练数据准备工作流
 - 新增 第十六部分：通用板式分析模块
 - 添加工作流使用方法和技术参数说明
