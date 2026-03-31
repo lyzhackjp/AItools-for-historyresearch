@@ -2800,20 +2800,782 @@ class CustomDocumentTypeDetector(DocumentTypeDetector):
 
 ---
 
+## 第十七部分：统一LLM API集成框架
+
+### 17.1 框架概述
+
+统一LLM API集成框架为所有模块提供标准化的LLM API调用能力，支持API模式和脚本/正则表达式模式的双模式运行。用户可根据需求自由切换执行模式，实现灵活的任务处理。
+
+**核心组件**：
+
+| 组件 | 文件路径 | 功能说明 |
+|------|----------|----------|
+| 安全API密钥管理器 | `modules/secure_api_key_manager.py` | 安全管理API密钥，确保密钥仅存储在secrets文件夹 |
+| 统一任务执行器 | `modules/unified_task_executor.py` | 提供统一任务执行接口，支持双模式切换 |
+| 模块适配器 | `modules/module_adapters.py` | 为现有模块提供统一的适配器接口 |
+| 任务管理器 | `modules/task_manager.py` | 用户友好的任务管理入口 |
+| 命令行工具 | `modules/task_cli.py` | 命令行任务执行工具 |
+
+### 17.2 双模式执行机制
+
+#### 17.2.1 API模式
+
+API模式通过调用大语言模型API执行任务，适用于需要语义理解、上下文分析的复杂任务。
+
+**特点**：
+- 支持多种LLM服务商（通义千问、智谱AI、DeepSeek、OpenAI等）
+- 自动从`secrets/api_keys.txt`读取API密钥
+- 支持自定义提示词模板
+- 结果缓存机制
+
+#### 17.2.2 脚本模式
+
+脚本模式使用传统脚本/正则表达式执行任务，适用于规则明确、处理速度要求高的任务。
+
+**特点**：
+- 无需API调用，本地执行
+- 处理速度快
+- 支持正则表达式模式匹配
+- 词典匹配功能
+
+#### 17.2.3 模式切换
+
+```python
+from modules.task_manager import TaskManager
+
+# 创建任务管理器（默认API模式）
+manager = TaskManager(mode='api', provider='qwen')
+
+# 切换到脚本模式
+manager.set_mode('script')
+
+# 切换回API模式
+manager.set_mode('api')
+
+# 查看当前模式
+print(manager.mode)  # 'api' 或 'script'
+```
+
+### 17.3 API密钥安全管理
+
+#### 17.3.1 密钥存储位置
+
+API密钥必须存储在`secrets/api_keys.txt`文件中，格式如下：
+
+```
+# API密钥配置文件
+# 格式: 服务商名称=API密钥
+
+qwen=sk-your-qwen-api-key
+deepseek=sk-your-deepseek-api-key
+zhipu=your-zhipu-api-key
+openai=sk-your-openai-api-key
+```
+
+#### 17.3.2 安全管理器使用
+
+```python
+from modules.secure_api_key_manager import SecureAPIKeyManager
+
+# 获取管理器实例（单例模式）
+manager = SecureAPIKeyManager()
+
+# 检查密钥状态报告
+report = manager.get_status_report()
+print(report['services'])
+# 输出: {'qwen': {'has_key': True, ...}, 'deepseek': {'has_key': False, ...}, ...}
+
+# 获取密钥（仅在内存中使用，不会存储到其他位置）
+api_key = manager.get_key('qwen')
+
+# 检查密钥是否已配置
+if manager.has_key('qwen'):
+    print("通义千问API密钥已配置")
+```
+
+#### 17.3.3 安全保障机制
+
+| 安全措施 | 说明 |
+|----------|------|
+| 密钥隔离 | API密钥仅存储在secrets文件夹内 |
+| 单例模式 | 全局唯一管理器实例，防止密钥泄露 |
+| 访问日志 | 记录所有密钥访问行为 |
+| 内存安全 | 密钥仅在内存中使用，不写入其他文件 |
+
+### 17.4 模块LLM API集成详解
+
+#### 17.4.1 命名实体识别（NER）模块
+
+**API模式提示词模板**：
+
+```
+你是一位专业的日本史研究专家，精通历史文献中的实体识别。
+请从以下文本中识别所有历史实体，包括：
+- 人物（person）：历史人物姓名
+- 地点（location）：地理位置、行政区划
+- 组织（organization）：机构、藩国、幕府等
+- 事件（event）：历史事件名称
+- 年代（date）：年号、年份、日期
+- 著作（work）：文献、书籍名称
+- 概念（concept）：思想、制度、术语
+
+输入文本：
+{text}
+
+请以JSON格式输出，格式如下：
+{
+  "entities": [
+    {"text": "实体文本", "category": "实体类型", "confidence": 0.95}
+  ]
+}
+```
+
+**使用示例**：
+
+```python
+from modules.task_manager import TaskManager
+
+manager = TaskManager(mode='api', provider='qwen')
+
+# API模式识别
+result = manager.ner(
+    text="伊藤博文出生于1841年，是明治维新的重要人物。",
+    categories=['person', 'event', 'date']
+)
+
+# 脚本模式识别（使用正则表达式和词典）
+manager.set_mode('script')
+result = manager.ner(
+    text="伊藤博文出生于1841年，是明治维新的重要人物。"
+)
+```
+
+**输出格式**：
+
+```json
+{
+  "success": true,
+  "data": {
+    "entities": [
+      {"text": "伊藤博文", "category": "person", "confidence": 0.98},
+      {"text": "1841年", "category": "date", "confidence": 0.95},
+      {"text": "明治维新", "category": "event", "confidence": 0.97}
+    ]
+  },
+  "mode": "api",
+  "execution_time": 1.23
+}
+```
+
+#### 17.4.2 学术笔记生成模块
+
+**API模式提示词模板**：
+
+```
+你是一位专业的学术笔记撰写专家，精通Obsidian笔记格式。
+请根据以下学术文献内容，生成结构化的阅读笔记。
+
+要求：
+1. 使用Markdown格式
+2. 包含双向链接 [[链接]] 语法
+3. 提取核心实体作为知识图谱节点
+4. 生成摘要和关键观点
+
+输入内容：
+{content}
+
+请按以下格式输出：
+---
+type: reading_note
+tags:
+  - #文献笔记
+  - #日本史
+created: {date}
+source: {source}
+---
+
+# {title}
+
+## 📋 总体摘要
+[摘要内容]
+
+## 🔑 核心观点
+- 观点1
+- 观点2
+
+## 🔗 核心图谱节点提取
+- [[人物A]]
+- [[地点B]]
+- [[事件C]]
+```
+
+**使用示例**：
+
+```python
+from modules.task_manager import TaskManager
+
+manager = TaskManager(mode='api')
+
+# 生成学术笔记
+result = manager.academic_note(
+    content="文献内容...",
+    title="伊藤博文传",
+    note_type='reading_note'
+)
+
+# 使用自定义提示词
+custom_prompt = """
+请分析以下历史文献的学术价值：
+{content}
+
+重点关注：
+1. 史料来源
+2. 研究方法
+3. 学术贡献
+"""
+
+result = manager.execute_with_prompt(
+    task_type='academic_note',
+    prompt=custom_prompt,
+    content="文献内容..."
+)
+```
+
+#### 17.4.3 论文润色模块
+
+**API模式提示词模板**：
+
+```
+你是一位专业的学术论文编辑，精通日本史研究领域。
+请对以下学术论文段落进行润色，要求：
+
+1. 删除冗余论述，保持学术严谨性
+2. 修正语法错误和表达不当之处
+3. 保持原文的核心观点和论证逻辑
+4. 使用规范的学术表达
+
+原文：
+{text}
+
+请输出润色后的文本，并说明主要修改内容。
+```
+
+**使用示例**：
+
+```python
+from modules.task_manager import TaskManager
+
+manager = TaskManager(mode='api', provider='qwen')
+
+# 论文润色
+result = manager.paper_polish(
+    text="待润色的论文段落...",
+    mode='simplify',  # 简化模式
+    preserve_terms=True  # 保留专业术语
+)
+
+# 文档级润色
+result = manager.paper_polish_document(
+    input_path='input.docx',
+    output_path='output.docx',
+    enable_track_changes=True
+)
+```
+
+#### 17.4.4 引用规范化模块
+
+**API模式提示词模板**：
+
+```
+你是一位学术引用规范专家，精通多种引用格式。
+请将以下引用信息转换为{target_format}格式。
+
+支持的格式：
+- Chicago格式
+- APA格式
+- GB/T 7714格式
+- 日本史学会格式
+
+输入引用：
+{citation}
+
+目标格式：{target_format}
+
+请输出规范化后的引用格式。
+```
+
+**使用示例**：
+
+```python
+from modules.task_manager import TaskManager
+
+manager = TaskManager(mode='api')
+
+# 单条引用规范化
+result = manager.citation_normalize(
+    citation="伊藤博文. 伊藤博文伝. 春亩公追颂会, 1940.",
+    target_format='chicago'
+)
+
+# 批量规范化
+citations = [
+    "引用1...",
+    "引用2...",
+]
+result = manager.citation_normalize_batch(
+    citations=citations,
+    target_format='gbt7714'
+)
+```
+
+#### 17.4.5 OCR结果校正模块
+
+**API模式提示词模板**：
+
+```
+你是一位专业的OCR结果校正专家，精通日文历史文献。
+请校正以下OCR识别结果，修正以下类型的错误：
+
+1. 字符识别错误（如：力→カ、口→ロ）
+2. 断句错误
+3. 标点符号错误
+4. 漏字、多字问题
+
+原始OCR结果：
+{ocr_text}
+
+语言：{language}
+
+请输出校正后的文本。
+```
+
+**使用示例**：
+
+```python
+from modules.task_manager import TaskManager
+
+manager = TaskManager(mode='api')
+
+# OCR结果校正
+result = manager.ocr_correction(
+    ocr_text="OCR识别的原始文本...",
+    language='ja'
+)
+```
+
+#### 17.4.6 文本摘要模块
+
+**API模式提示词模板**：
+
+```
+你是一位专业的学术摘要撰写专家。
+请为以下文本生成摘要，要求：
+
+1. 保留核心观点和关键信息
+2. 控制在{max_length}字以内
+3. 使用学术规范的表达方式
+4. 保持逻辑清晰
+
+输入文本：
+{text}
+
+请输出摘要内容。
+```
+
+**使用示例**：
+
+```python
+from modules.task_manager import TaskManager
+
+manager = TaskManager(mode='api')
+
+# 生成摘要
+result = manager.summarize(
+    text="长文本内容...",
+    max_length=200,
+    language='zh'
+)
+
+# 多语言摘要
+result = manager.summarize(
+    text="文本内容...",
+    output_languages=['zh', 'en', 'ja']
+)
+```
+
+#### 17.4.7 实体消歧模块
+
+**API模式提示词模板**：
+
+```
+你是一位日本史研究专家，精通历史实体的消歧分析。
+请根据上下文判断以下实体的具体含义。
+
+实体：{entity}
+上下文：{context}
+
+可能的含义：
+{possible_meanings}
+
+请分析上下文中的关键词，判断实体在此语境下的准确含义。
+输出格式：
+{
+  "meaning": "具体含义",
+  "confidence": 0.95,
+  "evidence": "判断依据"
+}
+```
+
+**使用示例**：
+
+```python
+from modules.task_manager import TaskManager
+
+manager = TaskManager(mode='api')
+
+# 实体消歧
+result = manager.disambiguate_entity(
+    entity="江戸",
+    context="江戸幕府が終焉を迎えた",
+    possible_meanings=["城市", "幕府机构"]
+)
+```
+
+#### 17.4.8 文风分析与迁移模块
+
+**API模式提示词模板**：
+
+```
+你是一位学术写作风格分析专家。
+请分析以下文本的文风特征，从四个维度进行评估：
+
+1. 句法结构：句子长度、复杂度、从句使用
+2. 词汇深度：学术词汇比例、术语使用
+3. 语气声音：客观性、立场表达方式
+4. 修辞机制：论证方式、引用风格
+
+输入文本：
+{text}
+
+请输出文风矩阵分析结果。
+```
+
+**使用示例**：
+
+```python
+from modules.task_manager import TaskManager
+
+manager = TaskManager(mode='api')
+
+# 文风分析
+result = manager.analyze_style(
+    text="待分析的学术文本..."
+)
+
+# 文风迁移
+result = manager.transfer_style(
+    text="待迁移文本...",
+    target_style="目标风格描述"
+)
+```
+
+#### 17.4.9 史料发言识别模块
+
+**API模式提示词模板**：
+
+```
+你是一位日本古典文献研究专家。
+请从以下史料文本中识别所有发言内容，包括：
+
+1. 直接引语：「...」
+2. 书信内容
+3. 公文陈述
+4. 对话记录
+
+同时提取文本中的年代信息：
+- 年号日期（明治十年一月四日）
+- 西历日期（1877年1月4日）
+- 汉字数字日期
+
+输入文本：
+{text}
+
+请以JSON格式输出识别结果。
+```
+
+**使用示例**：
+
+```python
+from modules.task_manager import TaskManager
+
+manager = TaskManager(mode='api')
+
+# 发言识别
+result = manager.extract_speeches(
+    text="史料文本内容..."
+)
+
+# 年代提取
+result = manager.extract_dates(
+    text="史料文本内容..."
+)
+```
+
+#### 17.4.10 版面分析模块
+
+**API模式提示词模板**：
+
+```
+你是一位文档版面分析专家。
+请分析以下文档的结构，识别以下区域类型：
+
+1. 标题区域（title）
+2. 正文区域（body_text）
+3. 页眉（header）
+4. 页脚（footer）
+5. 边注（marginalia）
+6. 日期区域（date）
+7. 表格（table）
+8. 图片（figure）
+
+文档类型：{document_type}
+文本样本：
+{text_samples}
+
+请输出版面分析结果。
+```
+
+**使用示例**：
+
+```python
+from modules.task_manager import TaskManager
+
+manager = TaskManager(mode='api')
+
+# 版面分析
+result = manager.analyze_layout(
+    pdf_path="document.pdf",
+    document_type="classical_diary"
+)
+```
+
+### 17.5 自定义提示词执行
+
+#### 17.5.1 基本用法
+
+```python
+from modules.task_manager import TaskManager
+
+manager = TaskManager(mode='api')
+
+# 使用自定义提示词执行任务
+result = manager.execute_with_prompt(
+    task_type='text_analysis',
+    prompt="""
+    请分析以下历史文献的史料价值：
+    {text}
+    
+    评估维度：
+    1. 史料来源可靠性
+    2. 内容完整程度
+    3. 学术参考价值
+    """,
+    text="文献内容..."
+)
+```
+
+#### 17.5.2 提示词模板变量
+
+| 变量名 | 说明 | 使用示例 |
+|--------|------|----------|
+| {text} | 输入文本 | 待处理的文本内容 |
+| {content} | 文档内容 | 完整文档内容 |
+| {language} | 语言代码 | zh/ja/en |
+| {target_format} | 目标格式 | chicago/apa |
+| {max_length} | 最大长度 | 200 |
+| {document_type} | 文档类型 | classical_diary |
+
+#### 17.5.3 预设配置管理
+
+```python
+from modules.task_manager import TaskManager, TaskPreset
+
+manager = TaskManager(mode='api')
+
+# 创建预设配置
+preset = TaskPreset(
+    name='high_quality_ner',
+    task_type='ner',
+    temperature=0.1,
+    max_tokens=4000,
+    description='高质量NER识别配置'
+)
+manager.add_preset(preset)
+
+# 使用预设配置
+result = manager.ner(
+    text="文本内容...",
+    preset='high_quality_ner'
+)
+```
+
+### 17.6 命令行使用
+
+#### 17.6.1 显示系统信息
+
+```bash
+python -m modules.task_cli --info
+```
+
+#### 17.6.2 执行任务
+
+```bash
+# API模式执行NER任务
+python -m modules.task_cli --mode api --task ner --text "伊藤博文是明治维新的重要人物"
+
+# 脚本模式执行摘要任务
+python -m modules.task_cli --mode script --task summarize --text "长文本内容..."
+
+# 使用自定义提示词
+python -m modules.task_cli --mode api --task custom --prompt "请分析：{text}" --text "内容"
+```
+
+#### 17.6.3 交互模式
+
+```bash
+python -m modules.task_cli --interactive
+```
+
+### 17.7 批量处理
+
+```python
+from modules.task_manager import TaskManager
+
+manager = TaskManager(mode='api')
+
+# 批量NER处理
+texts = ["文本1", "文本2", "文本3"]
+results = manager.batch_process(
+    task_type='ner',
+    items=texts,
+    parallel=True,
+    max_workers=3
+)
+
+# 批量摘要生成
+results = manager.batch_summarize(
+    texts=texts,
+    max_length=200
+)
+```
+
+### 17.8 执行统计与监控
+
+```python
+from modules.task_manager import TaskManager
+
+manager = TaskManager(mode='api')
+
+# 执行多个任务...
+manager.ner("文本1")
+manager.summarize("文本2")
+
+# 获取执行统计
+stats = manager.get_statistics()
+print(f"总任务数: {stats['total_tasks']}")
+print(f"成功率: {stats['success_rate']:.2%}")
+print(f"平均执行时间: {stats['avg_execution_time']:.2f}秒")
+```
+
+### 17.9 错误处理与重试
+
+```python
+from modules.task_manager import TaskManager
+
+manager = TaskManager(mode='api')
+
+# 自动重试配置
+result = manager.ner(
+    text="文本内容...",
+    retry_count=3,
+    retry_delay=1.0
+)
+
+# 错误处理
+if not result['success']:
+    print(f"错误: {result['error']}")
+    # 自动降级到脚本模式
+    manager.set_mode('script')
+    result = manager.ner(text="文本内容...")
+```
+
+### 17.10 与现有模块的集成
+
+统一LLM API集成框架与现有模块完全兼容，可通过适配器模式无缝集成：
+
+```python
+from modules.module_adapters import (
+    NERAdapter, AcademicNoteAdapter, PaperPolishAdapter,
+    CitationAdapter, OCRAdapter, SummaryAdapter,
+    create_adapter
+)
+
+# 使用适配器
+adapter = create_adapter('ner', mode='api', provider='qwen')
+result = adapter.recognize("文本内容...")
+
+# 切换模式
+adapter.set_mode('script')
+result = adapter.recognize("文本内容...")
+```
+
+### 17.11 最佳实践
+
+#### 17.11.1 模式选择建议
+
+| 任务类型 | 推荐模式 | 原因 |
+|----------|----------|------|
+| 复杂语义理解 | API | 需要上下文分析能力 |
+| 规则明确的任务 | 脚本 | 处理速度快，无需API调用 |
+| 大批量处理 | 脚本 | 避免API限流和成本问题 |
+| 高精度要求 | API | LLM语义理解能力更强 |
+| 离线环境 | 脚本 | 无需网络连接 |
+
+#### 17.11.2 API密钥管理建议
+
+1. **定期轮换**：建议每3-6个月更换API密钥
+2. **权限最小化**：仅授予必要的API权限
+3. **监控使用量**：定期检查API调用统计
+4. **备份密钥**：安全存储密钥备份
+
+#### 17.11.3 性能优化建议
+
+1. **使用缓存**：启用结果缓存避免重复调用
+2. **批量处理**：合并多个请求减少API调用次数
+3. **异步执行**：使用异步模式提高并发性能
+4. **合理超时**：设置合适的超时时间
+
+---
+
 ## 文档结束
 
 本技术指南涵盖了AItools-for-historyresearch工作区的所有核心功能和使用方法。如有任何疑问，请查阅相关模块的源代码或提交Issue。
 
-**文档版本**：2.2.0  
+**文档版本**：2.3.0  
 **更新日期**：2026年3月31日
 
 **本次更新内容**：
+- 新增 第十七部分：统一LLM API集成框架
+- 添加双模式执行机制说明
+- 添加各模块LLM API提示词模板
+- 添加API密钥安全管理机制
+- 添加命令行和批量处理使用方法
+
+**历史更新内容**：
 - 新增 第十五部分：古典籍OCR训练数据准备工作流
 - 新增 第十六部分：通用板式分析模块
 - 添加工作流使用方法和技术参数说明
 - 添加模块扩展开发指南
-
-**本次更新内容**：
 - 新增 LLM OCR处理器模块（llm_ocr_processor.py）文档
 - 集成通义千问VL OCR API支持
 - 添加HTML标签清理、水印去除、页码识别等数据清洗功能
