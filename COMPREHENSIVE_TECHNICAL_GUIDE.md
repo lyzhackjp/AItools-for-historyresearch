@@ -5,9 +5,9 @@
 | 属性 | 内容 |
 |------|------|
 | 文档名称 | COMPREHENSIVE_TECHNICAL_GUIDE.md |
-| 版本 | 2.0.0 |
+| 版本 | 3.0.0 |
 | 创建日期 | 2026-03-28 |
-| 更新日期 | 2026-03-30 |
+| 更新日期 | 2026-04-01 |
 | 适用对象 | 开发人员、运维人员、高级用户 |
 | 文档性质 | 核心技术参考文档 |
 | 关联文档 | [WORKFLOW_DIAGRAM.md](WORKFLOW_DIAGRAM.md) |
@@ -24,9 +24,16 @@
 
 | 模块名称 | 独立文档路径 | 功能概述 |
 |----------|-------------|----------|
-| LearningModule | [learning_module/README.md](learning_module/README.md) | 学术资源检索、文献分析、改进建议生成 |
-| OpenSourceFinder | [open_source_finder/README.md](open_source_finder/README.md) | GitHub/HuggingFace开源项目搜索与评估 |
+| IntelligentResearchAssistant | [intelligent_research_assistant/README.md](intelligent_research_assistant/README.md) | 统一研究助手（整合原open_source_finder和learning_module） |
 | NDL搜索模块 | [ndl-search/docs/README.md](ndl-search/docs/README.md) | 日本国立国会图书馆文献检索与下载 |
+
+### 架构变更说明
+
+**v3.0.0 重要变更**：
+- `open_source_finder` 和 `learning_module` 已整合为 `IntelligentResearchAssistant` 模块
+- 原模块已归档至 `archive/archived_modules/` 目录
+- 新模块提供统一接口，支持多平台搜索、深度分析和智能报告生成
+- 详细迁移指南请参考 [迁移指南](intelligent_research_assistant/docs/MIGRATION_GUIDE.md)
 
 ---
 
@@ -230,17 +237,31 @@ AItools-for-historyresearch/
 │   ├── environment_checker.py   # 环境检查
 │   ├── setup_assistant.py       # 环境配置助手
 │   └── prompts/                 # 提示词目录
-├── learning_module/              # 学习模块
-│   ├── src/
-│   │   ├── research_analyzer.py    # 学术资源检索
-│   │   ├── literature_analyzer.py  # 文献分析
-│   │   ├── improvement_generator.py # 改进建议生成
-│   │   └── prompts.py             # 提示词管理
-│   └── README.md
-├── open_source_finder/           # 开源模块搜索器
-│   ├── src/
-│   │   └── open_source_finder.py  # GitHub/HF搜索
-│   └── README.md
+├── intelligent_research_assistant/  # 智能研究助手模块（v3.0新增）
+│   ├── core/                    # 核心组件
+│   │   ├── llm_manager.py      # LLM管理器
+│   │   ├── cache_manager.py    # 缓存管理器
+│   │   ├── config_manager.py   # 配置管理器
+│   │   └── data_models.py      # 数据模型
+│   ├── search/                  # 搜索层
+│   │   ├── project_finder.py   # 项目搜索
+│   │   ├── paper_finder.py     # 论文搜索
+│   │   └── document_fetcher.py # 文档获取
+│   ├── analysis/                # 分析层
+│   │   ├── project_analyzer.py # 项目分析
+│   │   ├── paper_analyzer.py   # 论文分析
+│   │   └── literature_analyzer.py # 文献分析
+│   ├── generation/              # 生成层
+│   │   ├── report_generator.py # 报告生成
+│   │   └── improvement_generator.py # 改进建议生成
+│   ├── docs/                    # 文档
+│   ├── tests/                   # 测试
+│   └── intelligent_assistant.py # 主入口
+├── archive/                      # 归档目录
+│   ├── archived_modules/        # 已归档模块
+│   │   ├── open_source_finder/  # 开源搜索器（已归档）
+│   │   └── learning_module/     # 学习模块（已归档）
+│   └── ARCHIVE_README.md        # 归档说明
 ├── config/                       # 配置目录
 │   ├── api_config.json          # 生产环境API配置
 │   ├── api_config.test.json     # 测试环境API配置
@@ -275,7 +296,6 @@ AItools-for-historyresearch/
 │   ├── __init__.py
 │   └── execute_ndl_search.py    # 执行脚本
 ├── docs/                         # 文档目录
-├── archive/                      # 归档目录（废弃文件）
 └── README.md                    # 项目说明
 ```
 
@@ -4000,14 +4020,353 @@ RAGFLOW_API_KEY=your-ragflow-api-key
 
 ---
 
+## 第十九部分：增强版开源项目搜寻系统
+
+### 19.1 模块概述
+
+增强版开源项目搜寻系统（EnhancedOpenSourceFinder）是对原有OpenSourceFinder模块的重大升级，提供更强大的开源项目搜寻、分析和管理功能。
+
+**核心功能**：
+- 多数据源支持（GitHub、arXiv、Papers With Code等）
+- 用户自定义关注领域管理
+- 项目评价机制（活跃度、社区参与度、技术创新性等）
+- 定期搜寻与报告生成
+- 文档存储与管理
+- 与其他模块的数据互通接口
+
+### 19.2 数据源适配器
+
+#### 19.2.1 GitHub适配器
+
+**功能描述**：搜索GitHub仓库并获取详细信息
+
+**支持功能**：
+- 仓库搜索（按stars排序）
+- README下载
+- 项目元数据获取
+
+**使用示例**：
+
+```python
+from open_source_finder import GitHubAdapter
+
+adapter = GitHubAdapter(token='your-github-token')
+
+# 搜索仓库
+projects = adapter.search('vibe coding', limit=10)
+
+for project in projects:
+    print(f"{project.title}: {project.metrics.overall_score}")
+```
+
+#### 19.2.2 arXiv适配器
+
+**功能描述**：搜索arXiv学术论文
+
+**支持功能**：
+- 论文搜索
+- PDF下载
+- 元数据解析
+
+**使用示例**：
+
+```python
+from open_source_finder import ArxivAdapter
+
+adapter = ArxivAdapter()
+
+# 搜索论文
+papers = adapter.search('machine learning', limit=10)
+
+# 下载论文PDF
+if papers:
+    adapter.download_document(papers[0].url, 'paper.pdf')
+```
+
+#### 19.2.3 Papers With Code适配器
+
+**功能描述**：搜索Papers With Code平台
+
+**支持功能**：
+- 论文与代码关联搜索
+- 项目评分
+
+**使用示例**：
+
+```python
+from open_source_finder import PapersWithCodeAdapter
+
+adapter = PapersWithCodeAdapter()
+projects = adapter.search('natural language processing', limit=10)
+```
+
+### 19.3 关注领域管理
+
+#### 19.3.1 添加关注领域
+
+```python
+from open_source_finder import create_enhanced_finder
+
+finder = create_enhanced_finder(api_provider='qwen')
+
+# 添加关注领域
+finder.add_focus_area(
+    name="Vibe Coding",
+    keywords=["vibe coding", "ai coding assistant", "llm code generation"],
+    platforms=['github', 'arxiv'],
+    priority=1,
+    search_frequency='daily'
+)
+```
+
+#### 19.3.2 管理关注领域
+
+```python
+# 列出所有关注领域
+areas = finder.list_focus_areas()
+for area in areas:
+    print(f"{area.name}: {area.keywords}")
+
+# 移除关注领域
+finder.remove_focus_area("Vibe Coding")
+```
+
+### 19.4 项目评价机制
+
+#### 19.4.1 评分维度
+
+| 维度 | 权重 | 说明 |
+|------|------|------|
+| 活跃度 | 25% | 最近更新时间、Issues数量 |
+| 社区参与度 | 25% | Stars、Forks、Watchers数量 |
+| 技术创新性 | 20% | Stars趋势、创新标签 |
+| 文档质量 | 15% | README完整性、文档链接 |
+| 可持续性 | 15% | 许可证、维护状态 |
+
+#### 19.4.2 评分计算
+
+```python
+# 项目评分自动计算
+projects = finder.search('vibe coding', limit=10)
+
+for project in projects:
+    print(f"项目: {project.title}")
+    print(f"综合评分: {project.metrics.overall_score}")
+    print(f"活跃度: {project.metrics.activity_score}")
+    print(f"社区参与: {project.metrics.community_score}")
+    print(f"创新性: {project.metrics.innovation_score}")
+```
+
+### 19.5 定期搜寻与报告生成
+
+#### 19.5.1 执行搜寻
+
+```python
+# 搜寻特定关注领域
+projects = finder.search_focus_area("Vibe Coding", limit=10)
+
+# 生成报告
+report = finder.generate_report(projects, focus_area="Vibe Coding")
+
+print(f"报告ID: {report.report_id}")
+print(f"项目总数: {report.total_projects}")
+print(f"摘要: {report.summary}")
+```
+
+#### 19.5.2 报告内容
+
+报告包含以下信息：
+- 项目总数与平台分布
+- 趋势分析（平台分布、热门标签、平均评分）
+- 推荐建议（Top项目、活跃项目、创新项目）
+- 综合摘要（LLM生成或基础统计）
+
+#### 19.5.3 定期搜寻调度
+
+```python
+# 执行所有关注领域的定期搜寻
+results = finder.run_scheduled_search()
+
+for area_name, data in results.items():
+    print(f"{area_name}: {len(data['projects'])} 个项目")
+```
+
+### 19.6 文档存储与管理
+
+#### 19.6.1 存储目录结构
+
+```
+open_source_finder/storage/
+├── documents/
+│   ├── readme/          # GitHub README文件
+│   ├── papers/          # arXiv论文PDF
+│   └── reports/         # 生成的报告
+├── cache/               # 缓存数据
+└── config/              # 配置文件
+```
+
+#### 19.6.2 下载文档
+
+```python
+# 下载项目文档
+downloaded_files = finder.download_project_documents(
+    project=projects[0],
+    include_readme=True,
+    include_paper=True
+)
+
+print(f"下载了 {len(downloaded_files)} 个文件")
+```
+
+### 19.7 数据互通接口
+
+#### 19.7.1 导出数据
+
+```python
+# 导出为JSON格式
+json_data = finder.export_for_other_modules(projects, format='json')
+
+# 导出为Markdown格式
+markdown_data = finder.export_for_other_modules(projects, format='markdown')
+
+# 导出为CSV格式
+csv_data = finder.export_for_other_modules(projects, format='csv')
+```
+
+#### 19.7.2 导入数据
+
+```python
+# 从学术论文阅读模块导入数据
+data = finder.import_from_academic_reader('academic_data.json')
+```
+
+### 19.8 配置管理
+
+#### 19.8.1 配置文件
+
+配置文件位于：`open_source_finder/config/finder_config.json`
+
+```json
+{
+  "data_sources": {
+    "github": {
+      "name": "github",
+      "enabled": true,
+      "priority": 1
+    },
+    "arxiv": {
+      "name": "arxiv",
+      "enabled": true,
+      "priority": 2
+    }
+  },
+  "focus_areas": {
+    "Vibe Coding": {
+      "name": "Vibe Coding",
+      "keywords": ["vibe coding", "ai coding"],
+      "platforms": ["github", "arxiv"],
+      "search_frequency": "daily"
+    }
+  }
+}
+```
+
+#### 19.8.2 数据源管理
+
+```python
+# 启用/禁用数据源
+finder.enable_data_source('github', enabled=True)
+finder.enable_data_source('arxiv', enabled=False)
+
+# 添加自定义数据源
+from open_source_finder import DataSourceAdapter
+
+class CustomAdapter(DataSourceAdapter):
+    def search(self, query: str, limit: int = 10):
+        # 实现搜索逻辑
+        pass
+    
+    def get_project_details(self, project_id: str):
+        # 实现详情获取
+        pass
+    
+    def download_document(self, url: str, save_path: str):
+        # 实现文档下载
+        pass
+
+custom_adapter = CustomAdapter()
+finder.add_data_source('custom', custom_adapter, priority=3)
+```
+
+### 19.9 完整使用示例
+
+```python
+from open_source_finder import create_enhanced_finder
+
+# 创建搜寻器实例
+finder = create_enhanced_finder(
+    api_provider='qwen',
+    storage_dir='./storage'
+)
+
+# 添加关注领域
+finder.add_focus_area(
+    name="数字人文",
+    keywords=["digital humanities", "text analysis", "nlp history"],
+    platforms=['github', 'arxiv'],
+    priority=1,
+    search_frequency='weekly'
+)
+
+# 执行搜寻
+projects = finder.search_focus_area("数字人文", limit=10)
+
+# 显示结果
+for i, project in enumerate(projects[:5], 1):
+    print(f"{i}. {project.title}")
+    print(f"   平台: {project.platform}")
+    print(f"   评分: {project.metrics.overall_score:.2f}")
+    print(f"   链接: {project.url}")
+
+# 生成报告
+report = finder.generate_report(projects, focus_area="数字人文")
+print(f"\n报告摘要:\n{report.summary}")
+
+# 下载文档
+if projects:
+    downloaded = finder.download_project_documents(projects[0])
+    print(f"\n下载了 {len(downloaded)} 个文件")
+
+# 导出数据供其他模块使用
+json_data = finder.export_for_other_modules(projects, format='json')
+```
+
+### 19.10 注意事项
+
+1. **API限制**：GitHub API有调用频率限制，建议提供GitHub Token
+2. **存储空间**：下载的文档会占用存储空间，定期清理cache目录
+3. **网络环境**：部分数据源需要稳定的网络连接
+4. **LLM配置**：报告摘要生成需要配置LLM API密钥
+5. **版本控制**：storage目录已添加到.gitignore，不会上传到GitHub
+
+---
+
 ## 文档结束
 
 本技术指南涵盖了AItools-for-historyresearch工作区的所有核心功能和使用方法。如有任何疑问，请查阅相关模块的源代码或提交Issue。
 
-**文档版本**：2.4.0  
-**更新日期**：2026年3月31日
+**文档版本**：2.5.0  
+**更新日期**：2026年4月1日
 
 **本次更新内容**：
+- **新增 第十九部分：增强版开源项目搜寻系统**
+- 添加数据源适配器详细文档（GitHub、arXiv、Papers With Code）
+- 添加关注领域管理功能说明
+- 添加项目评价机制详细说明
+- 添加定期搜寻与报告生成功能文档
+- 添加文档存储与管理功能说明
+- 添加数据互通接口使用说明
+- 添加配置管理说明
 - 新增 第十八部分：RAG检索增强生成模块
 - 添加RAG引擎核心功能说明
 - 添加文档加载器、分块器、向量存储、检索器详细文档

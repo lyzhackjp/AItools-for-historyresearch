@@ -4,8 +4,8 @@
 
 | 属性 | 内容 |
 |------|------|
-| 版本 | 2.0.0 |
-| 更新日期 | 2026年3月31日 |
+| 版本 | 3.0.0 |
+| 更新日期 | 2026年4月1日 |
 | 技术文档 | [COMPREHENSIVE_TECHNICAL_GUIDE.md](COMPREHENSIVE_TECHNICAL_GUIDE.md) |
 | 工作流程图 | [WORKFLOW_DIAGRAM.md](WORKFLOW_DIAGRAM.md) |
 
@@ -73,13 +73,15 @@
 ### 10. NDL文献检索与下载
 日本国立国会图书馆（NDL）文献搜索与PDF下载，支持SRU API和Selenium浏览器两种方式。
 
-### 11. 学习模块
-自动检索学术资源、分析文献、生成模块改进建议。
+### 11. 智能研究助手（IntelligentResearchAssistant）
+**新增统一模块**，整合了原 `open_source_finder` 和 `learning_module` 的全部功能，提供一站式研究辅助服务：
+- **多平台搜索**：GitHub、arXiv、Papers With Code等平台的开源项目和学术论文搜索
+- **深度分析**：项目质量评估、论文内容分析、文献综述生成
+- **智能报告**：自动生成结构化研究报告和改进建议
+- **缓存优化**：智能缓存机制，减少API调用，提升性能
+- **统一接口**：简化的API设计，易于使用和扩展
 
-### 12. 开源模块搜索器
-在GitHub和HuggingFace上搜索相关开源模块，评估质量和适用性。
-
-### 13. RAG检索增强生成
+### 12. RAG检索增强生成
 完整的检索增强生成功能，支持文档加载、文本分块、向量检索和生成式问答。支持多种向量数据库（ChromaDB、FAISS），专为历史研究场景优化。
 
 ---
@@ -173,13 +175,46 @@ ZHIPU_API_KEY=your-key-here
 
 如需使用NDL OCR功能，请按照上方"重要说明：NDL OCR模型"章节的步骤操作。
 
-### 第五步：启动服务
+### 第五步：启动后端服务
 
 ```bash
 python app.py
 ```
 
-访问 http://localhost:5000 开始使用！
+后端API服务将运行在 http://localhost:5000
+
+### 第六步：启动前端应用（可选）
+
+本项目提供完整的Web前端界面，支持可视化操作：
+
+```bash
+cd frontend
+python server.py
+```
+
+前端应用将运行在 http://localhost:3001
+
+**前端功能特性：**
+- 🎨 简约现代的UI设计，支持深色/浅色主题
+- 🌐 国际化支持（中文/日文/英文）
+- 📱 响应式布局，适配桌面和移动设备
+- 🔐 安全的API密钥本地存储
+- 📊 实时任务进度和历史记录
+
+**前端页面说明：**
+
+| 页面 | 功能 |
+|------|------|
+| 首页 | 仪表盘，显示统计数据和快捷入口 |
+| 论文润色 | 上传Word文档或输入文本进行润色 |
+| OCR识别 | 多引擎OCR，支持批量处理 |
+| 实体识别 | 自动识别人名、地名等历史实体 |
+| 笔记生成 | 生成Obsidian格式的学术笔记 |
+| 引用规范化 | 统一参考文献格式 |
+| 文风迁移 | 分析和迁移文本写作风格 |
+| 虚拟人格 | 与历史人物角色扮演对话 |
+| AI研究助手 | 智能对话解答研究问题 |
+| 设置 | 配置API密钥和偏好设置 |
 
 ---
 
@@ -278,12 +313,28 @@ if result.status == 'success':
     print(f'下载成功: {result.file_path}')
 ```
 
-### 示例7：RAG检索增强生成
+### 示例7：智能研究助手（推荐）
+
+```python
+from intelligent_research_assistant import IntelligentResearchAssistant
+
+assistant = IntelligentResearchAssistant(api_provider='qwen')
+
+projects = assistant.search_projects("machine learning", limit=10)
+papers = assistant.search_papers("deep learning", limit=10)
+
+for project in projects[:5]:
+    print(f"{project.title} - {project.url}")
+
+report = assistant.generate_report(projects, papers)
+print(report.summary)
+```
+
+### 示例8：RAG检索增强生成
 
 ```python
 from rag_module.core import RAGEngine, RAGConfig
 
-# 创建RAG引擎
 config = RAGConfig(
     chunk_size=500,
     chunk_overlap=50,
@@ -291,31 +342,26 @@ config = RAGConfig(
 )
 engine = RAGEngine(config)
 
-# 加载文档
 engine.load_document('史料.pdf')
 
-# 检索相关内容
 results = engine.retrieve('明治维新的影响', top_k=5)
 for result in results:
     print(f"相关度: {result.score:.2f}")
     print(f"内容: {result.content[:100]}...")
 
-# 生成回答
 answer = engine.query('明治维新对日本社会产生了哪些影响？')
 print(answer)
 ```
 
-### 示例8：RAG后端切换（Dify/Ragflow）
+### 示例9：RAG后端切换（Dify/Ragflow）
 
 ```python
 from rag_module.adapters import RAGFactory, RAGBackend
 
-# 查看可用后端
 available = RAGFactory.get_available_backends()
 for backend, info in available.items():
     print(f"{backend.value}: {info['message']}")
 
-# 切换到Ragflow（需先安装并启动Ragflow服务）
 adapter = RAGFactory.switch_backend(
     RAGBackend.RAGFLOW,
     config={
@@ -325,7 +371,6 @@ adapter = RAGFactory.switch_backend(
     }
 )
 
-# 使用统一接口
 response = adapter.query('明治维新的历史意义是什么？')
 print(response.answer)
 ```
@@ -368,35 +413,39 @@ AItools-for-historyresearch/
 │   ├── environment_checker.py   # 环境检查
 │   ├── setup_assistant.py       # 环境配置助手
 │   └── prompts/                 # 提示词目录
-├── learning_module/              # 学习模块
-│   ├── src/
-│   │   ├── research_analyzer.py    # 学术资源检索
-│   │   ├── literature_analyzer.py  # 文献分析
+├── intelligent_research_assistant/  # 智能研究助手模块（新增）
+│   ├── core/                    # 核心组件
+│   │   ├── llm_manager.py      # LLM管理器
+│   │   ├── cache_manager.py    # 缓存管理器
+│   │   ├── config_manager.py   # 配置管理器
+│   │   └── data_models.py      # 数据模型
+│   ├── search/                  # 搜索层
+│   │   ├── project_finder.py   # 项目搜索
+│   │   ├── paper_finder.py     # 论文搜索
+│   │   └── document_fetcher.py # 文档获取
+│   ├── analysis/                # 分析层
+│   │   ├── project_analyzer.py # 项目分析
+│   │   ├── paper_analyzer.py   # 论文分析
+│   │   └── literature_analyzer.py # 文献分析
+│   ├── generation/              # 生成层
+│   │   ├── report_generator.py # 报告生成
 │   │   └── improvement_generator.py # 改进建议生成
-│   └── README.md
-├── open_source_finder/           # 开源模块搜索器
-│   ├── src/
-│   │   └── open_source_finder.py  # GitHub/HF搜索
-│   └── README.md
+│   ├── docs/                    # 文档
+│   │   ├── API_DOCUMENTATION.md
+│   │   ├── USER_GUIDE.md
+│   │   ├── MIGRATION_GUIDE.md
+│   │   └── INTEGRATION_CHECK_REPORT.md
+│   ├── tests/                   # 测试
+│   └── intelligent_assistant.py # 主入口
 ├── rag_module/                    # RAG检索增强生成模块
 │   ├── core/                      # 核心组件
 │   │   ├── rag_engine.py         # RAG主引擎
 │   │   ├── config.py             # 配置管理
 │   │   └── types.py              # 类型定义
 │   ├── loaders/                   # 文档加载器
-│   │   ├── pdf_loader.py         # PDF加载
-│   │   ├── markdown_loader.py    # Markdown加载
-│   │   └── text_loader.py        # 文本加载
 │   ├── splitters/                 # 文本分块器
-│   │   ├── recursive_splitter.py # 递归分块
-│   │   └── semantic_splitter.py  # 语义分块
 │   ├── stores/                    # 向量存储
-│   │   ├── chroma_store.py       # ChromaDB存储
-│   │   ├── faiss_store.py        # FAISS存储
-│   │   └── memory_store.py       # 内存存储
 │   ├── retrievers/                # 检索器
-│   │   ├── vector_retriever.py   # 向量检索
-│   │   └── hybrid_retriever.py   # 混合检索
 │   ├── tests/                     # 测试
 │   └── docs/                      # 文档
 ├── ndl-search/                   # NDL搜索模块
@@ -406,6 +455,11 @@ AItools-for-historyresearch/
 │   │   └── settings.py          # NDL配置管理
 │   └── docs/
 │       └── README.md
+├── archive/                      # 归档目录
+│   ├── archived_modules/        # 已归档模块
+│   │   ├── open_source_finder/  # 开源搜索器（已归档）
+│   │   └── learning_module/     # 学习模块（已归档）
+│   └── ARCHIVE_README.md        # 归档说明
 ├── config/                       # 配置目录
 │   ├── api_config.json          # API配置
 │   ├── api_config_loader.py     # 配置加载器
@@ -420,6 +474,13 @@ AItools-for-historyresearch/
 │   ├── ragflow/                  # Ragflow RAG引擎（可选）
 │   ├── ndlocr-lite/             # NDL OCR-Lite模型
 │   └── ndlkotenocr-lite/        # NDL古典籍OCR-Lite模型
+├── frontend/                     # 前端应用（Web界面）
+│   ├── index.html               # 主页面
+│   ├── app.js                   # 应用逻辑
+│   ├── i18n.js                  # 国际化支持
+│   ├── test.html                # 测试页面
+│   ├── server.py                # 本地服务器
+│   └── src/                     # TypeScript源码（可选）
 ├── docs/                         # 文档目录
 │   ├── guides/                  # 使用指南
 │   ├── integration/             # 集成文档
@@ -433,6 +494,65 @@ AItools-for-historyresearch/
 ├── COMPREHENSIVE_TECHNICAL_GUIDE.md  # 详尽技术指南
 ├── WORKFLOW_DIAGRAM.md           # 工作流程图
 └── requirements.txt              # Python依赖
+```
+
+---
+
+## 模块架构关系图
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     用户交互层                                   │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
+│  │ Web前端     │  │ Flask API   │  │ Python脚本调用          │  │
+│  │ (前端界面)  │  │ (后端接口)  │  │ (命令行)                │  │
+│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     核心功能层                                   │
+│  ┌───────────────┐  ┌───────────────┐  ┌───────────────────┐    │
+│  │ LLM客户端     │  │ OCR处理器     │  │ 文档处理器        │    │
+│  │ (多服务商)    │  │ (多引擎)      │  │ (Word/PDF)        │    │
+│  └───────────────┘  └───────────────┘  └───────────────────┘    │
+│  ┌───────────────┐  ┌───────────────┐  ┌───────────────────┐    │
+│  │ NER处理器     │  │ 引用规范化    │  │ 文风分析          │    │
+│  └───────────────┘  └───────────────┘  └───────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   智能研究助手模块                               │
+│  ┌───────────────────────────────────────────────────────────┐  │
+│  │                    IntelligentResearchAssistant            │  │
+│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────────┐   │  │
+│  │  │搜索层   │  │分析层   │  │生成层   │  │核心管理层   │   │  │
+│  │  │- 项目   │  │- 项目   │  │- 报告   │  │- LLM管理    │   │  │
+│  │  │- 论文   │  │- 论文   │  │- 建议   │  │- 缓存管理   │   │  │
+│  │  │- 文档   │  │- 文献   │  │         │  │- 配置管理   │   │  │
+│  │  └─────────┘  └─────────┘  └─────────┘  └─────────────┘   │  │
+│  └───────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     扩展功能层                                   │
+│  ┌───────────────┐  ┌───────────────┐  ┌───────────────────┐    │
+│  │ RAG模块       │  │ NDL搜索模块   │  │ 虚拟人格对话      │    │
+│  └───────────────┘  └───────────────┘  └───────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     外部服务层                                   │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐            │
+│  │通义千问 │  │ OpenAI  │  │ 智谱AI  │  │ GitHub  │            │
+│  └─────────┘  └─────────┘  └─────────┘  └─────────┘            │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐            │
+│  │ arXiv   │  │ NDL API │  │ Dify    │  │ Ragflow │            │
+│  └─────────┘  └─────────┘  └─────────┘  └─────────┘            │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -548,51 +668,24 @@ AItools-for-historyresearch/
 ### Q: 脚注引用在润色后丢失？
 **A:** 确保使用 `paper_polisher_enhanced.py` 或启用修订追踪模式，该版本包含脚注引用保护机制。
 
+### Q: 如何使用智能研究助手？
+**A:** 参考 [智能研究助手用户指南](intelligent_research_assistant/docs/USER_GUIDE.md) 和 [API文档](intelligent_research_assistant/docs/API_DOCUMENTATION.md)。
+
+### Q: 原来的open_source_finder和learning_module去哪了？
+**A:** 这两个模块已整合到 `IntelligentResearchAssistant` 模块中，原模块已归档到 `archive/archived_modules/` 目录。迁移指南请参考 [迁移指南](intelligent_research_assistant/docs/MIGRATION_GUIDE.md)。
+
 ---
 
 ## 更多资源
 
 - **详尽技术指南**：[COMPREHENSIVE_TECHNICAL_GUIDE.md](COMPREHENSIVE_TECHNICAL_GUIDE.md)
 - **工作流程图**：[WORKFLOW_DIAGRAM.md](WORKFLOW_DIAGRAM.md)
+- **前端开发报告**：[FRONTEND_DEVELOPMENT_COMPLETION_REPORT.md](FRONTEND_DEVELOPMENT_COMPLETION_REPORT.md)
 - **NDLoCR接入指南**：[docs/ndlocr_integration_guide.md](docs/ndlocr_integration_guide.md)
-- **学习模块文档**：[learning_module/README.md](learning_module/README.md)
-- **开源搜索器文档**：[open_source_finder/README.md](open_source_finder/README.md)
+- **智能研究助手文档**：[intelligent_research_assistant/README.md](intelligent_research_assistant/README.md)
+- **智能研究助手API文档**：[intelligent_research_assistant/docs/API_DOCUMENTATION.md](intelligent_research_assistant/docs/API_DOCUMENTATION.md)
+- **智能研究助手用户指南**：[intelligent_research_assistant/docs/USER_GUIDE.md](intelligent_research_assistant/docs/USER_GUIDE.md)
+- **迁移指南**：[intelligent_research_assistant/docs/MIGRATION_GUIDE.md](intelligent_research_assistant/docs/MIGRATION_GUIDE.md)
 - **NDL搜索模块文档**：[ndl-search/docs/README.md](ndl-search/docs/README.md)
 - **RAG模块文档**：[rag_module/docs/RAG_MODULE_GUIDE.md](rag_module/docs/RAG_MODULE_GUIDE.md)
-- **RAG工具选型报告**：[rag_module/docs/TOOL_SELECTION_REPORT.md](rag_module/docs/TOOL_SELECTION_REPORT.md)
-
----
-
-## 一起完善
-
-欢迎提交Issue和Pull Request！
-
-### 贡献指南
-
-1. Fork本仓库
-2. 创建功能分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 创建Pull Request
-
-### 代码规范
-
-- 遵循PEP 8 Python代码风格
-- 添加必要的注释和文档字符串
-- 编写单元测试覆盖新功能
-- 更新相关文档
-
----
-
-## 许可证
-
-本项目仅供学术研究使用。使用NDL OCR模型时，请遵守日本国立国会图书馆的使用条款。
-
----
-
-## 致谢
-
-- [NDL OCR-Lite](https://github.com/ndl-lab/ndlocr-lite) - 日本国立国会图书馆
-- [NDL古典籍OCR-Lite](https://github.com/ndl-lab/ndlkotenocr-lite) - 日本国立国会图书馆
-- [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) - Google
-- 阿里云通义千问、OpenAI、智谱AI等LLM服务商
+- **归档说明**：[archive/ARCHIVE_README.md](archive/ARCHIVE_README.md)

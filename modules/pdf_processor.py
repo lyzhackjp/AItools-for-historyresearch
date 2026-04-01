@@ -247,6 +247,114 @@ class PDFProcessor:
                 results[pdf_path] = {'error': str(e)}
 
         return results
+    
+    def extract_paper_structure(self, pdf_path: str) -> Dict[str, Any]:
+        """
+        提取学术论文的结构化内容
+        
+        Args:
+            pdf_path: PDF文件路径
+            
+        Returns:
+            dict: 包含摘要、方法论、结论等结构化内容
+        """
+        if not os.path.exists(pdf_path):
+            raise FileNotFoundError(f"PDF文件不存在: {pdf_path}")
+        
+        doc = fitz.open(pdf_path)
+        
+        result = {
+            'title': '',
+            'abstract': '',
+            'introduction': '',
+            'methodology': '',
+            'results': '',
+            'conclusion': '',
+            'references': [],
+            'full_text': '',
+            'page_count': len(doc),
+            'metadata': doc.metadata
+        }
+        
+        full_text_parts = []
+        
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            text = page.get_text('text')
+            full_text_parts.append(text)
+            
+            if page_num == 0:
+                result['title'] = self._extract_title(text)
+                result['abstract'] = self._extract_section(text, ['abstract', '摘要'])
+        
+        full_text = '\n'.join(full_text_parts)
+        result['full_text'] = full_text
+        
+        result['introduction'] = self._extract_section(full_text, ['introduction', '引言', '介绍', '1 introduction'])
+        result['methodology'] = self._extract_section(full_text, ['methodology', 'method', '方法', '方法论', '2 method'])
+        result['results'] = self._extract_section(full_text, ['results', 'experiments', '结果', '实验', '3 results'])
+        result['conclusion'] = self._extract_section(full_text, ['conclusion', 'conclusions', '结论', '总结', '4 conclusion'])
+        result['references'] = self._extract_references(full_text)
+        
+        doc.close()
+        return result
+    
+    def _extract_title(self, first_page_text: str) -> str:
+        """从首页提取标题"""
+        import re
+        
+        lines = first_page_text.strip().split('\n')
+        
+        for line in lines[:5]:
+            line = line.strip()
+            if line and len(line) > 10 and len(line) < 200:
+                if not re.match(r'^\d|^abstract|^keywords|^arxiv', line.lower()):
+                    return line
+        
+        return lines[0].strip() if lines else ''
+    
+    def _extract_section(self, text: str, keywords: List[str]) -> str:
+        """提取特定章节内容"""
+        import re
+        
+        for keyword in keywords:
+            patterns = [
+                rf'{keyword}\s*[:：]?\s*\n(.+?)(?=\n\d+\.?\s+[A-Z]|\n[A-Z][a-z]+\s*[:：]|\nReferences|\n参考文献|$)',
+                rf'\d+\.?\s*{keyword}\s*[:：]?\s*\n(.+?)(?=\n\d+\.?\s+[A-Z]|\n[A-Z][a-z]+\s*[:：]|\nReferences|\n参考文献|$)',
+                rf'\n{keyword}\s*\n(.+?)(?=\n\d+\.?\s+[A-Z]|\n[A-Z][a-z]+\s*[:：]|\nReferences|\n参考文献|$)'
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+                if match:
+                    content = match.group(1).strip()
+                    return content[:3000]
+        
+        return ''
+    
+    def _extract_references(self, text: str) -> List[str]:
+        """提取参考文献列表"""
+        import re
+        
+        references = []
+        
+        patterns = [
+            r'References\s*\n(.+)$',
+            r'参考文献\s*\n(.+)$',
+            r'\[\d+\]\s*(.+?)(?=\[\d+\]|$)'
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE | re.DOTALL)
+            if matches:
+                for match in matches[:30]:
+                    if isinstance(match, str):
+                        ref_text = match.strip()
+                        if ref_text and len(ref_text) > 30:
+                            references.append(ref_text[:500])
+                break
+        
+        return references[:20]
 
 
 def create_pdf_processor(output_dir: str = './output') -> PDFProcessor:

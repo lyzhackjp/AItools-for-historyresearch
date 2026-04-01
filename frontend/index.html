@@ -1,0 +1,1518 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>历史研究AI工具 - 完整版</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        :root {
+            --primary-color: #1890ff;
+            --primary-hover: #096dd9;
+            --success-color: #52c41a;
+            --warning-color: #faad14;
+            --error-color: #ff4d4f;
+            --bg-color: #f0f2f5;
+            --card-bg: #ffffff;
+            --text-color: #333333;
+            --text-secondary: #666666;
+            --border-color: #e8e8e8;
+            --shadow: 0 2px 8px rgba(0,0,0,0.08);
+            --radius: 12px;
+        }
+
+        [data-theme="dark"] {
+            --primary-color: #177ddc;
+            --primary-hover: #3c9ae8;
+            --success-color: #49aa19;
+            --warning-color: #d89614;
+            --error-color: #d32029;
+            --bg-color: #141414;
+            --card-bg: #1f1f1f;
+            --text-color: #ffffff;
+            --text-secondary: #a0a0a0;
+            --border-color: #434343;
+            --shadow: 0 2px 8px rgba(0,0,0,0.3);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans SC', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            min-height: 100vh;
+            transition: background-color 0.3s, color 0.3s;
+        }
+
+        .app-container { display: flex; min-height: 100vh; }
+
+        .sidebar {
+            width: 240px;
+            background: var(--card-bg);
+            border-right: 1px solid var(--border-color);
+            padding: 20px 0;
+            position: fixed;
+            height: 100vh;
+            overflow-y: auto;
+            transition: transform 0.3s, width 0.3s;
+            z-index: 100;
+        }
+
+        .sidebar.collapsed { width: 60px; }
+
+        .sidebar-header {
+            padding: 0 20px 20px;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 10px;
+        }
+
+        .sidebar-header h1 {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--primary-color);
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .sidebar-header p {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-top: 5px;
+        }
+
+        .nav-menu { list-style: none; }
+        .nav-item { margin: 4px 12px; }
+
+        .nav-link {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 16px;
+            border-radius: 8px;
+            color: var(--text-color);
+            text-decoration: none;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-size: 14px;
+        }
+
+        .nav-link:hover {
+            background: rgba(24, 144, 255, 0.1);
+            color: var(--primary-color);
+        }
+
+        .nav-link.active {
+            background: var(--primary-color);
+            color: white;
+        }
+
+        .nav-link i { width: 20px; text-align: center; }
+
+        .nav-section {
+            padding: 10px 20px 5px;
+            font-size: 11px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-weight: 600;
+        }
+
+        .main-content {
+            flex: 1;
+            margin-left: 240px;
+            padding: 24px;
+            transition: margin-left 0.3s;
+        }
+
+        .main-content.expanded { margin-left: 60px; }
+
+        .page-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 24px;
+        }
+
+        .page-title { font-size: 24px; font-weight: 600; }
+
+        .page-subtitle {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border-radius: var(--radius);
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: var(--shadow);
+            border: 1px solid var(--border-color);
+            transition: background-color 0.3s, border-color 0.3s;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .card-title {
+            font-size: 16px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .card-title i { color: var(--primary-color); }
+
+        .form-group { margin-bottom: 20px; }
+
+        .form-label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            font-size: 14px;
+            color: var(--text-color);
+        }
+
+        .form-input, .form-textarea, .form-select {
+            width: 100%;
+            padding: 12px 16px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            font-size: 14px;
+            background: var(--card-bg);
+            color: var(--text-color);
+            transition: all 0.3s;
+        }
+
+        .form-input:focus, .form-textarea:focus, .form-select:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(24, 144, 255, 0.1);
+        }
+
+        .form-textarea { resize: vertical; min-height: 120px; }
+
+        .btn {
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s;
+            border: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .btn-primary { background: var(--primary-color); color: white; }
+        .btn-primary:hover { background: var(--primary-hover); }
+        .btn-success { background: var(--success-color); color: white; }
+        .btn-danger { background: var(--error-color); color: white; }
+        .btn-outline {
+            background: transparent;
+            border: 1px solid var(--primary-color);
+            color: var(--primary-color);
+        }
+        .btn-outline:hover { background: var(--primary-color); color: white; }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
+        .btn-sm { padding: 6px 12px; font-size: 12px; }
+        .btn-lg { padding: 14px 28px; font-size: 16px; }
+
+        .file-upload {
+            border: 2px dashed var(--border-color);
+            border-radius: var(--radius);
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            background: rgba(24, 144, 255, 0.02);
+        }
+
+        .file-upload:hover {
+            border-color: var(--primary-color);
+            background: rgba(24, 144, 255, 0.05);
+        }
+
+        .file-upload.dragover {
+            border-color: var(--primary-color);
+            background: rgba(24, 144, 255, 0.1);
+        }
+
+        .file-upload i {
+            font-size: 48px;
+            color: var(--primary-color);
+            margin-bottom: 16px;
+        }
+
+        .file-upload p { color: var(--text-secondary); margin-bottom: 8px; }
+        .file-upload .hint { font-size: 12px; color: var(--text-secondary); opacity: 0.7; }
+
+        .progress-container { margin: 16px 0; }
+
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: var(--border-color);
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .progress-bar .progress {
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary-color), #36cfc9);
+            transition: width 0.3s;
+            border-radius: 4px;
+        }
+
+        .progress-text {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-top: 8px;
+            text-align: center;
+        }
+
+        .result-box {
+            background: rgba(0, 0, 0, 0.02);
+            border-radius: 8px;
+            padding: 16px;
+            margin-top: 16px;
+            max-height: 500px;
+            overflow-y: auto;
+            border: 1px solid var(--border-color);
+        }
+
+        [data-theme="dark"] .result-box { background: rgba(255, 255, 255, 0.02); }
+
+        .result-box pre {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        .tabs {
+            display: flex;
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 20px;
+        }
+
+        .tab {
+            padding: 12px 24px;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            color: var(--text-secondary);
+            transition: all 0.3s;
+            font-size: 14px;
+        }
+
+        .tab:hover { color: var(--primary-color); }
+        .tab.active { color: var(--primary-color); border-bottom-color: var(--primary-color); }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        .badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+
+        .badge-success { background: rgba(82, 196, 26, 0.1); color: var(--success-color); }
+        .badge-warning { background: rgba(250, 173, 20, 0.1); color: var(--warning-color); }
+        .badge-error { background: rgba(255, 77, 79, 0.1); color: var(--error-color); }
+        .badge-info { background: rgba(24, 144, 255, 0.1); color: var(--primary-color); }
+
+        .toast-container {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .toast {
+            padding: 16px 24px;
+            border-radius: 8px;
+            color: white;
+            font-size: 14px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            animation: slideIn 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .toast-success { background: var(--success-color); }
+        .toast-error { background: var(--error-color); }
+        .toast-warning { background: var(--warning-color); }
+        .toast-info { background: var(--primary-color); }
+
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+
+        .loading-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+
+        .loading-spinner {
+            width: 40px; height: 40px;
+            border: 3px solid rgba(255, 255, 255, 0.3);
+            border-top-color: white;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .stat-card {
+            background: var(--card-bg);
+            border-radius: var(--radius);
+            padding: 20px;
+            border: 1px solid var(--border-color);
+        }
+
+        .stat-value {
+            font-size: 28px;
+            font-weight: 600;
+            color: var(--primary-color);
+        }
+
+        .stat-label {
+            font-size: 14px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+        }
+
+        .feature-card {
+            background: var(--card-bg);
+            border-radius: var(--radius);
+            padding: 24px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+            border: 2px solid transparent;
+        }
+
+        .feature-card:hover {
+            border-color: var(--primary-color);
+            transform: translateY(-4px);
+            box-shadow: 0 8px 24px rgba(0,0,0,0.1);
+        }
+
+        .feature-card i {
+            font-size: 40px;
+            color: var(--primary-color);
+            margin-bottom: 16px;
+        }
+
+        .feature-card h3 { font-size: 16px; margin-bottom: 8px; }
+        .feature-card p { font-size: 13px; color: var(--text-secondary); }
+
+        .api-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            background: rgba(82, 196, 26, 0.1);
+            border-radius: 20px;
+            font-size: 12px;
+        }
+
+        .api-status.online { background: rgba(82, 196, 26, 0.1); color: var(--success-color); }
+        .api-status.offline { background: rgba(255, 77, 79, 0.1); color: var(--error-color); }
+        .api-status .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; }
+
+        .chat-container {
+            height: 400px;
+            overflow-y: auto;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 16px;
+            background: rgba(0, 0, 0, 0.02);
+        }
+
+        [data-theme="dark"] .chat-container { background: rgba(255, 255, 255, 0.02); }
+
+        .chat-message { display: flex; margin-bottom: 16px; }
+        .chat-message.user { justify-content: flex-end; }
+
+        .chat-message .bubble {
+            max-width: 70%;
+            padding: 12px 16px;
+            border-radius: 12px;
+            line-height: 1.5;
+        }
+
+        .chat-message.user .bubble { background: var(--primary-color); color: white; }
+        .chat-message.assistant .bubble {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+        }
+
+        .entity-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            margin: 4px;
+        }
+
+        .entity-person { background: rgba(24, 144, 255, 0.1); color: #1890ff; }
+        .entity-location { background: rgba(82, 196, 26, 0.1); color: #52c41a; }
+        .entity-organization { background: rgba(250, 173, 20, 0.1); color: #faad14; }
+        .entity-event { background: rgba(114, 46, 209, 0.1); color: #722ed1; }
+        .entity-date { background: rgba(19, 194, 194, 0.1); color: #13c2c2; }
+        .entity-work { background: rgba(235, 47, 150, 0.1); color: #eb2f96; }
+
+        .hidden { display: none !important; }
+
+        @media (max-width: 1024px) {
+            .sidebar { transform: translateX(-100%); }
+            .sidebar.open { transform: translateX(0); }
+            .main-content { margin-left: 0; }
+        }
+
+        @media (max-width: 768px) {
+            .main-content { padding: 16px; }
+            .feature-grid { grid-template-columns: 1fr; }
+            .stats-grid { grid-template-columns: 1fr 1fr; }
+        }
+
+        .guide-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 2000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .guide-card {
+            background: var(--card-bg);
+            border-radius: 16px;
+            padding: 32px;
+            max-width: 500px;
+            width: 90%;
+            text-align: center;
+        }
+
+        .guide-card h2 { font-size: 24px; margin-bottom: 16px; }
+        .guide-card p { color: var(--text-secondary); margin-bottom: 24px; line-height: 1.6; }
+        .guide-steps { text-align: left; margin-bottom: 24px; }
+
+        .guide-step {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            background: rgba(24, 144, 255, 0.05);
+        }
+
+        .guide-step i { color: var(--primary-color); font-size: 20px; }
+
+        .page { display: none; }
+        .page.active { display: block; }
+    </style>
+</head>
+<body>
+    <div class="app-container">
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <h1><i class="fas fa-robot"></i> <span>历史研究AI工具</span></h1>
+                <p>日本史研究智能助手</p>
+            </div>
+            
+            <nav>
+                <ul class="nav-menu">
+                    <li class="nav-section">主要功能</li>
+                    <li class="nav-item">
+                        <a class="nav-link active" data-page="home">
+                            <i class="fas fa-home"></i>
+                            <span>首页</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" data-page="paper-polish">
+                            <i class="fas fa-file-word"></i>
+                            <span>论文润色</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" data-page="ocr">
+                            <i class="fas fa-file-image"></i>
+                            <span>OCR识别</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" data-page="ner">
+                            <i class="fas fa-tags"></i>
+                            <span>实体识别</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" data-page="notes">
+                            <i class="fas fa-sticky-note"></i>
+                            <span>笔记生成</span>
+                        </a>
+                    </li>
+                    
+                    <li class="nav-section">高级功能</li>
+                    <li class="nav-item">
+                        <a class="nav-link" data-page="citation">
+                            <i class="fas fa-quote-right"></i>
+                            <span>引用规范化</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" data-page="style-transfer">
+                            <i class="fas fa-pen-fancy"></i>
+                            <span>文风迁移</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" data-page="persona">
+                            <i class="fas fa-user-tie"></i>
+                            <span>虚拟人格</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" data-page="speech">
+                            <i class="fas fa-comment-dots"></i>
+                            <span>史料发言</span>
+                        </a>
+                    </li>
+                    
+                    <li class="nav-section">研究助手</li>
+                    <li class="nav-item">
+                        <a class="nav-link" data-page="research">
+                            <i class="fas fa-search"></i>
+                            <span>AI研究助手</span>
+                        </a>
+                    </li>
+                    
+                    <li class="nav-section">系统</li>
+                    <li class="nav-item">
+                        <a class="nav-link" data-page="settings">
+                            <i class="fas fa-cog"></i>
+                            <span>设置</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" data-page="history">
+                            <i class="fas fa-history"></i>
+                            <span>历史记录</span>
+                        </a>
+                    </li>
+                </ul>
+            </nav>
+        </aside>
+
+        <main class="main-content" id="main-content">
+            <!-- 首页 -->
+            <div class="page active" id="page-home">
+                <div class="page-header">
+                    <div>
+                        <h1 class="page-title">欢迎使用历史研究AI工具</h1>
+                        <p class="page-subtitle">专为日本史研究人员打造的智能研究助手</p>
+                    </div>
+                    <div class="api-status online" id="api-status">
+                        <span class="dot"></span>
+                        <span>后端服务在线</span>
+                    </div>
+                </div>
+
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-value" id="stat-tasks">0</div>
+                        <div class="stat-label">今日任务</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="stat-documents">0</div>
+                        <div class="stat-label">处理文档</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="stat-entities">0</div>
+                        <div class="stat-label">识别实体</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="stat-notes">0</div>
+                        <div class="stat-label">生成笔记</div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <i class="fas fa-th-large"></i>
+                            功能模块
+                        </div>
+                    </div>
+                    <div class="feature-grid">
+                        <div class="feature-card" onclick="navigateTo('paper-polish')">
+                            <i class="fas fa-file-word"></i>
+                            <h3>论文润色</h3>
+                            <p>智能润色学术论文，支持中日英三语</p>
+                        </div>
+                        <div class="feature-card" onclick="navigateTo('ocr')">
+                            <i class="fas fa-file-image"></i>
+                            <h3>OCR识别</h3>
+                            <p>高精度文字识别，支持古籍文献</p>
+                        </div>
+                        <div class="feature-card" onclick="navigateTo('ner')">
+                            <i class="fas fa-tags"></i>
+                            <h3>实体识别</h3>
+                            <p>自动识别人名、地名、事件等</p>
+                        </div>
+                        <div class="feature-card" onclick="navigateTo('notes')">
+                            <i class="fas fa-sticky-note"></i>
+                            <h3>笔记生成</h3>
+                            <p>自动生成学术笔记，支持Obsidian</p>
+                        </div>
+                        <div class="feature-card" onclick="navigateTo('citation')">
+                            <i class="fas fa-quote-right"></i>
+                            <h3>引用规范化</h3>
+                            <p>统一Chicago、APA、GB/T 7714格式</p>
+                        </div>
+                        <div class="feature-card" onclick="navigateTo('research')">
+                            <i class="fas fa-search"></i>
+                            <h3>AI研究助手</h3>
+                            <p>智能对话，解答研究问题</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <i class="fas fa-bolt"></i>
+                            快速开始
+                        </div>
+                    </div>
+                    <p style="color: var(--text-secondary); margin-bottom: 16px;">
+                        选择一个功能开始使用，或查看<a href="#" onclick="showGuide(); return false;" style="color: var(--primary-color);">使用指南</a>
+                    </p>
+                    <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                        <button class="btn btn-primary" onclick="navigateTo('paper-polish')">
+                            <i class="fas fa-file-word"></i> 开始润色论文
+                        </button>
+                        <button class="btn btn-outline" onclick="navigateTo('ocr')">
+                            <i class="fas fa-file-image"></i> OCR识别
+                        </button>
+                        <button class="btn btn-outline" onclick="navigateTo('settings')">
+                            <i class="fas fa-cog"></i> 配置API密钥
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 论文润色页面 -->
+            <div class="page" id="page-paper-polish">
+                <div class="page-header">
+                    <div>
+                        <h1 class="page-title">论文润色</h1>
+                        <p class="page-subtitle">智能润色学术论文，删除冗余内容</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="tabs">
+                        <div class="tab active" data-tab="polish-upload">上传文档</div>
+                        <div class="tab" data-tab="polish-text">文本输入</div>
+                    </div>
+
+                    <div class="tab-content active" id="tab-polish-upload">
+                        <div class="form-group">
+                            <label class="form-label">上传Word文档</label>
+                            <div class="file-upload" id="polish-file-upload">
+                                <i class="fas fa-cloud-upload-alt"></i>
+                                <p>拖拽文件到此处或点击上传</p>
+                                <p class="hint">支持 .docx 格式，最大 10MB</p>
+                                <input type="file" id="polish-file-input" accept=".docx" style="display: none;">
+                            </div>
+                        </div>
+                        <div id="polish-file-info" class="hidden" style="margin-bottom: 20px;">
+                            <div style="display: flex; align-items: center; gap: 12px; padding: 16px; background: rgba(24, 144, 255, 0.05); border-radius: 8px;">
+                                <i class="fas fa-file-word" style="color: var(--primary-color); font-size: 24px;"></i>
+                                <div style="flex: 1;">
+                                    <div id="polish-file-name" style="font-weight: 500;"></div>
+                                    <div id="polish-file-size" style="font-size: 12px; color: var(--text-secondary);"></div>
+                                </div>
+                                <button class="btn btn-sm btn-outline" onclick="clearPolishFile()">
+                                    <i class="fas fa-times"></i> 移除
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="tab-content" id="tab-polish-text">
+                        <div class="form-group">
+                            <label class="form-label">输入待润色文本</label>
+                            <textarea class="form-textarea" id="polish-text-input" rows="10" placeholder="请粘贴需要润色的学术论文内容..."></textarea>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">润色策略</label>
+                        <select class="form-select" id="polish-strategy">
+                            <option value="quick">快速润色 - 修正语法错误，提升表达流畅度</option>
+                            <option value="deep">深度润色 - 保留原文风格，优化论述逻辑</option>
+                            <option value="concise">精简润色 - 删除冗余内容，精简20%-40%</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">目标语言</label>
+                        <select class="form-select" id="polish-language">
+                            <option value="zh">中文</option>
+                            <option value="ja">日文</option>
+                            <option value="en">英文</option>
+                        </select>
+                    </div>
+
+                    <button class="btn btn-primary btn-lg" onclick="startPolish()" id="polish-btn">
+                        <i class="fas fa-magic"></i> 开始润色
+                    </button>
+
+                    <div id="polish-progress" class="hidden">
+                        <div class="progress-container">
+                            <div class="progress-bar">
+                                <div class="progress" id="polish-progress-bar" style="width: 0%"></div>
+                            </div>
+                            <div class="progress-text" id="polish-progress-text">正在处理中...</div>
+                        </div>
+                    </div>
+
+                    <div id="polish-result" class="hidden">
+                        <div class="form-group">
+                            <label class="form-label">润色结果</label>
+                            <div class="result-box">
+                                <pre id="polish-result-text"></pre>
+                            </div>
+                        </div>
+                        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                            <button class="btn btn-success" onclick="downloadPolishResult()">
+                                <i class="fas fa-download"></i> 下载文档
+                            </button>
+                            <button class="btn btn-outline" onclick="copyPolishResult()">
+                                <i class="fas fa-copy"></i> 复制结果
+                            </button>
+                            <button class="btn btn-outline" onclick="resetPolish()">
+                                <i class="fas fa-redo"></i> 重新处理
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- OCR识别页面 -->
+            <div class="page" id="page-ocr">
+                <div class="page-header">
+                    <div>
+                        <h1 class="page-title">OCR识别</h1>
+                        <p class="page-subtitle">高精度文字识别，支持多种OCR引擎</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="form-group">
+                        <label class="form-label">上传文件</label>
+                        <div class="file-upload" id="ocr-file-upload">
+                            <i class="fas fa-cloud-upload-alt"></i>
+                            <p>拖拽文件到此处或点击上传</p>
+                            <p class="hint">支持 PDF、JPG、PNG 格式，最大 20MB</p>
+                            <input type="file" id="ocr-file-input" accept=".pdf,.jpg,.jpeg,.png" multiple style="display: none;">
+                        </div>
+                    </div>
+
+                    <div id="ocr-files-list" class="hidden" style="margin-bottom: 20px;">
+                        <div style="font-weight: 500; margin-bottom: 10px;">已选择文件：</div>
+                        <div id="ocr-files-container"></div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">OCR引擎</label>
+                        <select class="form-select" id="ocr-engine">
+                            <option value="ndlocr_lite">NDL OCR-Lite (近代现代文献) ⭐推荐</option>
+                            <option value="ndlkotenocr_lite">NDL古典籍OCR-Lite (古典籍文献)</option>
+                            <option value="tesseract">Tesseract (本地运行)</option>
+                            <option value="qwen_vl">通义千问VL (高精度)</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">识别语言</label>
+                        <select class="form-select" id="ocr-language">
+                            <option value="ja">日语</option>
+                            <option value="zh">中文</option>
+                            <option value="en">英语</option>
+                            <option value="ko">韩语</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                            <input type="checkbox" id="ocr-remove-watermark" checked>
+                            <span>自动去除水印</span>
+                        </label>
+                    </div>
+
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                            <input type="checkbox" id="ocr-batch-mode">
+                            <span>批量处理模式</span>
+                        </label>
+                    </div>
+
+                    <button class="btn btn-primary btn-lg" onclick="startOCR()" id="ocr-btn">
+                        <i class="fas fa-play"></i> 开始识别
+                    </button>
+
+                    <div id="ocr-progress" class="hidden">
+                        <div class="progress-container">
+                            <div class="progress-bar">
+                                <div class="progress" id="ocr-progress-bar" style="width: 0%"></div>
+                            </div>
+                            <div class="progress-text" id="ocr-progress-text">正在识别中...</div>
+                        </div>
+                    </div>
+
+                    <div id="ocr-result" class="hidden">
+                        <div class="form-group">
+                            <label class="form-label">识别结果</label>
+                            <div class="result-box">
+                                <pre id="ocr-result-text"></pre>
+                            </div>
+                        </div>
+                        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                            <button class="btn btn-success" onclick="downloadOCRResult('json')">
+                                <i class="fas fa-download"></i> 导出JSON
+                            </button>
+                            <button class="btn btn-outline" onclick="downloadOCRResult('txt')">
+                                <i class="fas fa-download"></i> 导出TXT
+                            </button>
+                            <button class="btn btn-outline" onclick="downloadOCRResult('csv')">
+                                <i class="fas fa-download"></i> 导出CSV
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 实体识别页面 -->
+            <div class="page" id="page-ner">
+                <div class="page-header">
+                    <div>
+                        <h1 class="page-title">实体识别</h1>
+                        <p class="page-subtitle">自动识别历史文本中的专有名词</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="form-group">
+                        <label class="form-label">输入文本</label>
+                        <textarea class="form-textarea" id="ner-text" rows="8" placeholder="请输入需要识别实体的历史文本..."></textarea>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">实体类型</label>
+                        <div style="display: flex; flex-wrap: wrap; gap: 12px;">
+                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="checkbox" checked name="ner-type" value="person"> 
+                                <span class="entity-tag entity-person"><i class="fas fa-user"></i> 人名</span>
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="checkbox" checked name="ner-type" value="location"> 
+                                <span class="entity-tag entity-location"><i class="fas fa-map-marker-alt"></i> 地名</span>
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="checkbox" checked name="ner-type" value="organization"> 
+                                <span class="entity-tag entity-organization"><i class="fas fa-building"></i> 组织</span>
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="checkbox" checked name="ner-type" value="event"> 
+                                <span class="entity-tag entity-event"><i class="fas fa-calendar-alt"></i> 事件</span>
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="checkbox" name="ner-type" value="date"> 
+                                <span class="entity-tag entity-date"><i class="fas fa-clock"></i> 日期</span>
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="checkbox" name="ner-type" value="work"> 
+                                <span class="entity-tag entity-work"><i class="fas fa-book"></i> 文献</span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <button class="btn btn-primary btn-lg" onclick="startNER()" id="ner-btn">
+                        <i class="fas fa-search"></i> 开始识别
+                    </button>
+
+                    <div id="ner-result" class="hidden">
+                        <div class="form-group">
+                            <label class="form-label">识别到的实体</label>
+                            <div id="ner-entities" style="margin-bottom: 16px;"></div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">详细结果</label>
+                            <div class="result-box">
+                                <pre id="ner-result-text"></pre>
+                            </div>
+                        </div>
+                        <div style="display: flex; gap: 10px;">
+                            <button class="btn btn-success" onclick="downloadNERResult('json')">
+                                <i class="fas fa-download"></i> 导出JSON
+                            </button>
+                            <button class="btn btn-outline" onclick="downloadNERResult('csv')">
+                                <i class="fas fa-download"></i> 导出CSV
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 笔记生成页面 -->
+            <div class="page" id="page-notes">
+                <div class="page-header">
+                    <div>
+                        <h1 class="page-title">笔记生成</h1>
+                        <p class="page-subtitle">自动生成结构化学术笔记</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="form-group">
+                        <label class="form-label">输入内容</label>
+                        <textarea class="form-textarea" id="notes-content" rows="8" placeholder="请输入需要生成笔记的学术文献内容..."></textarea>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">笔记模板</label>
+                        <select class="form-select" id="notes-template">
+                            <option value="academic">学术笔记 - 标准格式</option>
+                            <option value="reading">阅读笔记 - 侧重理解</option>
+                            <option value="research">研究笔记 - 侧重分析</option>
+                            <option value="obsidian">Obsidian格式 - 双向链接</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                            <input type="checkbox" id="notes-extract-entities" checked>
+                            <span>自动提取实体并生成双向链接</span>
+                        </label>
+                    </div>
+
+                    <button class="btn btn-primary btn-lg" onclick="generateNotes()" id="notes-btn">
+                        <i class="fas fa-pen"></i> 生成笔记
+                    </button>
+
+                    <div id="notes-result" class="hidden">
+                        <div class="form-group">
+                            <label class="form-label">生成的笔记</label>
+                            <div class="result-box">
+                                <pre id="notes-result-text"></pre>
+                            </div>
+                        </div>
+                        <div style="display: flex; gap: 10px;">
+                            <button class="btn btn-success" onclick="downloadNotes('md')">
+                                <i class="fas fa-download"></i> 下载Markdown
+                            </button>
+                            <button class="btn btn-outline" onclick="copyNotes()">
+                                <i class="fas fa-copy"></i> 复制到剪贴板
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 引用规范化页面 -->
+            <div class="page" id="page-citation">
+                <div class="page-header">
+                    <div>
+                        <h1 class="page-title">引用规范化</h1>
+                        <p class="page-subtitle">统一多种引用格式</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="form-group">
+                        <label class="form-label">输入引用文本</label>
+                        <textarea class="form-textarea" id="citation-input" rows="6" placeholder="请输入需要规范化的引用文本..."></textarea>
+                    </div>
+
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                        <div class="form-group">
+                            <label class="form-label">源格式</label>
+                            <select class="form-select" id="citation-source">
+                                <option value="auto">自动识别</option>
+                                <option value="chicago">Chicago格式</option>
+                                <option value="apa">APA格式</option>
+                                <option value="gb7714">GB/T 7714格式</option>
+                                <option value="mla">MLA格式</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">目标格式</label>
+                            <select class="form-select" id="citation-target">
+                                <option value="gb7714">GB/T 7714格式</option>
+                                <option value="chicago">Chicago格式</option>
+                                <option value="apa">APA格式</option>
+                                <option value="mla">MLA格式</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <button class="btn btn-primary btn-lg" onclick="normalizeCitation()" id="citation-btn">
+                        <i class="fas fa-exchange-alt"></i> 转换格式
+                    </button>
+
+                    <div id="citation-result" class="hidden">
+                        <div class="form-group">
+                            <label class="form-label">转换结果</label>
+                            <div class="result-box">
+                                <pre id="citation-result-text"></pre>
+                            </div>
+                        </div>
+                        <button class="btn btn-outline" onclick="copyCitationResult()">
+                            <i class="fas fa-copy"></i> 复制结果
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 文风迁移页面 -->
+            <div class="page" id="page-style-transfer">
+                <div class="page-header">
+                    <div>
+                        <h1 class="page-title">文风迁移</h1>
+                        <p class="page-subtitle">分析和迁移文本写作风格</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="tabs">
+                        <div class="tab active" data-tab="style-analyze">风格分析</div>
+                        <div class="tab" data-tab="style-transfer">风格迁移</div>
+                    </div>
+
+                    <div class="tab-content active" id="tab-style-analyze">
+                        <div class="form-group">
+                            <label class="form-label">输入文本</label>
+                            <textarea class="form-textarea" id="style-text" rows="8" placeholder="请输入需要分析风格的文本..."></textarea>
+                        </div>
+                        <button class="btn btn-primary" onclick="analyzeStyle()">
+                            <i class="fas fa-chart-bar"></i> 分析风格
+                        </button>
+                    </div>
+
+                    <div class="tab-content" id="tab-style-transfer">
+                        <div class="form-group">
+                            <label class="form-label">输入文本</label>
+                            <textarea class="form-textarea" id="transfer-text" rows="6" placeholder="请输入需要迁移风格的文本..."></textarea>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">目标风格</label>
+                            <select class="form-select" id="target-style">
+                                <option value="academic">学术论文风格</option>
+                                <option value="narrative">叙事风格</option>
+                                <option value="formal">正式公文风格</option>
+                                <option value="colloquial">口语化风格</option>
+                            </select>
+                        </div>
+                        <button class="btn btn-primary" onclick="transferStyle()">
+                            <i class="fas fa-exchange-alt"></i> 迁移风格
+                        </button>
+                    </div>
+
+                    <div id="style-result" class="hidden" style="margin-top: 20px;">
+                        <div class="form-group">
+                            <label class="form-label">分析/迁移结果</label>
+                            <div class="result-box">
+                                <pre id="style-result-text"></pre>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 虚拟人格页面 -->
+            <div class="page" id="page-persona">
+                <div class="page-header">
+                    <div>
+                        <h1 class="page-title">虚拟人格对话</h1>
+                        <p class="page-subtitle">与历史人物进行角色扮演对话</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="form-group">
+                        <label class="form-label">选择历史人物</label>
+                        <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                            <button class="btn btn-outline" onclick="selectPersona('fukuzawa')" id="persona-fukuzawa">
+                                <i class="fas fa-user"></i> 福泽谕吉
+                            </button>
+                            <button class="btn btn-outline" onclick="selectPersona('maruyama')" id="persona-maruyama">
+                                <i class="fas fa-user"></i> 丸山真男
+                            </button>
+                            <button class="btn btn-outline" onclick="selectPersona('shibusawa')" id="persona-shibusawa">
+                                <i class="fas fa-user"></i> 涩泽荣一
+                            </button>
+                        </div>
+                    </div>
+
+                    <div id="persona-chat-container" class="hidden">
+                        <div class="chat-container" id="persona-chat">
+                            <div style="text-align: center; color: var(--text-secondary); padding: 40px;">
+                                <i class="fas fa-comments" style="font-size: 48px; margin-bottom: 16px;"></i>
+                                <p>选择一位历史人物开始对话</p>
+                            </div>
+                        </div>
+                        <div style="display: flex; gap: 10px;">
+                            <input type="text" class="form-input" id="persona-input" placeholder="输入您的问题..." onkeypress="handlePersonaKeypress(event)">
+                            <button class="btn btn-primary" onclick="sendPersonaMessage()">
+                                <i class="fas fa-paper-plane"></i> 发送
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 史料发言识别页面 -->
+            <div class="page" id="page-speech">
+                <div class="page-header">
+                    <div>
+                        <h1 class="page-title">史料发言识别</h1>
+                        <p class="page-subtitle">从OCR文本中提取发言内容和年代信息</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="form-group">
+                        <label class="form-label">上传OCR结果文件</label>
+                        <div class="file-upload" id="speech-file-upload">
+                            <i class="fas fa-cloud-upload-alt"></i>
+                            <p>拖拽OCR结果文件到此处</p>
+                            <p class="hint">支持 JSON、CSV、TXT 格式</p>
+                            <input type="file" id="speech-file-input" accept=".json,.csv,.txt" style="display: none;">
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">或直接输入文本</label>
+                        <textarea class="form-textarea" id="speech-text" rows="6" placeholder="请输入OCR识别后的文本内容..."></textarea>
+                    </div>
+
+                    <button class="btn btn-primary btn-lg" onclick="extractSpeeches()" id="speech-btn">
+                        <i class="fas fa-search"></i> 提取发言
+                    </button>
+
+                    <div id="speech-result" class="hidden">
+                        <div class="form-group">
+                            <label class="form-label">提取结果</label>
+                            <div class="result-box">
+                                <pre id="speech-result-text"></pre>
+                            </div>
+                        </div>
+                        <div style="display: flex; gap: 10px;">
+                            <button class="btn btn-success" onclick="downloadSpeechResult('json')">
+                                <i class="fas fa-download"></i> 导出JSON
+                            </button>
+                            <button class="btn btn-outline" onclick="downloadSpeechResult('md')">
+                                <i class="fas fa-download"></i> 导出Markdown
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- AI研究助手页面 -->
+            <div class="page" id="page-research">
+                <div class="page-header">
+                    <div>
+                        <h1 class="page-title">AI研究助手</h1>
+                        <p class="page-subtitle">智能对话，解答您的研究问题</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="chat-container" id="research-chat">
+                        <div style="text-align: center; color: var(--text-secondary); padding: 40px;">
+                            <i class="fas fa-robot" style="font-size: 48px; margin-bottom: 16px; color: var(--primary-color);"></i>
+                            <p style="font-size: 16px; margin-bottom: 8px;">您好！我是AI研究助手</p>
+                            <p style="font-size: 14px;">我可以帮助您解答日本史研究相关的问题，请随时提问。</p>
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 10px;">
+                        <input type="text" class="form-input" id="research-input" placeholder="输入您的研究问题..." onkeypress="handleResearchKeypress(event)">
+                        <button class="btn btn-primary" onclick="sendResearchMessage()">
+                            <i class="fas fa-paper-plane"></i> 发送
+                        </button>
+                    </div>
+                    <div style="margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap;">
+                        <button class="btn btn-sm btn-outline" onclick="askQuickQuestion('明治维新的主要原因是什么？')">明治维新的主要原因</button>
+                        <button class="btn btn-sm btn-outline" onclick="askQuickQuestion('请介绍一下福泽谕吉的思想')">福泽谕吉的思想</button>
+                        <button class="btn btn-sm btn-outline" onclick="askQuickQuestion('幕末时期的开国政策有哪些？')">幕末开国政策</button>
+                        <button class="btn btn-sm btn-outline" onclick="clearResearchChat()">
+                            <i class="fas fa-trash"></i> 清空对话
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 设置页面 -->
+            <div class="page" id="page-settings">
+                <div class="page-header">
+                    <div>
+                        <h1 class="page-title">设置</h1>
+                        <p class="page-subtitle">配置API密钥和系统参数</p>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <i class="fas fa-key"></i>
+                            API密钥管理
+                        </div>
+                    </div>
+                    <p style="color: var(--text-secondary); margin-bottom: 20px;">
+                        配置各AI服务商的API密钥。密钥仅存储在本地浏览器中，不会上传到服务器。
+                    </p>
+
+                    <div style="display: grid; gap: 16px;">
+                        <div style="padding: 16px; border: 1px solid var(--border-color); border-radius: 8px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                                <div style="display: flex; align-items: center; gap: 10px;">
+                                    <i class="fas fa-cloud" style="color: #ff6a00; font-size: 20px;"></i>
+                                    <span style="font-weight: 500;">通义千问 (阿里云DashScope)</span>
+                                </div>
+                                <span class="badge badge-success" id="qwen-status">已配置</span>
+                            </div>
+                            <div style="display: flex; gap: 10px;">
+                                <input type="password" class="form-input" id="qwen-key" placeholder="请输入API密钥">
+                                <button class="btn btn-primary btn-sm" onclick="saveApiKey('qwen')">保存</button>
+                                <button class="btn btn-outline btn-sm" onclick="testApiKey('qwen')">测试</button>
+                            </div>
+                        </div>
+
+                        <div style="padding: 16px; border: 1px solid var(--border-color); border-radius: 8px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                                <div style="display: flex; align-items: center; gap: 10px;">
+                                    <i class="fas fa-robot" style="color: #00a67e; font-size: 20px;"></i>
+                                    <span style="font-weight: 500;">OpenAI</span>
+                                </div>
+                                <span class="badge" id="openai-status">未配置</span>
+                            </div>
+                            <div style="display: flex; gap: 10px;">
+                                <input type="password" class="form-input" id="openai-key" placeholder="请输入API密钥">
+                                <button class="btn btn-primary btn-sm" onclick="saveApiKey('openai')">保存</button>
+                                <button class="btn btn-outline btn-sm" onclick="testApiKey('openai')">测试</button>
+                            </div>
+                        </div>
+
+                        <div style="padding: 16px; border: 1px solid var(--border-color); border-radius: 8px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                                <div style="display: flex; align-items: center; gap: 10px;">
+                                    <i class="fas fa-brain" style="color: #4285f4; font-size: 20px;"></i>
+                                    <span style="font-weight: 500;">智谱AI (GLM)</span>
+                                </div>
+                                <span class="badge" id="zhipu-status">未配置</span>
+                            </div>
+                            <div style="display: flex; gap: 10px;">
+                                <input type="password" class="form-input" id="zhipu-key" placeholder="请输入API密钥">
+                                <button class="btn btn-primary btn-sm" onclick="saveApiKey('zhipu')">保存</button>
+                                <button class="btn btn-outline btn-sm" onclick="testApiKey('zhipu')">测试</button>
+                            </div>
+                        </div>
+
+                        <div style="padding: 16px; border: 1px solid var(--border-color); border-radius: 8px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                                <div style="display: flex; align-items: center; gap: 10px;">
+                                    <i class="fas fa-microchip" style="color: #6366f1; font-size: 20px;"></i>
+                                    <span style="font-weight: 500;">MiniMax</span>
+                                </div>
+                                <span class="badge badge-success" id="minimax-status">已配置</span>
+                            </div>
+                            <div style="display: flex; gap: 10px;">
+                                <input type="password" class="form-input" id="minimax-key" placeholder="请输入API密钥">
+                                <button class="btn btn-primary btn-sm" onclick="saveApiKey('minimax')">保存</button>
+                                <button class="btn btn-outline btn-sm" onclick="testApiKey('minimax')">测试</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <i class="fas fa-sliders-h"></i>
+                            偏好设置
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">默认AI服务商</label>
+                        <select class="form-select" id="default-provider" onchange="savePreferences()">
+                            <option value="qwen">通义千问</option>
+                            <option value="openai">OpenAI</option>
+                            <option value="zhipu">智谱AI</option>
+                            <option value="minimax">MiniMax</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">界面语言</label>
+                        <select class="form-select" id="ui-language" onchange="savePreferences()">
+                            <option value="zh-CN">简体中文</option>
+                            <option value="ja">日本語</option>
+                            <option value="en">English</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">界面字体大小</label>
+                        <select class="form-select" id="font-size" onchange="savePreferences()">
+                            <option value="normal">正常</option>
+                            <option value="large">大</option>
+                            <option value="xlarge">特大</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                            <input type="checkbox" id="dark-mode" onchange="toggleDarkMode()">
+                            <span>深色模式</span>
+                        </label>
+                    </div>
+
+                    <div class="form-group">
+                        <label style="display: flex; align-items: center; gap: 10px; cursor: pointer;">
+                            <input type="checkbox" id="show-guide" onchange="savePreferences()" checked>
+                            <span>启动时显示新手引导</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <div class="card-title">
+                            <i class="fas fa-info-circle"></i>
+                            关于
+                        </div>
+                    </div>
+                    <p style="color: var(--text-secondary); margin-bottom: 10px;">
+                        <strong>历史研究AI工具</strong> v1.0.0
+                    </p>
+                    <p style="color: var(--text-secondary); font-size: 13px;">
+                        专为日本史研究人员打造的智能研究助手，集成论文润色、OCR识别、实体识别、笔记生成等多种AI功能。
+                    </p>
+                </div>
+            </div>
+
+            <!-- 历史记录页面 -->
+            <div class="page" id="page-history">
+                <div class="page-header">
+                    <div>
+                        <h1 class="page-title">历史记录</h1>
+                        <p class="page-subtitle">查看您的操作历史</p>
+                    </div>
+                    <button class="btn btn-outline" onclick="clearHistory()">
+                        <i class="fas fa-trash"></i> 清空历史
+                    </button>
+                </div>
+
+                <div class="card">
+                    <div id="history-list">
+                        <p style="color: var(--text-secondary); text-align: center; padding: 40px;">
+                            暂无历史记录
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <div class="toast-container" id="toast-container"></div>
+
+    <div class="loading-overlay hidden" id="loading-overlay">
+        <div class="loading-spinner"></div>
+    </div>
+
+    <!-- 新手引导 -->
+    <div class="guide-overlay hidden" id="guide-overlay">
+        <div class="guide-card">
+            <h2><i class="fas fa-rocket" style="color: var(--primary-color);"></i> 欢迎使用历史研究AI工具</h2>
+            <p>这是一款专为日本史研究人员打造的智能研究助手。让我们快速了解如何使用：</p>
+            <div class="guide-steps">
+                <div class="guide-step">
+                    <i class="fas fa-key"></i>
+                    <div>
+                        <strong>第一步：配置API密钥</strong>
+                        <p style="font-size: 12px; color: var(--text-secondary);">在设置页面配置您的AI服务商API密钥</p>
+                    </div>
+                </div>
+                <div class="guide-step">
+                    <i class="fas fa-file-word"></i>
+                    <div>
+                        <strong>第二步：选择功能</strong>
+                        <p style="font-size: 12px; color: var(--text-secondary);">论文润色、OCR识别、实体识别等多种功能</p>
+                    </div>
+                </div>
+                <div class="guide-step">
+                    <i class="fas fa-magic"></i>
+                    <div>
+                        <strong>第三步：开始使用</strong>
+                        <p style="font-size: 12px; color: var(--text-secondary);">上传文件或输入文本，点击开始处理</p>
+                    </div>
+                </div>
+            </div>
+            <button class="btn btn-primary btn-lg" onclick="closeGuide()">
+                <i class="fas fa-check"></i> 开始使用
+            </button>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>

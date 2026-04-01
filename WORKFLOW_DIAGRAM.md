@@ -5,9 +5,9 @@
 | 属性 | 内容 |
 |------|------|
 | 文档名称 | WORKFLOW_DIAGRAM.md |
-| 版本 | 2.1.0 |
+| 版本 | 3.0.0 |
 | 创建日期 | 2026-03-28 |
-| 更新日期 | 2026-03-30 |
+| 更新日期 | 2026-04-01 |
 | 文档性质 | 核心技术参考文档 |
 | 关联文档 | [COMPREHENSIVE_TECHNICAL_GUIDE.md](COMPREHENSIVE_TECHNICAL_GUIDE.md) |
 
@@ -27,9 +27,16 @@
 
 | 模块名称 | 独立文档路径 | 功能概述 |
 |----------|-------------|----------|
-| LearningModule | [learning_module/README.md](learning_module/README.md) | 学术资源检索、文献分析、改进建议生成 |
-| OpenSourceFinder | [open_source_finder/README.md](open_source_finder/README.md) | GitHub/HuggingFace开源项目搜索与评估 |
+| IntelligentResearchAssistant | [intelligent_research_assistant/README.md](intelligent_research_assistant/README.md) | 统一研究助手（整合原open_source_finder和learning_module） |
 | NDL搜索模块 | [ndl-search/docs/README.md](ndl-search/docs/README.md) | 日本国立国会图书馆文献检索与下载 |
+
+### 架构变更说明（v3.0.0）
+
+**重要变更**：
+- `open_source_finder` 和 `learning_module` 已整合为 `IntelligentResearchAssistant` 模块
+- 原模块已归档至 `archive/archived_modules/` 目录
+- 新模块提供统一接口，支持多平台搜索、深度分析和智能报告生成
+- 详细迁移指南请参考 [迁移指南](intelligent_research_assistant/docs/MIGRATION_GUIDE.md)
 
 ---
 
@@ -2840,24 +2847,986 @@ flowchart TD
 
 ---
 
-**文档版本**：2.4.0  
+## 第二十一部分：增强版开源项目搜寻系统流程
+
+### 21.1 增强版搜寻系统整体架构
+
+```mermaid
+graph TB
+    subgraph 用户层
+        A[用户配置关注领域]
+        B[设置搜寻频率]
+        C[查看搜寻报告]
+    end
+
+    subgraph 核心处理层
+        D[EnhancedOpenSourceFinder]
+        E[关注领域管理器]
+        F[数据源管理器]
+        G[项目评价引擎]
+        H[报告生成器]
+    end
+
+    subgraph 数据源适配层
+        I[GitHubAdapter]
+        J[ArxivAdapter]
+        K[PapersWithCodeAdapter]
+        L[其他适配器]
+    end
+
+    subgraph 存储层
+        M[文档存储]
+        N[配置存储]
+        O[缓存存储]
+    end
+
+    subgraph LLM服务层
+        P[LLM客户端]
+        Q[摘要生成]
+        R[趋势分析]
+    end
+
+    A --> E
+    B --> E
+    E --> D
+    D --> F
+    F --> I
+    F --> J
+    F --> K
+    F --> L
+    I --> G
+    J --> G
+    K --> G
+    L --> G
+    G --> H
+    H --> P
+    P --> Q
+    P --> R
+    H --> C
+    D --> M
+    D --> N
+    D --> O
+```
+
+### 21.2 关注领域管理流程
+
+```mermaid
+flowchart TD
+    A[用户添加关注领域] --> B[输入领域名称]
+    B --> C[设置关键词列表]
+    C --> D[选择数据源平台]
+    D --> E[设置搜寻频率]
+    E --> F[设置优先级]
+    F --> G[创建FocusArea对象]
+    G --> H[保存到配置文件]
+    H --> I[领域添加完成]
+    
+    J[移除关注领域] --> K[查找领域配置]
+    K --> L{领域存在?}
+    L -->|是| M[从配置中删除]
+    L -->|否| N[返回错误]
+    M --> O[保存配置]
+    O --> P[领域移除完成]
+    
+    style G fill:#bfb,stroke:#333,stroke-width:2px
+    style I fill:#bbf,stroke:#333,stroke-width:2px
+    style P fill:#bbf,stroke:#333,stroke-width:2px
+```
+
+### 21.3 多数据源搜寻流程
+
+```mermaid
+flowchart TD
+    A[开始搜寻] --> B[获取关注领域配置]
+    B --> C[遍历关键词列表]
+    C --> D[遍历启用的数据源]
+    D --> E{数据源类型}
+    
+    E -->|GitHub| F[GitHubAdapter.search]
+    E -->|arXiv| G[ArxivAdapter.search]
+    E -->|PapersWithCode| H[PapersWithCodeAdapter.search]
+    
+    F --> I[调用GitHub API]
+    G --> J[调用arXiv API]
+    H --> K[调用PWC API]
+    
+    I --> L[解析响应数据]
+    J --> L
+    K --> L
+    
+    L --> M[创建ProjectInfo对象]
+    M --> N[计算项目评分]
+    N --> O[添加到结果列表]
+    O --> P{还有更多关键词?}
+    
+    P -->|是| C
+    P -->|否| Q[去重处理]
+    Q --> R[按评分排序]
+    R --> S[返回搜寻结果]
+    
+    style S fill:#bfb,stroke:#333,stroke-width:2px
+```
+
+### 21.4 项目评价机制流程
+
+```mermaid
+flowchart TD
+    A[项目原始数据] --> B[活跃度评分]
+    A --> C[社区参与度评分]
+    A --> D[技术创新性评分]
+    A --> E[文档质量评分]
+    A --> F[可持续性评分]
+    
+    B --> B1[最近更新时间]
+    B --> B2[Issues数量]
+    B1 --> B3[计算活跃度得分]
+    B2 --> B3
+    
+    C --> C1[Stars数量]
+    C --> C2[Forks数量]
+    C --> C3[Watchers数量]
+    C1 --> C4[计算社区得分]
+    C2 --> C4
+    C3 --> C4
+    
+    D --> D1[Stars趋势]
+    D --> D2[创新标签]
+    D1 --> D3[计算创新性得分]
+    D2 --> D3
+    
+    E --> E1[README完整性]
+    E --> E2[文档链接]
+    E1 --> E3[计算文档得分]
+    E2 --> E3
+    
+    F --> F1[许可证]
+    F --> F2[维护状态]
+    F1 --> F3[计算可持续性得分]
+    F2 --> F3
+    
+    B3 --> G[综合评分计算]
+    C4 --> G
+    D3 --> G
+    E3 --> G
+    F3 --> G
+    
+    G --> H[权重分配]
+    H --> I[活跃度 25%]
+    H --> J[社区 25%]
+    H --> K[创新性 20%]
+    H --> L[文档 15%]
+    H --> M[可持续性 15%]
+    
+    I --> N[最终综合评分]
+    J --> N
+    K --> N
+    L --> N
+    M --> N
+    
+    style N fill:#bfb,stroke:#333,stroke-width:2px
+```
+
+### 21.5 定期报告生成流程
+
+```mermaid
+flowchart TD
+    A[触发报告生成] --> B[收集项目数据]
+    B --> C[趋势分析]
+    C --> D[平台分布统计]
+    D --> E[标签热度分析]
+    E --> F[平均评分计算]
+    
+    F --> G[生成推荐建议]
+    G --> H[识别Top项目]
+    H --> I[活跃项目筛选]
+    I --> J[创新项目筛选]
+    J --> K[生成推荐列表]
+    
+    K --> L{LLM可用?}
+    L -->|是| M[调用LLM生成摘要]
+    L -->|否| N[生成基础摘要]
+    
+    M --> O[构造LLM提示词]
+    O --> P[调用LLM API]
+    P --> Q[解析LLM响应]
+    Q --> R[获取智能摘要]
+    
+    N --> S[统计信息汇总]
+    S --> R
+    
+    R --> T[创建SearchReport对象]
+    T --> U[保存报告到文件]
+    U --> V[报告生成完成]
+    
+    style V fill:#bfb,stroke:#333,stroke-width:2px
+```
+
+### 21.6 文档下载与管理流程
+
+```mermaid
+flowchart TD
+    A[选择项目] --> B{项目平台}
+    
+    B -->|GitHub| C[下载README]
+    B -->|arXiv| D[下载论文PDF]
+    B -->|其他| E[尝试通用下载]
+    
+    C --> C1[构造README API URL]
+    C1 --> C2[发送HTTP请求]
+    C2 --> C3[Base64解码内容]
+    C3 --> C4[保存为.md文件]
+    
+    D --> D1[提取arXiv ID]
+    D1 --> D2[构造PDF URL]
+    D2 --> D3[下载PDF文件]
+    D3 --> D4[保存到papers目录]
+    
+    E --> E1[发送HTTP请求]
+    E1 --> E2[保存文件]
+    
+    C4 --> F[记录文件路径]
+    D4 --> F
+    E2 --> F
+    
+    F --> G[更新项目local_files]
+    G --> H[文档下载完成]
+    
+    style H fill:#bfb,stroke:#333,stroke-width:2px
+```
+
+### 21.7 数据互通接口流程
+
+```mermaid
+flowchart TD
+    A[导出数据请求] --> B{导出格式}
+    
+    B -->|JSON| C[序列化为JSON]
+    B -->|Markdown| D[格式化为Markdown]
+    B -->|CSV| E[转换为CSV表格]
+    
+    C --> F[返回JSON字符串]
+    D --> G[返回Markdown文本]
+    E --> H[返回CSV数据]
+    
+    I[导入数据请求] --> J[读取外部文件]
+    J --> K{文件格式}
+    K -->|JSON| L[解析JSON数据]
+    K -->|其他| M[返回错误]
+    L --> N[返回数据列表]
+    
+    F --> O[供其他模块使用]
+    G --> O
+    H --> O
+    N --> O
+    
+    style O fill:#bfb,stroke:#333,stroke-width:2px
+```
+
+### 21.8 定期搜寻调度流程
+
+```mermaid
+flowchart TD
+    A[启动定期搜寻] --> B[加载所有关注领域]
+    B --> C[遍历关注领域]
+    C --> D{领域启用?}
+    
+    D -->|否| E[跳过该领域]
+    D -->|是| F[检查上次搜寻时间]
+    
+    F --> G{是否到达搜寻时间?}
+    G -->|否| H[跳过本次搜寻]
+    G -->|是| I[执行搜寻]
+    
+    I --> J[调用search_focus_area]
+    J --> K[获取搜寻结果]
+    K --> L[生成报告]
+    L --> M[保存报告]
+    M --> N[更新last_searched时间]
+    
+    E --> O{还有更多领域?}
+    H --> O
+    N --> O
+    
+    O -->|是| C
+    O -->|否| P[本次定期搜寻完成]
+    
+    style P fill:#bfb,stroke:#333,stroke-width:2px
+```
+
+---
+
+## 第二十二部分：智能研究助手模块流程
+
+### 22.1 智能研究助手整体架构
+
+```mermaid
+graph TB
+    subgraph 用户层
+        A[用户请求] --> B[IntelligentResearchAssistant]
+    end
+
+    subgraph 核心管理层
+        B --> C[LLMManager]
+        B --> D[CacheManager]
+        B --> E[ConfigManager]
+    end
+
+    subgraph 搜索层
+        B --> F[ProjectFinder]
+        B --> G[PaperFinder]
+        B --> H[DocumentFetcher]
+    end
+
+    subgraph 分析层
+        B --> I[ProjectAnalyzer]
+        B --> J[PaperAnalyzer]
+        B --> K[LiteratureAnalyzer]
+    end
+
+    subgraph 生成层
+        B --> L[ReportGenerator]
+        B --> M[ImprovementGenerator]
+    end
+
+    subgraph 外部服务
+        F --> N[GitHub API]
+        F --> O[HuggingFace API]
+        G --> P[arXiv API]
+        G --> Q[Papers With Code]
+        H --> R[Web Fetcher]
+    end
+
+    subgraph LLM服务
+        C --> S[通义千问]
+        C --> T[OpenAI]
+        C --> U[智谱AI]
+    end
+```
+
+### 22.2 项目搜索流程
+
+```mermaid
+flowchart TD
+    A[搜索请求] --> B[ProjectFinder]
+    B --> C{选择平台}
+    
+    C -->|GitHub| D[构造GitHub查询]
+    C -->|HuggingFace| E[构造HF查询]
+    C -->|多平台| F[并行查询]
+    
+    D --> G[调用GitHub API]
+    E --> H[调用HF API]
+    F --> G
+    F --> H
+    
+    G --> I[解析响应数据]
+    H --> I
+    
+    I --> J[构建SearchResult对象]
+    J --> K[应用缓存]
+    K --> L[返回结果列表]
+    
+    style L fill:#bfb,stroke:#333,stroke-width:2px
+```
+
+### 22.3 论文搜索流程
+
+```mermaid
+flowchart TD
+    A[论文搜索请求] --> B[PaperFinder]
+    B --> C{选择数据源}
+    
+    C -->|arXiv| D[构造arXiv查询]
+    C -->|Papers With Code| E[构造PWC查询]
+    C -->|多源| F[并行查询]
+    
+    D --> G[调用arXiv API]
+    E --> H[调用PWC API]
+    F --> G
+    F --> H
+    
+    G --> I[解析论文元数据]
+    H --> I
+    
+    I --> J[提取标题/作者/摘要]
+    J --> K[构建PaperResult对象]
+    K --> L[应用缓存]
+    L --> M[返回论文列表]
+    
+    style M fill:#bfb,stroke:#333,stroke-width:2px
+```
+
+### 22.4 深度分析流程
+
+```mermaid
+flowchart TD
+    A[分析请求] --> B{分析类型}
+    
+    B -->|项目| C[ProjectAnalyzer]
+    B -->|论文| D[PaperAnalyzer]
+    B -->|文献| E[LiteratureAnalyzer]
+    
+    C --> F[获取项目详情]
+    D --> G[获取论文内容]
+    E --> H[获取文献集合]
+    
+    F --> I[构造分析提示词]
+    G --> I
+    H --> I
+    
+    I --> J[调用LLMManager]
+    J --> K{缓存命中?}
+    
+    K -->|是| L[返回缓存结果]
+    K -->|否| M[调用LLM API]
+    
+    M --> N[解析分析结果]
+    N --> O[构建AnalysisResult]
+    O --> P[存储缓存]
+    
+    L --> Q[返回分析结果]
+    P --> Q
+    
+    style Q fill:#bfb,stroke:#333,stroke-width:2px
+```
+
+### 22.5 报告生成流程
+
+```mermaid
+flowchart TD
+    A[报告生成请求] --> B[ReportGenerator]
+    B --> C[收集输入数据]
+    
+    C --> D[项目列表]
+    C --> E[论文列表]
+    C --> F[分析结果]
+    
+    D --> G[构造报告提示词]
+    E --> G
+    F --> G
+    
+    G --> H[调用LLMManager]
+    H --> I[生成报告内容]
+    
+    I --> J[结构化报告]
+    J --> K[生成摘要]
+    K --> L[生成建议]
+    
+    L --> M[构建Report对象]
+    M --> N[返回完整报告]
+    
+    style N fill:#bfb,stroke:#333,stroke-width:2px
+```
+
+### 22.6 改进建议生成流程
+
+```mermaid
+flowchart TD
+    A[改进建议请求] --> B[ImprovementGenerator]
+    B --> C[分析当前状态]
+    
+    C --> D[识别问题领域]
+    D --> E[生成短期建议]
+    D --> F[生成中期建议]
+    D --> G[生成长期建议]
+    
+    E --> H[优先级排序]
+    F --> H
+    G --> H
+    
+    H --> I[构造建议提示词]
+    I --> J[调用LLMManager]
+    J --> K[解析建议结果]
+    
+    K --> L[构建ImprovementSuggestion]
+    L --> M[返回建议列表]
+    
+    style M fill:#bfb,stroke:#333,stroke-width:2px
+```
+
+### 22.7 缓存管理流程
+
+```mermaid
+flowchart TD
+    A[缓存请求] --> B[CacheManager]
+    B --> C{操作类型}
+    
+    C -->|读取| D[计算缓存键]
+    C -->|写入| E[计算缓存键]
+    C -->|清除| F[清除过期缓存]
+    
+    D --> G[查找缓存文件]
+    G --> H{缓存存在?}
+    H -->|是| I[检查TTL]
+    H -->|否| J[返回未命中]
+    
+    I --> K{是否过期?}
+    K -->|否| L[返回缓存数据]
+    K -->|是| J
+    
+    E --> M[序列化数据]
+    M --> N[写入缓存文件]
+    N --> O[记录元数据]
+    
+    F --> P[扫描缓存目录]
+    P --> Q[检查文件时间]
+    Q --> R[删除过期文件]
+    
+    L --> S[缓存命中]
+    J --> T[缓存未命中]
+    O --> U[缓存已更新]
+    R --> V[缓存已清理]
+    
+    style S fill:#bfb,stroke:#333,stroke-width:2px
+    style T fill:#fbb,stroke:#333,stroke-width:2px
+    style U fill:#bfb,stroke:#333,stroke-width:2px
+    style V fill:#bfb,stroke:#333,stroke-width:2px
+```
+
+### 22.8 模块迁移对照流程
+
+```mermaid
+flowchart LR
+    subgraph 原模块
+        A[open_source_finder]
+        B[learning_module]
+    end
+    
+    subgraph 新模块
+        C[IntelligentResearchAssistant]
+    end
+    
+    A --> D[ProjectFinder]
+    A --> E[DocumentFetcher]
+    A --> F[ProjectAnalyzer]
+    
+    B --> G[PaperFinder]
+    B --> H[LiteratureAnalyzer]
+    B --> I[ImprovementGenerator]
+    
+    D --> C
+    E --> C
+    F --> C
+    G --> C
+    H --> C
+    I --> C
+    
+    C --> J[统一API接口]
+    
+    style J fill:#bfb,stroke:#333,stroke-width:2px
+```
+
+---
+
+## 第十部分：前端工作流程（新增）
+
+### 10.1 前端整体架构
+
+```mermaid
+graph TB
+    subgraph 用户层
+        A[浏览器访问] --> B[React应用]
+    end
+
+    subgraph 前端应用层
+        B --> C[路由管理]
+        B --> D[状态管理]
+        B --> E[API层]
+    end
+
+    subgraph 页面层
+        C --> F[首页]
+        C --> G[论文润色]
+        C --> H[OCR处理]
+        C --> I[实体识别]
+        C --> J[笔记生成]
+        C --> K[研究助手]
+        C --> L[设置页]
+    end
+
+    subgraph 组件层
+        F --> M[布局组件]
+        G --> N[业务组件]
+        H --> N
+        I --> N
+        J --> N
+        K --> N
+        L --> N
+    end
+
+    subgraph 后端API层
+        E --> O[Flask REST API]
+    end
+
+    style B fill:#bfb,stroke:#333,stroke-width:2px
+    style O fill:#fbf,stroke:#333,stroke-width:2px
+```
+
+### 10.2 前端技术栈
+
+```mermaid
+graph LR
+    A[前端技术栈] --> B[框架层]
+    A --> C[UI层]
+    A --> D[状态层]
+    A --> E[工具层]
+    
+    B --> B1[React 18]
+    B --> B2[TypeScript]
+    B --> B3[React Router]
+    
+    C --> C1[Ant Design 5]
+    C --> C2[Tailwind CSS]
+    C --> C3[CSS Modules]
+    
+    D --> D1[Zustand]
+    D --> D2[React Query]
+    D --> D3[Local Storage]
+    
+    E --> E1[Vite]
+    E --> E2[Axios]
+    E --> E3[Vitest]
+```
+
+### 10.3 用户交互流程
+
+```mermaid
+flowchart TD
+    A[用户访问] --> B{已配置API密钥?}
+    B -->|否| C[跳转设置页]
+    B -->|是| D[进入工作台]
+    
+    C --> E[配置API密钥]
+    E --> F[保存到本地存储]
+    F --> D
+    
+    D --> G{选择功能}
+    G -->|论文润色| H[上传文档]
+    G -->|OCR识别| I[上传文件]
+    G -->|实体识别| J[输入文本]
+    G -->|笔记生成| K[输入内容]
+    G -->|研究助手| L[开始对话]
+    
+    H --> M[选择策略]
+    M --> N[调用后端API]
+    N --> O[显示结果]
+    
+    I --> P[选择OCR引擎]
+    P --> N
+    
+    J --> Q[选择实体类型]
+    Q --> N
+    
+    K --> R[选择模板]
+    R --> N
+    
+    L --> S[发送消息]
+    S --> N
+    
+    O --> T[下载/导出]
+```
+
+### 10.4 API密钥管理流程
+
+```mermaid
+flowchart TD
+    A[用户打开设置页] --> B[显示API密钥管理]
+    B --> C{服务商列表}
+    
+    C --> D[通义千问]
+    C --> E[OpenAI]
+    C --> F[智谱AI]
+    C --> G[MiniMax]
+    
+    D --> H{已配置?}
+    E --> H
+    F --> H
+    G --> H
+    
+    H -->|是| I[显示密钥状态]
+    H -->|否| J[显示添加按钮]
+    
+    I --> K[测试/删除/切换]
+    J --> L[点击添加]
+    
+    L --> M[输入API密钥]
+    M --> N[验证格式]
+    N --> O[保存到本地存储]
+    O --> P[更新状态]
+    
+    K --> Q[测试连接]
+    Q --> R{连接成功?}
+    R -->|是| S[显示成功提示]
+    R -->|否| T[显示错误提示]
+```
+
+### 10.5 论文润色交互流程
+
+```mermaid
+flowchart TD
+    A[进入论文润色页] --> B[步骤1: 上传文档]
+    B --> C{文件有效?}
+    C -->|否| D[显示错误提示]
+    C -->|是| E[显示文件信息]
+    
+    E --> F[步骤2: 选择策略]
+    F --> G{选择润色策略}
+    G -->|快速润色| H[推荐新手]
+    G -->|深度润色| I[保留原文风格]
+    G -->|自定义| J[高级用户]
+    
+    H --> K[选择语言]
+    I --> K
+    J --> K
+    
+    K --> L{中文/日文/英文}
+    L --> M[点击开始润色]
+    
+    M --> N[调用后端API]
+    N --> O[显示加载状态]
+    O --> P{处理成功?}
+    
+    P -->|是| Q[步骤3: 显示结果]
+    P -->|否| R[显示错误信息]
+    
+    Q --> S[展示修改统计]
+    S --> T[展示修改详情]
+    T --> U{用户操作}
+    
+    U -->|下载文档| V[下载润色后文档]
+    U -->|预览对比| W[显示对比视图]
+    U -->|重新处理| B
+```
+
+### 10.6 OCR处理交互流程
+
+```mermaid
+flowchart TD
+    A[进入OCR处理页] --> B[上传文件]
+    B --> C{文件类型}
+    C -->|PDF| D[支持多页]
+    C -->|图片| E[单页处理]
+    
+    D --> F[选择OCR引擎]
+    E --> F
+    
+    F --> G{引擎选择}
+    G -->|NDL OCR-Lite| H[近代现代文献]
+    G -->|NDL古典籍OCR-Lite| I[古典籍文献]
+    G -->|Tesseract| J[本地运行]
+    G -->|通义千问VL| K[高精度识别]
+    
+    H --> L[配置选项]
+    I --> L
+    J --> L
+    K --> L
+    
+    L --> M{去除水印?}
+    M -->|是| N[启用水印去除]
+    M -->|否| O[跳过]
+    
+    N --> P[开始识别]
+    O --> P
+    
+    P --> Q[调用后端API]
+    Q --> R[显示处理进度]
+    R --> S{处理完成?}
+    
+    S -->|是| T[显示识别结果]
+    S -->|否| R
+    
+    T --> U[展示页面列表]
+    U --> V[展示识别文本]
+    V --> W{用户操作}
+    
+    W -->|导出JSON| X[下载JSON文件]
+    W -->|导出CSV| Y[下载CSV文件]
+    W -->|导出TXT| Z[下载TXT文件]
+```
+
+### 10.7 前后端数据交互流程
+
+```mermaid
+sequenceDiagram
+    participant U as 用户
+    participant F as 前端应用
+    participant S as 状态管理
+    participant A as API层
+    participant B as 后端服务
+    
+    U->>F: 访问页面
+    F->>S: 读取本地配置
+    S-->>F: 返回API密钥
+    F->>A: 初始化API客户端
+    A->>A: 添加请求拦截器
+    
+    U->>F: 上传文件
+    F->>F: 验证文件格式
+    F->>A: 发送请求
+    A->>A: 添加API密钥到Header
+    A->>B: POST /api/endpoint
+    B->>B: 处理请求
+    B-->>A: 返回结果
+    A->>A: 响应拦截器处理
+    A-->>F: 返回数据
+    F->>S: 更新状态
+    S-->>F: 触发重新渲染
+    F-->>U: 显示结果
+```
+
+### 10.8 状态管理流程
+
+```mermaid
+flowchart TD
+    A[应用启动] --> B[初始化Store]
+    
+    B --> C[ApiStore]
+    B --> D[UserStore]
+    B --> E[TaskStore]
+    
+    C --> F[API密钥管理]
+    F --> G[本地存储持久化]
+    
+    D --> H[用户偏好设置]
+    H --> I[字体大小/高对比度/语言]
+    
+    E --> J[任务状态管理]
+    J --> K[添加/更新/删除任务]
+    
+    G --> L[页面刷新恢复]
+    I --> L
+    K --> L
+    
+    L --> M[应用状态就绪]
+```
+
+### 10.9 组件渲染流程
+
+```mermaid
+flowchart TD
+    A[路由匹配] --> B[加载页面组件]
+    B --> C[初始化State]
+    C --> D[执行Effects]
+    
+    D --> E{需要数据?}
+    E -->|是| F[调用API]
+    E -->|否| G[渲染UI]
+    
+    F --> H[显示加载状态]
+    H --> I{请求成功?}
+    I -->|是| J[更新State]
+    I -->|否| K[显示错误]
+    
+    J --> G
+    K --> L[错误处理]
+    
+    G --> M[渲染子组件]
+    M --> N[用户交互]
+    N --> O[事件处理]
+    O --> P{需要更新?}
+    
+    P -->|是| Q[更新State]
+    P -->|否| N
+    
+    Q --> G
+```
+
+---
+
+## 第十一部分：前端开发规范（新增）
+
+### 11.1 目录结构规范
+
+```
+frontend/
+├── src/
+│   ├── api/              # API接口层
+│   │   ├── client.ts     # Axios实例配置
+│   │   ├── endpoints/    # 各模块API端点
+│   │   └── index.ts      # 导出汇总
+│   │
+│   ├── components/       # 组件库
+│   │   ├── common/       # 通用组件
+│   │   ├── business/     # 业务组件
+│   │   └── layout/       # 布局组件
+│   │
+│   ├── pages/            # 页面组件
+│   │   ├── Home/
+│   │   ├── PaperPolish/
+│   │   ├── OcrProcess/
+│   │   └── ...
+│   │
+│   ├── stores/           # 状态管理
+│   │   ├── useApiStore.ts
+│   │   ├── useUserStore.ts
+│   │   └── useTaskStore.ts
+│   │
+│   ├── hooks/            # 自定义Hooks
+│   ├── utils/            # 工具函数
+│   ├── types/            # 类型定义
+│   └── styles/           # 样式文件
+│
+├── tests/                # 测试文件
+├── public/               # 静态资源
+└── config/               # 配置文件
+```
+
+### 11.2 命名规范
+
+| 类型 | 规范 | 示例 |
+|------|------|------|
+| 组件文件 | PascalCase | `FileUploader.tsx` |
+| 工具函数 | camelCase | `formatDate.ts` |
+| 常量 | UPPER_SNAKE_CASE | `MAX_FILE_SIZE` |
+| CSS类名 | kebab-case | `file-uploader.css` |
+| 类型定义 | PascalCase + 后缀 | `ApiRequest.ts` |
+
+### 11.3 Git提交规范
+
+```
+feat: 新功能
+fix: 修复bug
+docs: 文档更新
+style: 代码格式调整
+refactor: 重构
+test: 测试相关
+chore: 构建/工具相关
+```
+
+### 11.4 代码质量要求
+
+- TypeScript严格模式
+- ESLint + Prettier代码格式化
+- 单元测试覆盖率 ≥ 70%
+- 组件必须有类型定义
+- 关键函数必须有注释
+
+---
+
+**文档版本**：3.1.0  
 **创建日期**：2026年3月28日  
-**更新日期**：2026年3月31日  
+**更新日期**：2026年4月1日  
 **用途**：模块开发与测试工作的重要参考依据  
-**关联文档**：[COMPREHENSIVE_TECHNICAL_GUIDE.md](COMPREHENSIVE_TECHNICAL_GUIDE.md)
+**关联文档**：[COMPREHENSIVE_TECHNICAL_GUIDE.md](COMPREHENSIVE_TECHNICAL_GUIDE.md) | [FRONTEND_DEVELOPMENT_PLAN.md](FRONTEND_DEVELOPMENT_PLAN.md)
 
 **本次更新内容**：
-- 新增 LLM OCR处理流程（通义千问VL OCR）
-- 添加 LLM OCR数据清洗流程图
-- 更新系统架构图，纳入LLM OCR处理器
-- 新增通义千问VL OCR API调用流程
-- 新增 古典籍OCR训练数据准备工作流（第十七部分）
-- 新增 通用板式分析工作流（第十八部分）
-- 添加版面分析、内容分类、日期解析详细流程图
-- **新增 项目归档与清理工作流程（第十九部分）**
-- **新增 RAG检索增强生成模块流程（第二十部分）**
-- 添加RAG引擎初始化、文档加载、文本分块、向量存储、检索等详细流程图
-- **新增 RAG后端切换流程（20.9节）**
-- **新增 RAG适配器架构图（20.10节）**
-- **新增 External目录管理流程（20.11节）**
-- **更新external目录说明（不纳入Git版本控制）**
+- **v3.1.0 前端工作流程新增**
+- 添加前端整体架构流程图
+- 添加前端技术栈说明
+- 添加用户交互流程图
+- 添加API密钥管理流程
+- 添加论文润色交互流程
+- 添加OCR处理交互流程
+- 添加前后端数据交互流程
+- 添加状态管理流程
+- 添加组件渲染流程
+- 添加前端开发规范
+
+---
+
+**历史版本更新记录**：
+
+- **v3.1.0 (2026-04-01)**：新增前端工作流程章节
+- **v3.0.0 (2026-04-01)**：重大架构变更，整合研究助手模块
+- **v2.0.0 (2026-03-28)**：添加史料发言识别、OCR优化等流程
+- **v1.0.0 (2026-03-27)**：初始版本，包含核心业务流程

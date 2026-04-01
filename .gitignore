@@ -154,3 +154,65 @@ external/ndlkotenocr-lite/ndlkotenocr-lite-gui/debug.log
 # Dify和Ragflow完整排除
 external/dify/
 external/ragflow/
+
+# ===========================================
+# Open Source Finder 存储目录
+# ===========================================
+open_source_finder/storage/documents/
+open_source_finder/storage/cache/
+open_source_finder/storage/**/*.pdf
+open_source_finder/storage/**/*.md
+!open_source_finder/storage/.gitkeep
+!open_source_finder/storage/README.md
+
+# ===========================================
+# 前端相关 - Node.js
+# ===========================================
+node_modules/
+node_modules/**
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# 前端构建输出
+frontend/dist/
+frontend/build/
+frontend/.vite/
+
+# 前端依赖锁文件（可选，根据团队约定）
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+
+# 前端环境配置
+frontend/.env
+frontend/.env.local
+frontend/.env.*.local
+
+# 前端缓存
+frontend/.cache/
+frontend/node_modules/.cache/
+
+# TypeScript编译输出
+*.tsbuildinfo
+
+# ===========================================
+# 浏览器自动化
+# ===========================================
+selenium/
+webdriver/
+*.crx
+*.crdownload
+
+# ===========================================
+# 大型二进制文件
+# ===========================================
+*.zip
+*.tar.gz
+*.rar
+*.7z
+*.iso
+*.dmg
+*.exe
+*.msi

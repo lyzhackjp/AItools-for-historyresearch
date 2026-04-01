@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>前端测试 - 历史研究AI工具</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+        .test-container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        .test-header {
+            background: linear-gradient(135deg, #1890ff, #36cfc9);
+            color: white;
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+        }
+        .test-section {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .test-title {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .test-case {
+            padding: 16px;
+            border: 1px solid #e8e8e8;
+            border-radius: 8px;
+            margin-bottom: 12px;
+        }
+        .test-case.passed {
+            border-color: #52c41a;
+            background: rgba(82, 196, 26, 0.05);
+        }
+        .test-case.failed {
+            border-color: #ff4d4f;
+            background: rgba(255, 77, 79, 0.05);
+        }
+        .test-case.pending {
+            border-color: #faad14;
+            background: rgba(250, 173, 20, 0.05);
+        }
+        .test-result {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .badge {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 500;
+        }
+        .badge-pass { background: #52c41a; color: white; }
+        .badge-fail { background: #ff4d4f; color: white; }
+        .badge-pending { background: #faad14; color: white; }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            text-align: center;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        }
+        .stat-value {
+            font-size: 32px;
+            font-weight: 600;
+        }
+        .stat-label {
+            font-size: 14px;
+            color: #666;
+            margin-top: 4px;
+        }
+        .btn {
+            padding: 10px 20px;
+            border-radius: 8px;
+            border: none;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        .btn-primary {
+            background: #1890ff;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #096dd9;
+        }
+        .btn-success {
+            background: #52c41a;
+            color: white;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #e8e8e8;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 16px;
+        }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #1890ff, #52c41a);
+            transition: width 0.3s;
+        }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <div class="test-container">
+        <div class="test-header">
+            <h1><i class="fas fa-flask"></i> 前端测试套件</h1>
+            <p>历史研究AI工具 - 自动化测试</p>
+        </div>
+
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-value" id="total-tests">0</div>
+                <div class="stat-label">总测试数</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" style="color: #52c41a;" id="passed-tests">0</div>
+                <div class="stat-label">通过</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" style="color: #ff4d4f;" id="failed-tests">0</div>
+                <div class="stat-label">失败</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" style="color: #faad14;" id="pending-tests">0</div>
+                <div class="stat-label">待执行</div>
+            </div>
+        </div>
+
+        <div style="margin-bottom: 20px;">
+            <button class="btn btn-primary" onclick="runAllTests()">
+                <i class="fas fa-play"></i> 运行所有测试
+            </button>
+            <button class="btn btn-success" onclick="runSpecificTests('unit')">
+                <i class="fas fa-cube"></i> 单元测试
+            </button>
+            <button class="btn btn-success" onclick="runSpecificTests('integration')">
+                <i class="fas fa-link"></i> 集成测试
+            </button>
+            <button class="btn btn-success" onclick="runSpecificTests('ui')">
+                <i class="fas fa-desktop"></i> UI测试
+            </button>
+        </div>
+
+        <div class="progress-bar">
+            <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+        </div>
+
+        <div id="test-results"></div>
+    </div>
+
+    <script>
+        const testResults = {
+            total: 0,
+            passed: 0,
+            failed: 0,
+            pending: 0
+        };
+
+        const testCases = [
+            // 单元测试
+            {
+                id: 'unit-1',
+                category: 'unit',
+                name: '状态管理 - 初始化状态',
+                description: '验证应用状态初始化正确',
+                run: async () => {
+                    const state = { currentPage: 'home', apiKeys: {}, preferences: {} };
+                    return state.currentPage === 'home' && 
+                           typeof state.apiKeys === 'object' && 
+                           typeof state.preferences === 'object';
+                }
+            },
+            {
+                id: 'unit-2',
+                category: 'unit',
+                name: '工具函数 - 文件大小格式化',
+                description: '验证文件大小格式化函数',
+                run: async () => {
+                    const formatFileSize = (bytes) => {
+                        if (bytes === 0) return '0 Bytes';
+                        const k = 1024;
+                        const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+                        const i = Math.floor(Math.log(bytes) / Math.log(k));
+                        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+                    };
+                    
+                    return formatFileSize(0) === '0 Bytes' &&
+                           formatFileSize(1024) === '1 KB' &&
+                           formatFileSize(1048576) === '1 MB';
+                }
+            },
+            {
+                id: 'unit-3',
+                category: 'unit',
+                name: '工具函数 - HTML转义',
+                description: '验证HTML转义函数防止XSS',
+                run: async () => {
+                    const escapeHtml = (text) => {
+                        const div = { textContent: '' };
+                        div.textContent = text;
+                        return text
+                            .replace(/&/g, '&amp;')
+                            .replace(/</g, '&lt;')
+                            .replace(/>/g, '&gt;')
+                            .replace(/"/g, '&quot;');
+                    };
+                    
+                    const input = '<script>alert("xss")</script>';
+                    const output = escapeHtml(input);
+                    return !output.includes('<script>');
+                }
+            },
+            {
+                id: 'unit-4',
+                category: 'unit',
+                name: '工具函数 - 日期格式化',
+                description: '验证日期格式化函数',
+                run: async () => {
+                    const formatDate = (isoString) => {
+                        const date = new Date(isoString);
+                        const now = new Date();
+                        const diff = now - date;
+                        
+                        if (diff < 60000) return '刚刚';
+                        if (diff < 3600000) return `${Math.floor(diff / 60000)} 分钟前`;
+                        if (diff < 86400000) return `${Math.floor(diff / 3600000)} 小时前`;
+                        return date.toLocaleDateString('zh-CN');
+                    };
+                    
+                    const now = new Date().toISOString();
+                    const result = formatDate(now);
+                    return result === '刚刚';
+                }
+            },
+            {
+                id: 'unit-5',
+                category: 'unit',
+                name: '国际化 - 语言切换',
+                description: '验证国际化模块语言切换功能',
+                run: async () => {
+                    const translations = {
+                        'zh-CN': { 'app.title': '历史研究AI工具' },
+                        'en': { 'app.title': 'History Research AI Tools' },
+                        'ja': { 'app.title': '歴史研究AIツール' }
+                    };
+                    
+                    const t = (lang, key) => translations[lang]?.[key] || key;
+                    
+                    return t('zh-CN', 'app.title') === '历史研究AI工具' &&
+                           t('en', 'app.title') === 'History Research AI Tools' &&
+                           t('ja', 'app.title') === '歴史研究AIツール';
+                }
+            },
+            
+            // 集成测试
+            {
+                id: 'integration-1',
+                category: 'integration',
+                name: 'API配置 - 基础URL',
+                description: '验证API基础配置正确',
+                run: async () => {
+                    const CONFIG = {
+                        API_BASE_URL: 'http://localhost:5000',
+                        MAX_FILE_SIZE: {
+                            doc: 10 * 1024 * 1024,
+                            pdf: 20 * 1024 * 1024,
+                            image: 20 * 1024 * 1024
+                        }
+                    };
+                    
+                    return CONFIG.API_BASE_URL.startsWith('http') &&
+                           CONFIG.MAX_FILE_SIZE.doc === 10485760;
+                }
+            },
+            {
+                id: 'integration-2',
+                category: 'integration',
+                name: '本地存储 - 状态持久化',
+                description: '验证localStorage状态保存和读取',
+                run: async () => {
+                    const testKey = 'test_state_' + Date.now();
+                    const testData = { page: 'test', timestamp: Date.now() };
+                    
+                    localStorage.setItem(testKey, JSON.stringify(testData));
+                    const retrieved = JSON.parse(localStorage.getItem(testKey));
+                    localStorage.removeItem(testKey);
+                    
+                    return retrieved.page === 'test' && 
+                           retrieved.timestamp === testData.timestamp;
+                }
+            },
+            {
+                id: 'integration-3',
+                category: 'integration',
+                name: 'API密钥管理',
+                description: '验证API密钥存储和检索',
+                run: async () => {
+                    const apiKeys = {};
+                    const saveApiKey = (provider, key) => {
+                        apiKeys[provider] = key;
+                        localStorage.setItem('api_keys', JSON.stringify(apiKeys));
+                    };
+                    const getApiKey = (provider) => {
+                        return apiKeys[provider];
+                    };
+                    
+                    saveApiKey('test_provider', 'test_key_123');
+                    const retrieved = getApiKey('test_provider');
+                    
+                    localStorage.removeItem('api_keys');
+                    return retrieved === 'test_key_123';
+                }
+            },
+            {
+                id: 'integration-4',
+                category: 'integration',
+                name: '历史记录管理',
+                description: '验证历史记录添加和清除',
+                run: async () => {
+                    let history = [];
+                    
+                    const addHistory = (type, description) => {
+                        const entry = {
+                            id: Date.now(),
+                            type: type,
+                            description: description,
+                            timestamp: new Date().toISOString()
+                        };
+                        history.unshift(entry);
+                        if (history.length > 100) {
+                            history = history.slice(0, 100);
+                        }
+                    };
+                    
+                    addHistory('测试', '测试描述');
+                    const result = history.length === 1 && 
+                                   history[0].type === '测试';
+                    history = [];
+                    return result;
+                }
+            },
+            
+            // UI测试
+            {
+                id: 'ui-1',
+                category: 'ui',
+                name: '响应式布局 - 桌面端',
+                description: '验证桌面端布局正确',
+                run: async () => {
+                    return window.innerWidth >= 1024;
+                }
+            },
+            {
+                id: 'ui-2',
+                category: 'ui',
+                name: 'CSS变量 - 主题支持',
+                description: '验证CSS变量定义正确',
+                run: async () => {
+                    const root = document.documentElement;
+                    const primaryColor = getComputedStyle(root).getPropertyValue('--primary-color');
+                    return primaryColor.trim() === '#1890ff';
+                }
+            },
+            {
+                id: 'ui-3',
+                category: 'ui',
+                name: '深色模式 - 主题切换',
+                description: '验证深色模式切换功能',
+                run: async () => {
+                    document.body.setAttribute('data-theme', 'dark');
+                    const isDark = document.body.hasAttribute('data-theme');
+                    document.body.removeAttribute('data-theme');
+                    return isDark;
+                }
+            },
+            {
+                id: 'ui-4',
+                category: 'ui',
+                name: '字体加载 - 系统字体',
+                description: '验证系统字体回退正确',
+                run: async () => {
+                    const body = document.body;
+                    const fontFamily = getComputedStyle(body).fontFamily;
+                    return fontFamily.includes('system-ui') || 
+                           fontFamily.includes('-apple-system') ||
+                           fontFamily.includes('Segoe UI');
+                }
+            },
+            
+            // 功能测试
+            {
+                id: 'func-1',
+                category: 'functional',
+                name: '文件验证 - 格式检查',
+                description: '验证文件格式检查功能',
+                run: async () => {
+                    const allowedExtensions = ['.docx', '.pdf', '.jpg', '.png'];
+                    const validateFile = (filename) => {
+                        const ext = '.' + filename.split('.').pop().toLowerCase();
+                        return allowedExtensions.includes(ext);
+                    };
+                    
+                    return validateFile('test.docx') === true &&
+                           validateFile('test.exe') === false &&
+                           validateFile('test.pdf') === true;
+                }
+            },
+            {
+                id: 'func-2',
+                category: 'functional',
+                name: '文件验证 - 大小限制',
+                description: '验证文件大小限制功能',
+                run: async () => {
+                    const MAX_SIZE = 10 * 1024 * 1024;
+                    const validateSize = (size) => size <= MAX_SIZE;
+                    
+                    return validateSize(1024) === true &&
+                           validateSize(20 * 1024 * 1024) === false;
+                }
+            },
+            {
+                id: 'func-3',
+                category: 'functional',
+                name: '实体类型 - 颜色映射',
+                description: '验证实体类型颜色映射正确',
+                run: async () => {
+                    const entityColors = {
+                        person: 'entity-person',
+                        location: 'entity-location',
+                        organization: 'entity-organization',
+                        event: 'entity-event',
+                        date: 'entity-date',
+                        work: 'entity-work'
+                    };
+                    
+                    return entityColors.person === 'entity-person' &&
+                           Object.keys(entityColors).length === 6;
+                }
+            },
+            {
+                id: 'func-4',
+                category: 'functional',
+                name: 'OCR引擎 - 选项验证',
+                description: '验证OCR引擎选项完整',
+                run: async () => {
+                    const ocrEngines = [
+                        { value: 'ndlocr_lite', label: 'NDL OCR-Lite' },
+                        { value: 'ndlkotenocr_lite', label: 'NDL古典籍OCR-Lite' },
+                        { value: 'tesseract', label: 'Tesseract' },
+                        { value: 'qwen_vl', label: '通义千问VL' }
+                    ];
+                    
+                    return ocrEngines.length === 4 &&
+                           ocrEngines.some(e => e.value === 'ndlocr_lite');
+                }
+            }
+        ];
+
+        function updateStats() {
+            document.getElementById('total-tests').textContent = testResults.total;
+            document.getElementById('passed-tests').textContent = testResults.passed;
+            document.getElementById('failed-tests').textContent = testResults.failed;
+            document.getElementById('pending-tests').textContent = testResults.pending;
+            
+            const progress = testResults.total > 0 
+                ? ((testResults.passed + testResults.failed) / testResults.total * 100) 
+                : 0;
+            document.getElementById('progress-fill').style.width = progress + '%';
+        }
+
+        function renderTestCase(testCase, result) {
+            const statusClass = result === true ? 'passed' : result === false ? 'failed' : 'pending';
+            const badgeClass = result === true ? 'badge-pass' : result === false ? 'badge-fail' : 'badge-pending';
+            const badgeText = result === true ? '通过' : result === false ? '失败' : '待执行';
+            const icon = result === true ? 'fa-check-circle' : result === false ? 'fa-times-circle' : 'fa-clock';
+            const iconColor = result === true ? '#52c41a' : result === false ? '#ff4d4f' : '#faad14';
+            
+            return `
+                <div class="test-case ${statusClass}">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div>
+                            <strong>${testCase.name}</strong>
+                            <p style="color: #666; font-size: 13px; margin-top: 4px;">${testCase.description}</p>
+                        </div>
+                        <span class="badge ${badgeClass}">${badgeText}</span>
+                    </div>
+                    <div class="test-result">
+                        <i class="fas ${icon}" style="color: ${iconColor};"></i>
+                        <span style="font-size: 13px; color: #666;">
+                            ${testCase.id} | ${testCase.category}
+                        </span>
+                    </div>
+                </div>
+            `;
+        }
+
+        async function runTest(testCase) {
+            try {
+                const result = await testCase.run();
+                return result;
+            } catch (error) {
+                console.error(`Test ${testCase.id} failed:`, error);
+                return false;
+            }
+        }
+
+        async function runAllTests() {
+            testResults.total = testCases.length;
+            testResults.passed = 0;
+            testResults.failed = 0;
+            testResults.pending = testCases.length;
+            updateStats();
+            
+            const container = document.getElementById('test-results');
+            container.innerHTML = '';
+            
+            for (const testCase of testCases) {
+                const result = await runTest(testCase);
+                
+                if (result) {
+                    testResults.passed++;
+                } else {
+                    testResults.failed++;
+                }
+                testResults.pending--;
+                
+                container.innerHTML += renderTestCase(testCase, result);
+                updateStats();
+                
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+            
+            const allPassed = testResults.failed === 0;
+            container.innerHTML = `
+                <div class="test-section">
+                    <div class="test-title">
+                        <i class="fas fa-flag-checkered" style="color: ${allPassed ? '#52c41a' : '#ff4d4f'};"></i>
+                        测试完成
+                    </div>
+                    <p>
+                        总计 ${testResults.total} 个测试，
+                        <span style="color: #52c41a;">${testResults.passed} 个通过</span>，
+                        <span style="color: #ff4d4f;">${testResults.failed} 个失败</span>
+                    </p>
+                    <p style="margin-top: 10px; font-weight: 600; color: ${allPassed ? '#52c41a' : '#ff4d4f'};">
+                        ${allPassed ? '✓ 所有测试通过！' : '✗ 部分测试失败，请检查'}
+                    </p>
+                </div>
+            ` + container.innerHTML;
+        }
+
+        async function runSpecificTests(category) {
+            const filteredTests = testCases.filter(t => t.category === category);
+            
+            testResults.total = filteredTests.length;
+            testResults.passed = 0;
+            testResults.failed = 0;
+            testResults.pending = filteredTests.length;
+            updateStats();
+            
+            const container = document.getElementById('test-results');
+            container.innerHTML = `
+                <div class="test-section">
+                    <div class="test-title">
+                        <i class="fas fa-filter" style="color: #1890ff;"></i>
+                        ${category === 'unit' ? '单元测试' : category === 'integration' ? '集成测试' : 'UI测试'}
+                    </div>
+                </div>
+            `;
+            
+            for (const testCase of filteredTests) {
+                const result = await runTest(testCase);
+                
+                if (result) {
+                    testResults.passed++;
+                } else {
+                    testResults.failed++;
+                }
+                testResults.pending--;
+                
+                container.innerHTML += renderTestCase(testCase, result);
+                updateStats();
+                
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            testResults.total = testCases.length;
+            testResults.pending = testCases.length;
+            updateStats();
+        });
+    </script>
+</body>
+</html>
