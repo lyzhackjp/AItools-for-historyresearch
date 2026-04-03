@@ -274,7 +274,7 @@ def analyze_pdf_layout():
 
 @app.route('/api/ocr/extract', methods=['POST'])
 def ocr_extract():
-    """OCR文字识别接口"""
+    """OCR文字识别接口 - 支持多种OCR引擎路由"""
     try:
         if 'file' not in request.files:
             return jsonify({'error': '未提供文件'}), 400
@@ -284,25 +284,81 @@ def ocr_extract():
         if file.filename == '':
             return jsonify({'error': '文件名为空'}), 400
 
+        engine = request.form.get('engine', 'tesseract')
         language = request.form.get('language', config['default'].OCR_LANGUAGE)
 
-        file_bytes = file.read()
-        result = ocr_processor.extract_text_from_bytes(file_bytes, language)
+        unique_id = uuid.uuid4().hex[:8]
+        temp_path = os.path.join(config['default'].TEMP_DIR, f'ocr_{unique_id}_{file.filename}')
+        file.save(temp_path)
 
-        if result['success']:
-            cleaned_text = data_structurer.clean_text(result['text'])
-            return jsonify({
-                'success': True,
-                'text': cleaned_text,
-                'raw_text': result['text'],
-                'language': language,
-                'message': 'OCR识别成功'
-            })
-        else:
-            return jsonify({
-                'success': False,
-                'error': result.get('error', 'OCR识别失败')
-            }), 500
+        try:
+            if engine == 'tesseract':
+                # Tesseract OCR
+                file_bytes = open(temp_path, 'rb').read()
+                result = ocr_processor.extract_text_from_bytes(file_bytes, language)
+                if result['success']:
+                    cleaned_text = data_structurer.clean_text(result['text'])
+                    return jsonify({
+                        'success': True,
+                        'text': cleaned_text,
+                        'raw_text': result['text'],
+                        'language': language,
+                        'method': 'tesseract',
+                        'message': 'Tesseract OCR识别成功'
+                    })
+                else:
+                    return jsonify({'success': False, 'error': result.get('error', 'OCR识别失败')}), 500
+
+            elif engine in ('ndlocr-lite', 'ndlkotenocr-lite'):
+                # NDL OCR-Lite / NDL 古典籍 OCR-Lite
+                model_type = 'ndlocr_lite' if engine == 'ndlocr-lite' else 'ndlkotenocr_lite'
+                temp_output_dir = os.path.join(config['default'].TEMP_DIR, f'ndlocr_out_{unique_id}')
+                os.makedirs(temp_output_dir, exist_ok=True)
+
+                ocr_result = unified_ocr_processor.process_image(temp_path, model_type, temp_output_dir)
+
+                if ocr_result.success:
+                    return jsonify({
+                        'success': True,
+                        'text': ocr_result.text,
+                        'pages': ocr_result.pages,
+                        'structures': ocr_result.structures,
+                        'processing_time': ocr_result.processing_time,
+                        'method': engine,
+                        'model_type': model_type,
+                        'message': f'{ocr_result.model_description}识别成功'
+                    })
+                else:
+                    return jsonify({'success': False, 'error': ocr_result.error or f'{engine}识别失败'}), 500
+
+            elif engine == 'qwen-vl-ocr':
+                # 通义千问VL OCR
+                result = ocr_processor.llm_ocr(temp_path, llm_client, language)
+                if result['success']:
+                    return jsonify({
+                        'success': True,
+                        'text': result['text'],
+                        'method': 'qwen-vl-ocr',
+                        'language': language,
+                        'message': '通义千问VL OCR识别成功'
+                    })
+                else:
+                    return jsonify({'success': False, 'error': result.get('error', 'VL OCR识别失败')}), 500
+
+            else:
+                return jsonify({'error': f'不支持的OCR引擎: {engine}'}), 400
+
+        finally:
+            # 清理临时文件
+            try:
+                os.remove(temp_path)
+            except:
+                pass
+            import shutil
+            try:
+                shutil.rmtree(os.path.dirname(temp_path.replace(file.filename, '').replace(f'ocr_{unique_id}_', 'ndlocr_out_')), ignore_errors=True)
+            except:
+                pass
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
