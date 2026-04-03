@@ -49,6 +49,12 @@ try:
 except ImportError:
     HAS_EMBEDDING = False
 
+try:
+    from config.api_key_manager import APIKeyManager
+    HAS_API_KEY_MANAGER = True
+except ImportError:
+    HAS_API_KEY_MANAGER = False
+
 
 @dataclass
 class FieldReport:
@@ -396,7 +402,7 @@ class HistoryFieldExplorer:
         # NER
         if HAS_LLM:
             try:
-                self.ner = NERProcessor()
+                self.ner = NERProcessor(test_mode=test_mode)
             except Exception:
                 self.ner = None
         else:
