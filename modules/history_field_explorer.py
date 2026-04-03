@@ -1215,7 +1215,8 @@ Recommended approach: Start with core questions and classic studies.'''
         self,
         topic: Optional[str] = None,
         language: Optional[str] = None,
-        style: str = "academic_history"
+        style: str = "academic_history",
+        bilingual: bool = True
     ) -> Dict[str, Any]:
         """
         Based on the FieldReport, draft a complete research paper (~5000-8000 chars).
@@ -1224,9 +1225,12 @@ Recommended approach: Start with core questions and classic studies.'''
             topic: Paper topic (default: self.report.topic)
             language: Language code 'en'/'ja'/'zh' (default: self.language)
             style: 'academic_history' | 'historiographical' | 'source_analysis'
+            bilingual: If True, generate English + academic Chinese side-by-side.
+                      Chinese translation is appended after each English section.
+                      (default: True)
 
         Returns:
-            dict with keys: topic, language, sections, full_text, metadata
+            dict with keys: topic, language, sections, full_text, metadata, bilingual
         """
         if not self.report:
             return {"error": "Call explore() first to generate a field report."}
@@ -1267,9 +1271,15 @@ Recommended approach: Start with core questions and classic studies.'''
         else:
             paper_text = self._fallback_paper(topic, r, lang, s_names)
 
+        # ── Bilingual: translate each section to academic Chinese ──
+        if bilingual and lang == 'en' and self.llm:
+            paper_text = self._bilinguify_paper(paper_text, s_names)
+            print(f"[OK] Bilingual paper: {len(paper_text)} chars")
+
         return {
             "topic": topic,
             "language": lang,
+            "bilingual": bilingual,
             "style": style,
             "sections": self._parse_paper_sections(paper_text, s_names),
             "full_text": paper_text,
@@ -1409,6 +1419,88 @@ Recommended approach: Start with core questions and classic studies.'''
 
         full = "\n\n".join([f"# {k}\n\n{v}" for k, v in sections.items()])
         return full
+
+
+
+
+    # ─── Bilingual paper generation ───────────────────────────────────────
+
+    def _bilinguify_paper(self, paper_text: str, s_names: List[str]) -> str:
+        if not paper_text or not self.llm:
+            return paper_text
+
+        try:
+            parts = paper_text.split('\n## ')
+            bilingual_parts = []
+
+            for idx, part in enumerate(parts):
+                if idx == 0:
+                    bilingual_parts.append(part)
+                    continue
+
+                first_newline = part.find('\n')
+                if first_newline == -1:
+                    bilingual_parts.append('## ' + part)
+                    continue
+
+                heading = part[:first_newline]
+                body = part[first_newline + 1:]
+
+                en_section = '## ' + heading + '\n\n' + body
+                zh_body = self._translate_to_chinese(body)
+
+                bilingual_parts.append(
+                    en_section + '\n\n'
+                    '**【中文翻译】**\n\n' + zh_body + '\n\n'
+                    '---'
+                )
+
+            return '\n'.join(bilingual_parts)
+
+        except Exception as e:
+            self.report.warnings.append('Bilingual translation failed: ' + str(e))
+            return paper_text
+
+    def _translate_to_chinese(self, text: str) -> str:
+        if not text or not text.strip():
+            return ''
+
+        if len(text) > 3000:
+            chunks = []
+            paragraphs = text.split('\n\n')
+            current = ''
+            for para in paragraphs:
+                if len(current) + len(para) + 2 > 3000:
+                    if current:
+                        chunks.append(current)
+                    current = para
+                else:
+                    current = (current + '\n\n' + para) if current else para
+            if current:
+                chunks.append(current)
+            return '\n\n'.join(self._translate_chunk(c) for c in chunks)
+        else:
+            return self._translate_chunk(text)
+
+    def _translate_chunk(self, chunk: str) -> str:
+        prompt = (
+            "You are an academic translator specializing in Early Modern English history. "
+            "Translate the following English academic text to formal, scholarly Chinese. "
+            "Preserve the academic register, technical terms, and nuanced historical language. "
+            "Use standard Chinese historiographical conventions. "
+            "Only output the Chinese translation, nothing else.\n\n"
+            "TEXT TO TRANSLATE:\n" + chunk[:3000]
+        )
+        try:
+            resp = self.llm._call_llm(prompt, max_tokens=2000)
+            if isinstance(resp, dict):
+                content_val = resp.get('content', str(resp))
+            else:
+                content_val = str(resp)
+            return content_val.strip()
+        except Exception as e:
+            self.report.warnings.append('Translation chunk failed: ' + str(e))
+            return '[Chinese translation unavailable]'
 
     def _parse_paper_sections(
         self, text: str, s_names: List[str]
