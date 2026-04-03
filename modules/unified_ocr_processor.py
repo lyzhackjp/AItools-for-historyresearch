@@ -124,9 +124,9 @@ class UnifiedOCRProcessor:
                 timeout=self.config.timeout
             )
             self.ndlocr_processor = NDLOCRLiteProcessor(ndlocr_config)
-            print("✅ NDL OCRlite 处理器初始化成功")
+            print("[OK] NDL OCRlite 处理器初始化成功")
         except Exception as e:
-            print(f"⚠️ NDL OCRlite 处理器初始化失败: {e}")
+            print(f"[WARN] NDL OCRlite 处理器初始化失败: {e}")
             self.ndlocr_processor = None
 
         try:
@@ -138,9 +138,9 @@ class UnifiedOCRProcessor:
                 timeout=self.config.timeout
             )
             self.ndlkoten_processor = NDLKotenOCRLiteProcessor(ndlkoten_config)
-            print("✅ NDL古典籍OCR-Lite 处理器初始化成功")
+            print("[OK] NDL古典籍OCR-Lite 处理器初始化成功")
         except Exception as e:
-            print(f"⚠️ NDL古典籍OCR-Lite 处理器初始化失败: {e}")
+            print(f"[WARN] NDL古典籍OCR-Lite 处理器初始化失败: {e}")
             self.ndlkoten_processor = None
 
     def is_model_available(self, model_type: str = 'ndlocr_lite') -> bool:

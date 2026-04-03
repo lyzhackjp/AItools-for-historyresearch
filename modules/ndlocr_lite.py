@@ -90,6 +90,9 @@ class NDLOCRLiteProcessor:
         possible_paths.extend([
             os.path.join(os.getcwd(), 'ndlocr-lite', 'src', 'ocr.py'),
             os.path.join(os.path.expanduser('~'), 'ndlocr-lite', 'src', 'ocr.py'),
+            os.path.join(os.path.expanduser('~'), 'Desktop', 'AItools-for-historyresearch', 'ndlocr-lite', 'src', 'ocr.py'),
+            os.path.join(os.path.expanduser('~'), 'Documents', 'GitHub', 'AItools-for-Japanesehistory', 'ndlocr-lite', 'src', 'ocr.py'),
+            os.path.join(os.getcwd(), '..', 'ndlocr-lite', 'src', 'ocr.py'),
             'ndlocr-lite',
             'ocr.py'
         ])
