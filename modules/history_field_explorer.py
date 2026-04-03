@@ -1430,7 +1430,9 @@ Recommended approach: Start with core questions and classic studies.'''
             return paper_text
 
         try:
-            parts = paper_text.split('\n## ')
+            # Split on both H2 (## ) and H3 (### ) headings
+            import re
+            parts = re.split(r'\n#{2,3} ', paper_text)
             bilingual_parts = []
 
             for idx, part in enumerate(parts):
