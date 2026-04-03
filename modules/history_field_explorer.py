@@ -722,37 +722,61 @@ class HistoryFieldExplorer:
                 "Popular religion, print culture and the spread of Protestant ideas",
             ])
         else:
-            persons = [e.get('entity', '') or e.get('name', '')
-                       for e in entities if e.get('category') in ('person', 'person_name')]
-            if persons:
-                questions.append("「" + "/".join(persons[:3]) + "」等人物的历史角色与思想")
+            # Use report's key_persons/key_concepts (populated by LLM entity extraction)
+            persons = [p.get('entity', '') or p.get('name', '')
+                       for p in self.report.key_persons if p.get('entity') or p.get('name')]
+            concepts = self.report.key_concepts or []
 
-            concepts = [e.get('entity', '') or e.get('name', '')
-                        for e in entities if e.get('category') == 'concept']
-            if concepts:
-                questions.append("「" + "/".join(concepts[:3]) + "」等核心概念的历史演变")
+            if self.language == 'en':
+                # English history: generate specific academic questions
+                if persons:
+                    top_persons = ', '.join(persons[:3])
+                    questions.append(
+                        f"The role and significance of {top_persons} "
+                        f"in Tudor political and religious development"
+                    )
+                if concepts:
+                    top_concepts = ', '.join(str(c) for c in concepts[:3])
+                    questions.append(
+                        f"The meaning and impact of {top_concepts} "
+                        f"in Tudor England"
+                    )
+                # Standard Tudor England research questions
+                questions.extend([
+                    "Religious change and the Break with Rome: causation and consequences",
+                    "Gender, family, household and social order in Tudor England",
+                    "The Tudor court as political arena, cultural space and instrument of power",
+                    "State formation and administrative development under the Tudors",
+                    "Political thought, constitutional ideas and royal authority in Tudor England",
+                    "Popular religion, print culture and the spread of Protestant ideas",
+                ])
+            else:
+                # Other languages: use persons/concepts or fall back to generic questions
+                if persons:
+                    questions.append("「" + "/".join(persons[:3]) + "」等人物的历史角色与思想")
+                if concepts:
+                    questions.append("「" + "/".join([str(c) for c in concepts[:3]]) + "」等核心概念的历史演变")
+                source_map = {
+                    'archive': '国家档案与行政文书的史学价值',
+                    'manuscript': '手稿文献的版本与可靠性问题',
+                    'chronicle': '编年史的叹事结构与史料批判',
+                    'parliament': '议会记录的制度史意义',
+                    'correspondence': '外交文书与信书的政治史价值',
+                    'legal': '法令体系的形成与社会控制机制',
+                    'statistical': '人口与经济数据的定量分析方法',
+                }
+                for hint in source_hints[:3]:
+                    if hint in source_map:
+                        questions.append(source_map[hint])
 
-            source_map = {
-                'archive': '国家档案与行政文书的史学价值',
-                'manuscript': '手稿文献的版本与可靠性问题',
-                'chronicle': '编年史的叹事结构与史料批判',
-                'parliament': '议会记录的制度史意义',
-                'correspondence': '外交文书与信书的政治史价值',
-                'legal': '法令体系的形成与社会控制机制',
-                'statistical': '人口与经济数据的定量分析方法',
-            }
-            for hint in source_hints[:3]:
-                if hint in source_map:
-                    questions.append(source_map[hint])
-
-            if not questions:
-                questions = [
-                    topic + "的核心制度与权力结构",
-                    topic + "时期的社会与经济变迁",
-                    topic + "中的重要人物及其历史定位",
-                    topic + "研究的史料基础与方法论",
-                    "当代学术对" + topic + "的新解读与争议"
-                ]
+                if not questions:
+                    questions = [
+                        topic + "的核心制度与权力结构",
+                        topic + "时期的社会与经济变迁",
+                        topic + "中的重要人物及其历史定位",
+                        topic + "研究的史料基础与方法论",
+                        "当代学术对" + topic + "的新解读与争议"
+                    ]
 
         return questions[:8]
 
@@ -824,8 +848,8 @@ class HistoryFieldExplorer:
                 sources.append(source_map[hint])
                 seen.add(hint)
 
-        # Always add domain-appropriate primary sources in test_mode
-        if self.test_mode:
+        # Add domain-appropriate primary sources when sources is empty (English history)
+        if not sources and self.language == 'en':
             domain_extras = [
                 {
                     'name': 'Early English Books Online (EEBO)',
