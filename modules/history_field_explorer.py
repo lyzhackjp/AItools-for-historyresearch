@@ -450,7 +450,9 @@ class HistoryFieldExplorer:
         if self.assistant:
             try:
                 papers = self.assistant.search_papers(
-                    query=f"{prefix}{topic}", limit=max(limit, 80)
+                    query=f"{prefix}{topic}",
+                    sources=['arxiv', 'paperswithcode', 'crossref'],
+                    limit=max(limit, 80)
                 )
                 papers = [p.to_dict() if hasattr(p, 'to_dict') else p for p in papers]
             except Exception as e:
@@ -513,7 +515,14 @@ class HistoryFieldExplorer:
             try:
                 entities = self.ner.recognize_historical_entities(analysis['all_text'])
                 if isinstance(entities, list):
-                    analysis['entities'] = entities
+                    # NER returned results - check if they're meaningful
+                    person_entities = [e for e in entities
+                                       if e.get('category') in ('person', 'person_name')]
+                    if not person_entities and self.language == 'en':
+                        # NER found nothing useful for English - use LLM instead
+                        analysis['entities'] = []
+                    else:
+                        analysis['entities'] = entities
             except Exception as e:
                 self.report.warnings.append(f"NER失败: {e}")
 
@@ -524,7 +533,21 @@ class HistoryFieldExplorer:
 
     def _paper_to_text(self, paper: Dict) -> str:
         if isinstance(paper, dict):
-            return f"{paper.get('title', '')} {paper.get('abstract', '')}"
+            title = paper.get('title', '')
+            abstract = paper.get('abstract', '') or paper.get('description', '')
+            metadata = paper.get('metadata', {})
+            authors = metadata.get('authors', [])
+            journal = metadata.get('journal', '')
+            author_str = ', '.join(authors[:3]) if authors else ''
+            # Build text: title + author + journal + abstract
+            parts = [title]
+            if author_str:
+                parts.append(author_str)
+            if journal:
+                parts.append(journal)
+            if abstract:
+                parts.append(abstract)
+            return ' '.join(parts)
         return f"{getattr(paper, 'title', '')} {getattr(paper, 'abstract', '')}"
 
     def _get_year(self, paper: Dict) -> str:
@@ -591,9 +614,16 @@ class HistoryFieldExplorer:
         self.report.frontier_research = frontier
         self.report.essential_literature = lit[:10]
 
+        # 人物 + 概念（NER稀疏时用LLM补充）
+        if not analysis['entities']:
+            self._extract_entities_from_llm()
+        else:
+            self._extract_entities(analysis['entities'])
+
         # 核心课题
         self.report.core_questions = self._derive_core_questions(
-            analysis['entities'],
+            analysis['entities'] or
+            [{'entity': p['entity'], 'category': 'person'} for p in self.report.key_persons] if self.report.key_persons else [],
             classic,
             frontier,
             analysis['source_hints']
@@ -604,9 +634,6 @@ class HistoryFieldExplorer:
             analysis['source_hints'],
             analysis['entities']
         )
-
-        # 人物 + 概念
-        self._extract_entities(analysis['entities'])
 
         # 研究方法
         self.report.research_methods = self._get_research_methods()
@@ -831,6 +858,53 @@ class HistoryFieldExplorer:
 
         return sources[:8]
 
+    def _extract_entities_from_llm(self):
+        """Use LLM to identify key persons and concepts when NER data is sparse."""
+        if not self.llm:
+            return
+        topic = self.report.topic
+        prompt = (
+            f"You are a historian specializing in {topic}. "
+            f"List the 8 most important historical figures (people) and 8 core concepts/events "
+            f"for research on {topic}. Respond ONLY with a JSON object with keys "
+            f"'persons' (list of names) and 'concepts' (list of names). "
+            f"Example: {{\"persons\": [\"Henry VIII\", \"Thomas Cromwell\"], \"concepts\": [\"English Reformation\", \"Break with Rome\"]}}"
+        )
+        try:
+            resp = self.llm._call_llm(prompt, max_tokens=400)
+            if resp and isinstance(resp, dict):
+                content = resp.get('content', str(resp))
+                import re, json
+                # Try JSON extraction
+                m = re.search(r'\{[^{}]*"persons"[^}]+\}', content, re.DOTALL)
+                if m:
+                    data = json.loads(m.group())
+                    for p in data.get('persons', [])[:8]:
+                        self.report.key_persons.append({
+                            'entity': p,
+                            'category': 'person',
+                            'notes': 'Important historical figure'
+                        })
+                    for c in data.get('concepts', [])[:8]:
+                        if c not in [x for x in self.report.key_concepts]:
+                            self.report.key_concepts.append(c)
+                else:
+                    # Fallback: simple line parsing
+                    lines = content.split('\n')
+                    for line in lines:
+                        if any(x in line.lower() for x in ['henry', 'elizabeth', 'cromwell', 'cecil', 'mary', 'edward']):
+                            name = re.sub(r'^\s*[-*\d.]+\s*', '', line).strip()
+                            if name and len(name) < 50:
+                                self.report.key_persons.append({'entity': name, 'category': 'person', 'notes': ''})
+                        elif any(x in line.lower() for x in ['reformation', 'parliament', 'monarchy', 'dissolution', 'supremacy']):
+                            concept = re.sub(r'^\s*[-*\d.]+\s*', '', line).strip()
+                            if concept and len(concept) < 60:
+                                self.report.key_concepts.append(concept)
+                    self.report.key_persons = self.report.key_persons[:8]
+                    self.report.key_concepts = self.report.key_concepts[:8]
+        except Exception as e:
+            self.report.warnings.append(f"LLM entity extraction failed: {e}")
+
     def _extract_entities(self, entities: List[Dict]):
         """Extract key persons and concepts from NER results or literature"""
         if self.test_mode:
@@ -874,6 +948,8 @@ class HistoryFieldExplorer:
             return
 
         if not entities:
+            # Fallback: use LLM knowledge to identify key persons and concepts
+            self._extract_entities_from_llm()
             return
 
         seen_names = set()

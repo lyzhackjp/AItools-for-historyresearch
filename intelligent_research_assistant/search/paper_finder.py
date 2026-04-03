@@ -268,6 +268,130 @@ class PapersWithCodePaperAdapter:
         return results
 
 
+class CrossRefAdapter:
+    """CrossRef 学术文献适配器（适合历史等人文社会科学）"""
+
+    def __init__(self):
+        self.base_url = "https://api.crossref.org/works"
+        self.email = "lyzhackjp@example.com"  # CrossRef 建议附上邮箱以提高限流
+
+    def search(self, query: str, limit: int = 20) -> List[SearchResult]:
+        """
+        搜索 CrossRef 学术论文（专注人文社会科学）
+
+        Args:
+            query: 搜索查询
+            limit: 结果数量限制
+
+        Returns:
+            List[SearchResult]: 搜索结果列表
+        """
+        results = []
+
+        try:
+            fetched = 0
+            offset = 0
+
+            while fetched < limit:
+                batch_size = min(40, limit - fetched)
+                params = {
+                    'query': query,
+                    'filter': 'type:journal-article',
+                    'rows': batch_size,
+                    'offset': offset,
+                    'mailto': self.email
+                }
+
+                response = requests.get(
+                    self.base_url,
+                    params=params,
+                    timeout=25
+                )
+
+                if response.status_code != 200:
+                    print(f"[CrossRefAdapter] HTTP {response.status_code}")
+                    break
+
+                data = response.json()
+                items = data.get('message', {}).get('items', [])
+
+                if not items:
+                    break
+
+                for item in items:
+                    title_list = item.get('title', [])
+                    title = title_list[0] if title_list else ''
+
+                    authors_raw = item.get('author', [])
+                    authors = []
+                    for a in authors_raw:
+                        name = ' '.join(x for x in [a.get('given', ''), a.get('family', '')] if x)
+                        if name:
+                            authors.append(name)
+
+                    year = None
+                    date_parts = item.get('published', {}).get('date-parts', [[None]])
+                    if date_parts and date_parts[0]:
+                        year = date_parts[0][0]
+
+                    abstract = item.get('abstract', '')
+                    # Strip JATS XML tags from abstract
+                    import re
+                    abstract = re.sub(r'<[^>]+>', '', abstract)
+                    abstract = abstract.strip()
+
+                    doi = item.get('DOI', '')
+                    url = f"https://doi.org/{doi}" if doi else ''
+
+                    # Score: recency-based
+                    score = 65.0
+                    if year:
+                        try:
+                            from datetime import datetime
+                            age = datetime.now().year - int(year)
+                            if age <= 5:
+                                score = 90.0
+                            elif age <= 10:
+                                score = 80.0
+                            elif age <= 20:
+                                score = 72.0
+                            else:
+                                score = 65.0
+                        except:
+                            pass
+
+                    result = SearchResult(
+                        id=f"crossref-{doi}",
+                        title=title,
+                        source='crossref',
+                        url=url,
+                        description=abstract[:500] if abstract else '',
+                        metadata={
+                            'authors': authors,
+                            'year': year,
+                            'doi': doi,
+                            'journal': item.get('container-title', [''])[0] if item.get('container-title') else ''
+                        },
+                        score=score
+                    )
+                    results.append(result)
+
+                fetched += len(items)
+                offset += len(items)
+
+                if len(items) < batch_size:
+                    break
+
+                # Small delay to respect rate limits
+                import time
+                time.sleep(0.1)
+
+        except Exception as e:
+            print(f"[CrossRefAdapter] 搜索失败: {e}")
+
+        return results
+
+
 class PaperFinder:
     """
     论文搜寻器
@@ -286,7 +410,8 @@ class PaperFinder:
         
         self.adapters = {
             'arxiv': ArxivAdapter(),
-            'paperswithcode': PapersWithCodePaperAdapter()
+            'paperswithcode': PapersWithCodePaperAdapter(),
+            'crossref': CrossRefAdapter()
         }
     
     def search(

@@ -377,6 +377,12 @@ class ConfigManager:
                     'base_url': 'https://paperswithcode.com/api/v1',
                     'rate_limit': 30,
                     'timeout': 30
+                },
+                'crossref': {
+                    'enabled': True,
+                    'base_url': 'https://api.crossref.org',
+                    'rate_limit': 50,
+                    'timeout': 25
                 }
             },
             'cache': {
