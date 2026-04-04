@@ -532,8 +532,10 @@ class ReverseOutlineAnalyzer:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": user_prompt})
         
-        response = self.llm_client.chat(messages, temperature=0.3)
-        return response.get('content', '')
+        # Use _call_llm instead of .chat() to match our LLMClient interface
+        combined_prompt = (system_prompt + "\n\n" + user_prompt) if system_prompt else user_prompt
+        result = self.llm_client._call_llm(combined_prompt, temperature=0.3)
+        return result.get('content', '') if isinstance(result, dict) else (result or '')
     
     def _generate_mock_response(self, prompt: str) -> str:
         """生成模拟响应（测试模式）"""

@@ -173,16 +173,21 @@ class Stage2Organize:
                     results['notes_created'] += 1
 
                 # 提取链接并创建双向链接
-                links = self._extract_links_from_content(content)
-                for link_target in links:
-                    results['links_created'] += 1
+                if isinstance(content, str):
+                    links = self._extract_links_from_content(content)
+                    for link_target in links:
+                        results['links_created'] += 1
 
-            # 构建知识图谱数据
-            kg_data = obs.build_knowledge_graph_data()
-            results['knowledge_graph'] = {
-                'nodes': kg_data.get('nodes_count', 0),
-                'edges': kg_data.get('edges_count', 0),
-            }
+            # 构建知识图谱数据（捕获所有异常避免中断）
+            try:
+                kg_data = obs.build_knowledge_graph_data()
+                if isinstance(kg_data, dict):
+                    results['knowledge_graph'] = {
+                        'nodes': len(kg_data.get('nodes', [])),
+                        'edges': len(kg_data.get('edges', [])),
+                    }
+            except Exception as kg_err:
+                print(f"[Stage 2] 知识图谱构建失败: {kg_err}")
             print(f"[Stage 2] Obsidian Vault: {results['notes_created']} 笔记, "
                   f"{results.get('knowledge_graph', {})}")
 
