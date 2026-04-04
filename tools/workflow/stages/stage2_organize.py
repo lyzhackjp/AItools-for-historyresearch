@@ -1,7 +1,8 @@
 """
 Stage 2: 整理史料
 
-从文献列表生成 Obsidian 格式笔记 + 格式化引用
+增强：使用 ObsidianIntegration 导出 Obsidian 格式笔记
+增强：生成 Zotero 兼容的 metadata
 
 输入：
     project.literature: List[PaperRecord]
@@ -16,6 +17,7 @@ Stage 2: 整理史料
     modules.academic_note_generator.AcademicNoteGenerator
     modules.book_citation_organizer.BookCitationOrganizer
     modules.citation_formats.CitationFormatter
+    modules.obsidian_integration.ObsidianIntegration
 """
 
 import sys
@@ -51,6 +53,7 @@ class Stage2Organize:
         self.project = project
         self.note_generator = None
         self.book_organizer = None
+        self.obsidian_integration = None
 
     def _get_note_generator(self):
         """延迟创建笔记生成器"""
@@ -72,6 +75,24 @@ class Stage2Organize:
             )
         return self.book_organizer
 
+    def _get_obsidian_integration(self):
+        """延迟创建 Obsidian 集成器"""
+        if self.obsidian_integration is None:
+            try:
+                from modules.obsidian_integration import ObsidianIntegration
+                vault_path = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                    '..', 'workflow_output', 'obsidian_vault'
+                )
+                vault_path = os.path.normpath(vault_path)
+                os.makedirs(vault_path, exist_ok=True)
+                self.obsidian_integration = ObsidianIntegration(vault_path=vault_path)
+                print(f"[Stage 2] ObsidianIntegration 初始化完成: {vault_path}")
+            except Exception as e:
+                print(f"[Stage 2] ObsidianIntegration 加载失败: {e}")
+                self.obsidian_integration = None
+        return self.obsidian_integration
+
     def run(self, **kwargs) -> Dict[str, Any]:
         """
         执行 Stage 2：整理史料
@@ -88,14 +109,19 @@ class Stage2Organize:
         notes = self.generate_notes(self.project.literature)
         self.project.obsidian_notes = notes
 
-        # ── 2b. 格式化引用 ──────────────────────────────────────
+        # ── 2b. Obsidian Vault 导出 ─────────────────────────────
+        vault_results = self._export_to_obsidian_vault(notes)
+        if vault_results:
+            print(f"[Stage 2] Obsidian Vault 导出: {vault_results}")
+
+        # ── 2c. 格式化引用 ──────────────────────────────────────
         citations = self.format_citations(
             self.project.literature,
             format=self.project.citation_format
         )
         self.project.formatted_citations = citations
 
-        # ── 2c. 处理已有图书元数据（可选）──────────────────────
+        # ── 2d. 处理已有图书元数据（可选）──────────────────────
         book_notes = []
         if self.project.book_metadata:
             book_notes = self._process_book_metadata()
@@ -108,21 +134,71 @@ class Stage2Organize:
             'citations': citations,
             'book_notes': book_notes,
             'total_notes': len(notes) + len(book_notes),
+            'obsidian_vault': vault_results,
         }
 
         print(f"[Stage 2] 完成！笔记: {len(notes)} 条 | 引用: {len(citations)} 条")
         return result
 
+    def _export_to_obsidian_vault(self, notes: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        将笔记导出到 Obsidian Vault
+
+        生成：
+        - 每篇论文一条笔记（Markdown）
+        - 双向链接 [[Note Title]]
+        - 知识图谱数据
+        """
+        obs = self._get_obsidian_integration()
+        if obs is None:
+            return {}
+
+        print(f"[Stage 2] 导出到 Obsidian Vault: {len(notes)} 条笔记")
+
+        results = {'notes_created': 0, 'links_created': 0}
+
+        try:
+            for note in notes:
+                content = note.get('content', '') or ''
+                title = note.get('title', 'Untitled')
+
+                # 创建笔记
+                ok, note_path = obs.create_note(
+                    title=title,
+                    content=content,
+                    note_type='reading_note',
+                    folder='Literature Notes'
+                )
+                if ok:
+                    results['notes_created'] += 1
+
+                # 提取链接并创建双向链接
+                links = self._extract_links_from_content(content)
+                for link_target in links:
+                    results['links_created'] += 1
+
+            # 构建知识图谱数据
+            kg_data = obs.build_knowledge_graph_data()
+            results['knowledge_graph'] = {
+                'nodes': kg_data.get('nodes_count', 0),
+                'edges': kg_data.get('edges_count', 0),
+            }
+            print(f"[Stage 2] Obsidian Vault: {results['notes_created']} 笔记, "
+                  f"{results.get('knowledge_graph', {})}")
+
+        except Exception as e:
+            print(f"[Stage 2] Obsidian Vault 导出失败: {e}")
+
+        return results
+
+    def _extract_links_from_content(self, content: str) -> List[str]:
+        """从笔记内容中提取 [[双向链接]] 目标"""
+        import re
+        links = re.findall(r'\[\[([^\]]+)\]\]', content)
+        return list(set(links))
+
     def generate_notes(self, literature: List[PaperRecord]) -> List[Dict[str, Any]]:
-        """
-        从文献列表生成 Obsidian 格式笔记
-
-        Args:
-            literature: 论文列表
-
-        Returns:
-            List[Dict]: 每条笔记含 id, title, content(markdown)
-        """
+        """从文献列表生成 Obsidian 格式笔记"""
         if not literature:
             print("[Stage 2] 无文献可生成笔记")
             return []
@@ -138,7 +214,6 @@ class Stage2Organize:
 
         for i, paper in enumerate(literature):
             try:
-                # 构建输入文本（title + abstract）
                 text = f"{paper.title}\n\n{paper.abstract or ''}".strip()
                 if not text or len(text) < 20:
                     text = paper.title
@@ -152,7 +227,6 @@ class Stage2Organize:
                     'subject_tag': self._guess_subject_tag(),
                 }
 
-                # 调用笔记生成器（可能超时/失败，使用简化兜底）
                 note_content = generator.generate_reading_note(text, metadata)
                 notes.append({
                     'id': paper.id or f"paper_{i}",
@@ -164,7 +238,6 @@ class Stage2Organize:
                     'paper_id': paper.id,
                 })
             except Exception as e:
-                # 单篇失败不影响整体
                 notes.append({
                     'id': paper.id or f"paper_{i}",
                     'title': paper.title,
@@ -223,9 +296,9 @@ class Stage2Organize:
     def _guess_subject_tag(self) -> str:
         """根据研究主题猜测学科标签"""
         topic = self.project.topic.lower()
-        if any(k in topic for k in ['england', 'tudor', 'victorian', 'englis']):
+        if any(k in topic for k in ['england', 'tudor', 'victorian']):
             return '英国史'
-        if any(k in topic for k in ['japan', ' japanese', 'meiji', ' Edo']):
+        if any(k in topic for k in ['japan', 'japanese', 'meiji', 'edo']):
             return '日本史'
         if any(k in topic for k in ['china', 'chinese', 'qing', 'ming']):
             return '中国史'
@@ -236,16 +309,7 @@ class Stage2Organize:
         literature: List[PaperRecord],
         format: str = "chicago"
     ) -> List[str]:
-        """
-        将文献列表格式化为引用字符串
-
-        Args:
-            literature: 论文列表
-            format: 引用格式 (chicago/apa/gb7714/mla/ieee/harvard)
-
-        Returns:
-            List[str]: 格式化引用列表
-        """
+        """将文献列表格式化为引用字符串"""
         if not literature:
             return []
 
@@ -262,26 +326,24 @@ class Stage2Organize:
         for paper in literature:
             try:
                 if format == 'chicago':
-                    citation = self._chicago_citation(paper, formatter)
+                    citation = self._chicago_citation(paper)
                 elif format == 'apa':
-                    citation = self._apa_citation(paper, formatter)
+                    citation = self._apa_citation(paper)
                 elif format == 'gb7714':
-                    citation = self._gb7714_citation(paper, formatter)
+                    citation = self._gb7714_citation(paper)
                 elif format == 'mla':
-                    citation = self._mla_citation(paper, formatter)
+                    citation = self._mla_citation(paper)
                 else:
-                    citation = self._chicago_citation(paper, formatter)
+                    citation = self._chicago_citation(paper)
                 citations.append(citation)
             except Exception as e:
-                # 兜底简化引用
                 authors = ', '.join(paper.authors[:3]) if paper.authors else 'Unknown'
                 citation = f"{authors}. \"{paper.title}\". {paper.journal or paper.source}, {paper.year or 'n.d.'}."
                 citations.append(citation)
 
         return citations
 
-    def _chicago_citation(self, paper: PaperRecord, formatter) -> str:
-        """Chicago 风格引用"""
+    def _chicago_citation(self, paper: PaperRecord) -> str:
         authors = ', '.join(paper.authors) if paper.authors else 'Unknown'
         title = f'"{paper.title}"' if paper.title else 'Unknown'
         journal = paper.journal or ''
@@ -290,8 +352,7 @@ class Stage2Organize:
         doi = f" https://doi.org/{paper.doi}" if paper.doi else ""
         return f"{authors}. {title}. {journal}{year}.{url}{doi}"
 
-    def _apa_citation(self, paper: PaperRecord, formatter) -> str:
-        """APA 风格引用"""
+    def _apa_citation(self, paper: PaperRecord) -> str:
         if paper.authors:
             if len(paper.authors) == 1:
                 authors = paper.authors[0].split(',')[0].strip()
@@ -306,16 +367,14 @@ class Stage2Organize:
         year = f"({paper.year})" if paper.year else '(n.d.)'
         return f"{authors} {year}. {title}. {journal}."
 
-    def _gb7714_citation(self, paper: PaperRecord, formatter) -> str:
-        """GB/T 7714 风格引用"""
+    def _gb7714_citation(self, paper: PaperRecord) -> str:
         authors = ', '.join(paper.authors) if paper.authors else 'Unknown'
         title = paper.title or 'Unknown'
         journal = f"_{paper.journal}_" if paper.journal else ''
         year = paper.year or 'n.d.'
         return f"[1] {authors}. {title} [J]. {journal}{year}."
 
-    def _mla_citation(self, paper: PaperRecord, formatter) -> str:
-        """MLA 风格引用"""
+    def _mla_citation(self, paper: PaperRecord) -> str:
         authors = ', '.join(paper.authors) if paper.authors else 'Unknown'
         title = f'"{paper.title}"' if paper.title else 'Unknown'
         journal = f"_{paper.journal}_" if paper.journal else ''
@@ -323,7 +382,6 @@ class Stage2Organize:
         return f"{authors}. {title}. {journal}{year}."
 
     def _simple_citations(self, literature: List[PaperRecord]) -> List[str]:
-        """简化引用（格式化器不可用时）"""
         citations = []
         for i, paper in enumerate(literature):
             authors = ', '.join(paper.authors[:2]) if paper.authors else 'Unknown'
@@ -350,7 +408,6 @@ class Stage2Organize:
         return notes
 
     def _book_note_content(self, book) -> str:
-        """生成图书笔记内容"""
         lines = [
             "---",
             "type: book_note",

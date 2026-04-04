@@ -428,10 +428,7 @@ class Stage7Format:
             title = m.group(1).strip()
 
         # 输出目录
-        out_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-            'workflow_output'
-        )
+        out_dir = os.path.join(_AI_TOOLS, 'workflow_output')
         os.makedirs(out_dir, exist_ok=True)
         safe = "".join(c if c.isalnum() else '_' for c in self.project.topic[:20])
         import datetime

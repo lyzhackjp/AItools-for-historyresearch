@@ -1,12 +1,12 @@
 """
 Stage 3: 提取信息
 
-从史料（文本/PDF/扫描件）中提取历史实体和关系
+增强：NERDisambiguation 实体消歧
 
 输入：
-    project.literature: List[PaperRecord] — 论文列表（从中提取实体）
-    project.obsidian_notes: List[Dict] — 笔记内容（可额外提取）
-    project.language: str — 主要语言 (en/ja/zh)
+    project.literature: List[PaperRecord]
+    project.obsidian_notes: List[Dict]
+    project.language: str
 
 输出：
     project.entities: List[HistoricalEntity]
@@ -14,6 +14,7 @@ Stage 3: 提取信息
 
 依赖模块：
     modules.ner_processor.NERProcessor (日语/中文)
+    modules.ner_disambiguation.NERDisambiguation
     modules.unified_ocr_processor.UnifiedOCRProcessor (扫描件)
     LLM entity extraction (英语/通用)
 """
@@ -38,9 +39,6 @@ class Stage3Extract:
     使用方法：
         stage = Stage3Extract(project)
         result = stage.run()
-
-        # 或直接提取
-        entities = stage.extract_entities(texts, language='en')
     """
 
     NAME = "extract"
@@ -49,6 +47,7 @@ class Stage3Extract:
     def __init__(self, project: ResearchProject):
         self.project = project
         self.ner_processor = None
+        self.ner_disambiguator = None
         self.ocr_processor = None
         self.llm_client = None
 
@@ -56,12 +55,23 @@ class Stage3Extract:
         """延迟创建 NER 处理器（日语/中文）"""
         if self.ner_processor is None:
             from modules.ner_processor import NERProcessor
-            # NERProcessor 主要支持日语，英语用 LLM 旁路
             self.ner_processor = NERProcessor(
                 api_provider="qwen",
                 test_mode=False
             )
         return self.ner_processor
+
+    def _get_ner_disambiguator(self):
+        """延迟创建 NER 消歧器"""
+        if self.ner_disambiguator is None:
+            try:
+                from modules.ner_disambiguation import NERDisambiguation
+                self.ner_disambiguator = NERDisambiguation()
+                print("[Stage 3] NERDisambiguation loaded")
+            except Exception as e:
+                print(f"[Stage 3] NERDisambiguation 加载失败: {e}")
+                self.ner_disambiguator = None
+        return self.ner_disambiguator
 
     def _get_llm_client(self):
         """延迟创建 LLM 客户端（用于英语实体提取）"""
@@ -73,9 +83,6 @@ class Stage3Extract:
     def run(self, **kwargs) -> Dict[str, Any]:
         """
         执行 Stage 3：提取信息
-
-        Returns:
-            Dict 含 'entities' 和 'relations'
         """
         print(f"[Stage 3] 开始提取信息 | 语言: {self.project.language}")
         print(f"[Stage 3] 文献: {len(self.project.literature)} 篇 | 笔记: {len(self.project.obsidian_notes)} 条")
@@ -98,7 +105,11 @@ class Stage3Extract:
             all_relations.extend(note_relations)
             print(f"[Stage 3] 笔记实体: {len(note_entities)} 个")
 
-        # ── 3c. 去重 + 归类 ────────────────────────────────────
+        # ── 3c. 实体消歧（NERDisambiguation）──────────────────
+        if all_entities and self.project.language != 'en':
+            all_entities = self._disambiguate_entities(all_entities)
+
+        # ── 3d. 去重 + 归类 ────────────────────────────────────
         merged_entities = self._merge_entities(all_entities)
         merged_relations = self._deduplicate_relations(all_relations)
 
@@ -124,13 +135,14 @@ class Stage3Extract:
         relations = []
 
         for paper in self.project.literature:
-            text = f"{paper.title} {paper.abstract or ''}".strip()
+            # 组合标题 + 摘要 + 作者 + 期刊（摘要为空时用这些补充）
+            authors_str = ' '.join(paper.authors) if paper.authors else ''
+            text = f"{paper.title} {authors_str} {paper.journal or ''} {paper.abstract or ''}".strip()
             if not text or len(text) < 10:
                 continue
 
             try:
                 if self.project.language == 'ja':
-                    # 日语 → 使用 NERProcessor
                     paper_entities = self._ner_extract(text)
                 else:
                     # 英语/其他 → LLM entity extraction
@@ -162,7 +174,6 @@ class Stage3Extract:
                 else:
                     note_entities = self._llm_extract_entities(content, note.get('title', ''))
 
-                # 关联到 note
                 for ent in note_entities:
                     ent.related_entities.append(f"note:{note['id']}")
 
@@ -203,13 +214,10 @@ class Stage3Extract:
     ) -> List[HistoricalEntity]:
         """
         使用 LLM 提取实体（英语等非日语语言）
-
-        基于 HistoryFieldExplorer 中验证过的 _extract_entities_from_llm 方法
         """
         import uuid
         import json
 
-        # 控制输入长度
         input_text = text[:3000] if len(text) > 3000 else text
 
         prompt = f"""You are a historical research assistant. Extract key entities from the following text.
@@ -283,15 +291,80 @@ Only return entities that are clearly present in the text. Maximum 15 entities."
             print(f"[Stage 3] LLM 实体提取失败: {e}")
             return []
 
+    def _disambiguate_entities(
+        self,
+        entities: List[HistoricalEntity]
+    ) -> List[HistoricalEntity]:
+        """
+        使用 NERDisambiguation 对实体进行消歧
+
+        Args:
+            entities: 原始实体列表
+
+        Returns:
+            List[HistoricalEntity]: 消歧后的实体列表
+        """
+        try:
+            disamb = self._get_ner_disambiguator()
+            if disamb is None:
+                return entities
+
+            print(f"[Stage 3] 实体消歧: {len(entities)} 个实体")
+
+            # 构建 NERDisambiguation 所需格式
+            # 格式: [(text, entity_type, start_pos, end_pos), ...]
+            ner_results = []
+            for ent in entities:
+                if ent.name:
+                    ner_results.append((
+                        ent.name,
+                        ent.category,
+                        0,  # start_pos (unknown)
+                        len(ent.name)  # end_pos
+                    ))
+
+            if not ner_results:
+                return entities
+
+            # 执行消歧
+            disamb_results = disamb.disambiguate(ner_results, self.project.topic)
+
+            # 更新 entities with disambiguated info
+            disamb_map = {}
+            for item in disamb_results:
+                original = item.get('original_entity', '')
+                if original:
+                    disamb_map[original] = item
+
+            disambiguated = []
+            for ent in entities:
+                key = ent.name
+                if key in disamb_map:
+                    disamb_info = disamb_map[key]
+                    # 更新 category 和 confidence
+                    new_category = disamb_info.get('disambiguated_type', ent.category)
+                    new_confidence = disamb_info.get('confidence', ent.confidence)
+                    ent.category = new_category
+                    ent.confidence = float(new_confidence)
+
+                    # 更新中文名
+                    if disamb_info.get('standard_name'):
+                        ent.name_zh = disamb_info.get('standard_name', '')
+
+                disambiguated.append(ent)
+
+            print(f"[Stage 3] 消歧完成")
+            return disambiguated
+
+        except Exception as e:
+            print(f"[Stage 3] 实体消歧失败: {e}，保持原样")
+            return entities
+
     def _merge_entities(self, entities: List[HistoricalEntity]) -> List[HistoricalEntity]:
-        """
-        合并重复实体（同名/近似名合并，保留最高 confidence）
-        按 category 分组输出
-        """
+        """合并重复实体（同名/近似名合并，保留最高 confidence）"""
         if not entities:
             return []
 
-        # 按名称小写去重
         seen = {}
         for ent in entities:
             key = ent.name.lower().strip()
@@ -299,7 +372,6 @@ Only return entities that are clearly present in the text. Maximum 15 entities."
                 seen[key] = ent
 
         merged = list(seen.values())
-        # 按 category + confidence 排序
         merged.sort(key=lambda e: (e.category, -e.confidence))
 
         print(f"[Stage 3] 实体去重: {len(entities)} → {len(merged)}")
