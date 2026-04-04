@@ -294,6 +294,12 @@ class ResearchProject:
         setattr(self, attr, StageStatus.FAILED)
         self.updated_at = datetime.now().isoformat(timespec='seconds')
 
+    def mark_stage_skipped(self, stage: int = 6) -> None:
+        """标记阶段跳过"""
+        attr = f'stage{stage}_status'
+        setattr(self, attr, StageStatus.SKIPPED)
+        self.updated_at = datetime.now().isoformat(timespec='seconds')
+
     def summary(self) -> str:
         """返回项目状态摘要"""
         lines = [

@@ -12,6 +12,13 @@ Phase 2 实现：
     Stage 2: 整理史料 (Stage2Organize)
     Stage 3: 提取信息 (Stage3Extract)
     Stage 4: 史料考察 (Stage4Examine)
+
+Phase 3 实现：
+    Stage 6: 论文修改润色 (Stage6Polish)
+    Stage 7: 注释格式修改 (Stage7Format)
+
+Phase 4 实现：
+    Web UI 集成 + 断点续做
 """
 
 import os
@@ -29,6 +36,8 @@ from tools.workflow.stages.stage2_organize import Stage2Organize
 from tools.workflow.stages.stage3_extract import Stage3Extract
 from tools.workflow.stages.stage4_examine import Stage4Examine
 from tools.workflow.stages.stage5_write import Stage5Write
+from tools.workflow.stages.stage6_polish import Stage6Polish
+from tools.workflow.stages.stage7_format import Stage7Format
 
 
 class WorkflowOrchestrator:
@@ -99,6 +108,8 @@ class WorkflowOrchestrator:
             3: self._run_stage3,
             4: self._run_stage4,
             5: self._run_stage5,
+            6: self._run_stage6,
+            7: self._run_stage7,
         }
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -108,7 +119,7 @@ class WorkflowOrchestrator:
 
     def run_all(self) -> ResearchProject:
         """
-        全自动执行所有已实现的阶段（Phase 1+2: Stage 1~5）
+        全自动执行所有已实现的阶段（Phase 1+2+3: Stage 1~7）
 
         Returns:
             ResearchProject: 完整项目（含各阶段产出）
@@ -273,6 +284,26 @@ class WorkflowOrchestrator:
         result = stage.run(topic=topic, style=style)
         # 导出论文文件
         stage.save_paper(os.path.join(self.output_dir, "paper_draft.md"))
+        return result
+
+    def _run_stage6(self, **kwargs) -> Any:
+        """Stage 6: 论文修改润色"""
+        stage = Stage6Polish(self.project)
+        target_style = kwargs.get('target_style', '')
+        result = stage.run(target_style=target_style)
+        return result
+
+    def _run_stage7(self, **kwargs) -> Any:
+        """Stage 7: 注释格式修改"""
+        stage = Stage7Format(self.project)
+        fmt = kwargs.get('format', self.project.citation_format)
+        result = stage.run(format=fmt)
+        # 导出最终论文
+        if self.project.final_paper:
+            out_path = os.path.join(self.output_dir, "final_paper.md")
+            with open(out_path, 'w', encoding='utf-8') as f:
+                f.write(self.project.final_paper)
+            print(f"[Stage 7] 最终论文已保存: {out_path}")
         return result
 
     # ─────────────────────────────────────────────────────────

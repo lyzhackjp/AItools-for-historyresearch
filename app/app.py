@@ -840,5 +840,281 @@ def pdf_ocr_pipeline():
         return jsonify({'error': str(e)}), 500
 
 
+# ─────────────────────────────────────────────────────────
+#  工作流 API（Phase 4）
+# ─────────────────────────────────────────────────────────
+
+import json
+import uuid
+from datetime import datetime
+
+# WorkflowOrchestrator lazy import（避免循环导入）
+_workflow_cache = {}  # project_id → WorkflowOrchestrator instance
+
+
+def _get_workflow_orchestrator(topic: str = None, language: str = "en",
+                                bilingual: bool = True,
+                                citation_format: str = "chicago",
+                                output_dir: str = "./workflow_output"):
+    """获取或创建 WorkflowOrchestrator 实例"""
+    from tools.workflow import WorkflowOrchestrator
+    return WorkflowOrchestrator(
+        topic=topic,
+        language=language,
+        bilingual=bilingual,
+        citation_format=citation_format,
+        output_dir=output_dir,
+    )
+
+
+@app.route('/api/workflow/run', methods=['POST'])
+def workflow_run():
+    """
+    执行历史研究论文工作流
+
+    POST body (JSON):
+        topic: str           - 研究主题
+        language: str         - 主要语言 (en/ja/zh)
+        bilingual: bool       - 是否生成双语版本
+        citation_format: str   - 引用格式 (chicago/apa/gb7714/mla)
+        run_stages: list[int] - 要执行的阶段列表，默认 [1,2,3,4,5,6,7]
+        stage_options: dict    - 各阶段可选参数
+    """
+    try:
+        data = request.get_json() or {}
+        topic = data.get('topic', 'Untitled Research')
+        language = data.get('language', 'en')
+        bilingual = data.get('bilingual', True)
+        citation_format = data.get('citation_format', 'chicago')
+        run_stages = data.get('run_stages', [1, 2, 3, 4, 5, 6, 7])
+        stage_options = data.get('stage_options', {})
+
+        print(f"[Workflow API] 启动工作流 | 主题: {topic} | 语言: {language} | 阶段: {run_stages}")
+
+        # 创建工作流
+        wf = _get_workflow_orchestrator(
+            topic=topic,
+            language=language,
+            bilingual=bilingual,
+            citation_format=citation_format,
+        )
+        project_id = wf.project.id
+        _workflow_cache[project_id] = wf
+
+        # 按顺序执行各阶段
+        results = {}
+        for stage_num in run_stages:
+            opts = stage_options.get(str(stage_num), {})
+            try:
+                result = wf.run_stage(stage_num, **opts)
+                results[stage_num] = {'status': 'done', 'result': str(result)[:200]}
+            except Exception as e:
+                results[stage_num] = {'status': 'failed', 'error': str(e)}
+                print(f"[Workflow API] Stage {stage_num} 失败: {e}")
+
+        # 构建响应
+        response_data = {
+            'success': True,
+            'project_id': project_id,
+            'topic': topic,
+            'stages_completed': run_stages,
+            'results': results,
+            'summary': wf.project.summary(),
+            'files': {
+                'draft': './workflow_output/paper_draft.md',
+                'final': './workflow_output/final_paper.md',
+            },
+        }
+
+        # 如果有最终论文，附带摘要
+        if wf.project.final_paper:
+            response_data['final_paper_preview'] = wf.project.final_paper[:500]
+        elif wf.project.paper_draft:
+            response_data['paper_draft_preview'] = wf.project.paper_draft[:500]
+
+        return jsonify(response_data)
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/workflow/stage/<int:stage_num>', methods=['POST'])
+def workflow_run_single_stage(stage_num: int):
+    """
+    执行单个工作流阶段
+
+    POST body (JSON):
+        project_id: str (可选) - 已有项目ID，用于断点续做
+        topic: str              - 研究主题（project_id 不存在时必填）
+        language: str           - 主要语言
+        ... 其他 WorkflowOrchestrator 参数
+
+        **kwargs: 各阶段额外参数
+    """
+    try:
+        data = request.get_json() or {}
+        project_id = data.pop('project_id', None)
+        stage_options = data.pop('stage_options', {})
+
+        # 断点续做或新建
+        if project_id and project_id in _workflow_cache:
+            wf = _workflow_cache[project_id]
+            print(f"[Workflow API] 恢复项目 {project_id}，继续 Stage {stage_num}")
+        else:
+            topic = data.get('topic', 'Untitled Research')
+            language = data.get('language', 'en')
+            bilingual = data.get('bilingual', True)
+            citation_format = data.get('citation_format', 'chicago')
+            wf = _get_workflow_orchestrator(
+                topic=topic, language=language,
+                bilingual=bilingual, citation_format=citation_format,
+            )
+            project_id = wf.project.id
+            _workflow_cache[project_id] = wf
+            print(f"[Workflow API] 新建项目 {project_id}，执行 Stage {stage_num}")
+
+        # 执行单阶段
+        opts = stage_options.get(str(stage_num), {})
+        result = wf.run_stage(stage_num, **opts)
+
+        return jsonify({
+            'success': True,
+            'project_id': project_id,
+            'stage': stage_num,
+            'status': 'done',
+            'result_preview': str(result)[:300] if result else None,
+            'project_summary': wf.project.summary(),
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e), 'stage': stage_num}), 500
+
+
+@app.route('/api/workflow/project/<project_id>', methods=['GET'])
+def workflow_get_project(project_id: str):
+    """获取项目状态和产出"""
+    try:
+        if project_id not in _workflow_cache:
+            return jsonify({'error': '项目不存在或已过期'}), 404
+
+        wf = _workflow_cache[project_id]
+        p = wf.project
+
+        return jsonify({
+            'success': True,
+            'project_id': project_id,
+            'topic': p.topic,
+            'language': p.language,
+            'bilingual': p.bilingual,
+            'stage_status': {
+                'stage1': p.stage1_status.value,
+                'stage2': p.stage2_status.value,
+                'stage3': p.stage3_status.value,
+                'stage4': p.stage4_status.value,
+                'stage5': p.stage5_status.value,
+                'stage6': p.stage6_status.value,
+                'stage7': p.stage7_status.value,
+            },
+            'outputs': {
+                'literature_count': len(p.literature),
+                'entities_count': len(p.entities),
+                'paper_draft_chars': len(p.paper_draft),
+                'polished_draft_chars': len(p.polished_draft),
+                'final_paper_chars': len(p.final_paper),
+            },
+            'paper_draft_preview': p.paper_draft[:300] if p.paper_draft else None,
+            'final_paper_preview': p.final_paper[:300] if p.final_paper else None,
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/workflow/save', methods=['POST'])
+def workflow_save_project():
+    """
+    保存项目到文件（断点续做）
+
+    POST body (JSON):
+        project_id: str - 项目ID
+        path: str        - 保存路径（可选）
+    """
+    try:
+        data = request.get_json() or {}
+        project_id = data.get('project_id')
+        save_path = data.get('path', '')
+
+        if not project_id or project_id not in _workflow_cache:
+            return jsonify({'error': '项目不存在'}), 404
+
+        wf = _workflow_cache[project_id]
+        if not save_path:
+            save_path = wf._get_save_path()
+
+        wf.project.save(save_path)
+        return jsonify({
+            'success': True,
+            'project_id': project_id,
+            'saved_path': save_path,
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/workflow/load', methods=['POST'])
+def workflow_load_project():
+    """
+    从文件加载项目
+
+    POST body (JSON):
+        path: str - 项目 JSON 文件路径
+    """
+    try:
+        data = request.get_json() or {}
+        path = data.get('path')
+        if not path:
+            return jsonify({'error': '未提供 path'}), 400
+
+        from tools.workflow import WorkflowOrchestrator
+        wf = WorkflowOrchestrator.load(path)
+        _workflow_cache[wf.project.id] = wf
+
+        return jsonify({
+            'success': True,
+            'project_id': wf.project.id,
+            'topic': wf.project.topic,
+            'summary': wf.project.summary(),
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/workflow/stages', methods=['GET'])
+def workflow_stages_info():
+    """获取所有阶段信息"""
+    from tools.workflow import WorkflowOrchestrator
+    return jsonify({
+        'stages': [
+            {'num': 1, 'name': '搜集材料', 'description': '使用 HistoryFieldExplorer 搜集学术文献'},
+            {'num': 2, 'name': '整理史料', 'description': '生成 Obsidian 笔记 + 格式化引用'},
+            {'num': 3, 'name': '提取信息', 'description': 'NER 实体提取 + 关系识别'},
+            {'num': 4, 'name': '史料考察', 'description': '引文网络分析 + 论文逻辑审视'},
+            {'num': 5, 'name': '撰写论文', 'description': '生成研究论文（含双语翻译）'},
+            {'num': 6, 'name': '论文修改润色', 'description': '精简冗余 + 文风迁移'},
+            {'num': 7, 'name': '注释格式修改', 'description': '引用格式转换（Chicago/APA/GB7714等）'},
+        ],
+        'formats': ['chicago', 'apa', 'gb7714', 'mla', 'ieee', 'harvard'],
+        'languages': [{'code': 'en', 'name': 'English'}, {'code': 'ja', 'name': '日本語'}, {'code': 'zh', 'name': '中文'}],
+    })
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
