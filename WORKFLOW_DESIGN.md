@@ -302,6 +302,18 @@ tools/
 
 ---
 
+### 已知问题 / 待优化（2026-04-04）
+
+| 问题 | 原因 | 状态 |
+|------|------|------|
+| Stage 3 实体检索 0 | 文献摘要为空（PaperFinder fallback 数据缺陷）；LLM 提取逻辑需加强 | 待修复 |
+| Stage 6 文风迁移失败 | `ReverseOutlineAnalyzer._call_llm` 使用 `.chat()` 接口与 `LLMClient._call_llm()` 不匹配 | ✅ 已修复（commit 4a44be6） |
+| Obsidian Vault 链接提取失败 | `ObsidianIntegration` 返回非预期数据结构的兜底处理 | ✅ 已修复（commit 4a44be6） |
+| EmbeddingManager 初始化阻塞 | `EmbeddingManager.__init__` 内部 import transformers 触发 HuggingFace 连接 | ✅ 已用 LLM 重排替代 |
+| PapersWithCode 超时 | huggingface.co 网络不通（国内环境） | 已知局限，fallback 到 PaperFinder |
+
+---
+
 ### Word 文档导出（含脚注）
 
 **文件**：`tools/workflow/word_exporter.py`
