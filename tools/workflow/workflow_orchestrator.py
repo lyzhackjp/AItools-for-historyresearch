@@ -7,6 +7,11 @@
 Phase 1 实现：
     Stage 1: 搜集材料 (Stage1Collect)
     Stage 5: 撰写论文 (Stage5Write)
+
+Phase 2 实现：
+    Stage 2: 整理史料 (Stage2Organize)
+    Stage 3: 提取信息 (Stage3Extract)
+    Stage 4: 史料考察 (Stage4Examine)
 """
 
 import os
@@ -20,6 +25,9 @@ if _AI_TOOLS not in sys.path:
 
 from tools.workflow.research_project import ResearchProject, StageStatus
 from tools.workflow.stages.stage1_collect import Stage1Collect
+from tools.workflow.stages.stage2_organize import Stage2Organize
+from tools.workflow.stages.stage3_extract import Stage3Extract
+from tools.workflow.stages.stage4_examine import Stage4Examine
 from tools.workflow.stages.stage5_write import Stage5Write
 
 
@@ -87,6 +95,9 @@ class WorkflowOrchestrator:
         self.output_dir = output_dir
         self._stage_handlers = {
             1: self._run_stage1,
+            2: self._run_stage2,
+            3: self._run_stage3,
+            4: self._run_stage4,
             5: self._run_stage5,
         }
         os.makedirs(self.output_dir, exist_ok=True)
@@ -97,7 +108,7 @@ class WorkflowOrchestrator:
 
     def run_all(self) -> ResearchProject:
         """
-        全自动执行所有已实现的阶段（Phase 1: Stage 1 + Stage 5）
+        全自动执行所有已实现的阶段（Phase 1+2: Stage 1~5）
 
         Returns:
             ResearchProject: 完整项目（含各阶段产出）
@@ -233,6 +244,24 @@ class WorkflowOrchestrator:
         result = stage.run(search_limit=search_limit)
         # 保存 explorer 实例供 Stage 5 复用
         self._shared_explorer = getattr(stage, 'explorer', None)
+        return result
+
+    def _run_stage2(self, **kwargs) -> Any:
+        """Stage 2: 整理史料"""
+        stage = Stage2Organize(self.project)
+        result = stage.run(**kwargs)
+        return result
+
+    def _run_stage3(self, **kwargs) -> Any:
+        """Stage 3: 提取信息"""
+        stage = Stage3Extract(self.project)
+        result = stage.run(**kwargs)
+        return result
+
+    def _run_stage4(self, **kwargs) -> Any:
+        """Stage 4: 史料考察"""
+        stage = Stage4Examine(self.project)
+        result = stage.run(**kwargs)
         return result
 
     def _run_stage5(self, **kwargs) -> Any:
