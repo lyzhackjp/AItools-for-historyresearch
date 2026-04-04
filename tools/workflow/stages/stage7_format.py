@@ -28,6 +28,21 @@ if _AI_TOOLS not in sys.path:
 
 from tools.workflow.research_project import ResearchProject, PaperRecord
 
+# Lazy import Word exporter
+_word_exporter = None
+
+
+def _get_word_exporter():
+    global _word_exporter
+    if _word_exporter is None:
+        try:
+            from tools.workflow.word_exporter import export_paper_to_word, export_paper_with_footnotes
+            _word_exporter = (export_paper_to_word, export_paper_with_footnotes)
+        except Exception as e:
+            print(f"[Stage 7] Word exporter 加载失败: {e}")
+            _word_exporter = (None, None)
+    return _word_exporter
+
 
 class Stage7Format:
     """
@@ -110,10 +125,19 @@ class Stage7Format:
         self.project.citation_format = target_format
         self.project.mark_stage_done(self.STAGE_NUM)
 
+        # ── 7e. Word 文档导出 ─────────────────────────────────
+        word_paths = {}
+        try:
+            word_paths = self._export_to_word(final_paper, formatted_refs, target_format)
+            print(f"[Stage 7] Word 导出: {word_paths}")
+        except Exception as e:
+            print(f"[Stage 7] Word 导出失败: {e}")
+
         result = {
             'final_paper': final_paper,
             'formatted_citations': formatted_refs,
             'format': target_format,
+            'word_files': word_paths,
         }
 
         print(f"[Stage 7] 完成！最终论文: {len(final_paper)} 字符")
@@ -365,3 +389,86 @@ class Stage7Format:
             return paper_text
 
         return paper_text + ref_header + '\n'.join(ref_lines)
+
+    def _export_to_word(
+        self,
+        final_paper: str,
+        formatted_refs: List[str],
+        fmt: str
+    ) -> Dict[str, str]:
+        """
+        将论文导出为 Word 文档（带脚注）
+
+        Args:
+            final_paper: 最终论文文本
+            formatted_refs: 格式化引用列表
+            fmt: 引用格式
+
+        Returns:
+            Dict: 输出文件路径
+        """
+        print(f"[Stage 7] 导出 Word 文档...")
+
+        export_fn, _ = _get_word_exporter()
+        if export_fn is None:
+            print("[Stage 7] Word exporter 不可用，跳过")
+            return {}
+
+        paths = {}
+
+        # 构建脚注列表（将格式化引用转为脚注）
+        footnotes = []
+        for i, ref in enumerate(formatted_refs):
+            footnotes.append({'id': str(i+1), 'text': ref})
+
+        # 提取论文标题（第一个 # 开头）
+        title = ''
+        m = re.match(r'^# (.+)', final_paper)
+        if m:
+            title = m.group(1).strip()
+
+        # 输出目录
+        out_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+            'workflow_output'
+        )
+        os.makedirs(out_dir, exist_ok=True)
+        safe = "".join(c if c.isalnum() else '_' for c in self.project.topic[:20])
+        import datetime
+        ts = datetime.datetime.now().strftime('%Y%m%d')
+        base = f"{safe}_{ts}"
+
+        # 1. Markdown 原生 Word（无脚注，引用在文末）
+        try:
+            md_path = os.path.join(out_dir, f"{base}.docx")
+            export_fn(
+                final_paper,
+                output_path=md_path,
+                language=self.project.language,
+                title=title,
+                citation_format=fmt
+            )
+            paths['markdown_docx'] = md_path
+            print(f"[Stage 7] Word (Markdown 格式): {md_path}")
+        except Exception as e:
+            print(f"[Stage 7] Markdown Word 导出失败: {e}")
+
+        # 2. 带脚注的 Word（如果已有脚注内容）
+        if footnotes:
+            try:
+                fn_path = os.path.join(out_dir, f"{base}_footnotes.docx")
+                _, export_fn_fn = _get_word_exporter()
+                if export_fn_fn:
+                    export_fn_fn(
+                        final_paper,
+                        footnotes=footnotes,
+                        output_path=fn_path,
+                        language=self.project.language,
+                        title=title
+                    )
+                    paths['footnotes_docx'] = fn_path
+                    print(f"[Stage 7] Word (脚注格式): {fn_path}")
+            except Exception as e:
+                print(f"[Stage 7] 脚注 Word 导出失败: {e}")
+
+        return paths

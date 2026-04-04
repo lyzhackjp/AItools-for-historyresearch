@@ -295,7 +295,7 @@ class Stage6Polish:
         """重新审视论文逻辑"""
         try:
             analyzer = self._get_outline_analyzer()
-            result = analyzer.analyze(paper_text, language=self.project.language)
+            result = analyzer.analyze(paper_text)
 
             if isinstance(result, dict):
                 return OutlineReview(

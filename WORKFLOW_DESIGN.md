@@ -1,6 +1,6 @@
 # 历史研究论文全流程工作流模块 — 设计规划
 
-> 版本：v0.1 | 日期：2026-04-03 | 状态：规划完成，待开发
+> 版本：v0.2 | 日期：2026-04-04 | 状态：**Phase 1~4 全部完成**
 
 ---
 
@@ -279,26 +279,62 @@ tools/
 
 ## 六、实现优先级
 
-### Phase 1（立即可做）
-- [ ] `research_project.py` — 统一数据结构
-- [ ] `WorkflowOrchestrator` 骨架（仅打印日志，无实际调用）
-- [ ] Stage 1 + Stage 5 打通（搜集→论文草稿）
-- [ ] `HistoryFieldExplorer` 整合（已可用）
+### Phase 1 ✅ 完成（2026-04-03）
+- [x] `research_project.py` — 统一数据结构
+- [x] `WorkflowOrchestrator` 骨架
+- [x] Stage 1 + Stage 5 打通（搜集→论文草稿）
+- [x] `HistoryFieldExplorer` 整合
 
-### Phase 2
-- [ ] Stage 2（笔记生成 + 引用格式化）
-- [ ] Stage 3（NER + OCR）
-- [ ] Stage 4（引文网络 + 逻辑审视）
+### Phase 2 ✅ 完成（2026-04-04）
+- [x] Stage 2（笔记生成 + 引用格式化）
+- [x] Stage 3（NER + OCR）
+- [x] Stage 4（引文网络 + 逻辑审视）
 
-### Phase 3
-- [ ] Stage 6（润色 + 文风调整）
-- [ ] Stage 7（引用格式转换）
-- [ ] Word/PDF 导出（`python-docx`）
+### Phase 3 ✅ 完成（2026-04-04）
+- [x] Stage 6（润色 + 文风调整）
+- [x] Stage 7（引用格式转换 + Word 导出）
+- [x] Word 导出（`python-docx` + 脚注支持）
 
-### Phase 4
-- [ ] Web UI（`app.py` 中集成工作流）
-- [ ] 断点续做（保存/加载 `ResearchProject` JSON）
-- [ ] 并行处理（各阶段可独立运行）
+### Phase 4 ✅ 完成（2026-04-04）
+- [x] Web UI（`app.py` 集成工作流 API）
+- [x] 断点续做（`ResearchProject.save/load`）
+- [x] Flask REST API 端点
+
+---
+
+### Word 文档导出（含脚注）
+
+**文件**：`tools/workflow/word_exporter.py`
+
+**功能**：
+- Markdown → Word 转换（标题、加粗、斜体、引用块、列表）
+- 脚注引用 `[^n]` → Word 原生脚注
+- 参考文献列表 → Word 脚注（学术规范）
+
+**使用方式**：
+```python
+from tools.workflow.word_exporter import export_paper_to_word, export_paper_with_footnotes
+
+# Markdown → Word
+path = export_paper_to_word(
+    paper_text,
+    output_path="paper.docx",
+    language="en",
+    title="论文标题",
+    citation_format="chicago"
+)
+
+# 带脚注的 Word
+path = export_paper_with_footnotes(
+    paper_text,
+    footnotes=[{"id": "1", "text": "引用内容..."}, ...],
+    output_path="paper_with_footnotes.docx"
+)
+```
+
+**Stage 7 集成**：运行 Stage 7 后自动导出：
+- `workflow_output/{topic}_{date}.docx`（Markdown 格式）
+- `workflow_output/{topic}_{date}_footnotes.docx`（脚注格式）
 
 ---
 

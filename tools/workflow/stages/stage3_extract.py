@@ -67,7 +67,7 @@ class Stage3Extract:
         """延迟创建 LLM 客户端（用于英语实体提取）"""
         if self.llm_client is None:
             from modules.llm_client import create_llm_client
-            self.llm_client = create_llm_client(provider="dashscope")
+            self.llm_client = create_llm_client({'provider': 'dashscope'})
         return self.llm_client
 
     def run(self, **kwargs) -> Dict[str, Any]:
@@ -235,7 +235,10 @@ Only return entities that are clearly present in the text. Maximum 15 entities."
 
         try:
             llm = self._get_llm_client()
-            response = llm._call_llm(prompt, max_tokens=max_tokens)
+            result = llm._call_llm(prompt, max_tokens=max_tokens)
+
+            # 解析返回值（_call_llm 返回 Dict 或 str）
+            response = result.get('content', '') if isinstance(result, dict) else (result or '')
 
             # 解析 JSON
             data = None
