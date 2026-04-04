@@ -76,9 +76,87 @@ class Stage3Extract:
     def _get_llm_client(self):
         """延迟创建 LLM 客户端（用于英语实体提取）"""
         if self.llm_client is None:
-            from modules.llm_client import create_llm_client
-            self.llm_client = create_llm_client({'provider': 'dashscope'})
+            from modules.llm_client import LLMClient
+            # 优先从 secrets/api_keys.txt 读取，兼容环境变量 fallback
+            try:
+                from config.api_key_manager import APIKeyManager
+                mgr = APIKeyManager()
+                api_key = mgr.get_key('qwen')  # dashscope key
+            except Exception:
+                api_key = None
+            
+            if api_key:
+                self.llm_client = LLMClient({
+                    'provider': 'dashscope',
+                    'model': 'qwen-turbo',
+                    'api_key': api_key
+                })
+                print("[Stage 3] LLM: dashscope qwen-turbo (from secrets)")
+            else:
+                # fallback 到环境变量
+                from modules.llm_client import create_llm_client
+                self.llm_client = create_llm_client({'provider': 'dashscope'})
+                print("[Stage 3] LLM: dashscope (from env var)")
         return self.llm_client
+
+    def _fetch_crossref_metadata(self, doi: str) -> Optional[Dict]:
+        """
+        通过 CrossRef API 获取论文元数据（摘要、作者、期刊）
+        DOI 格式：10.xxxx/xxxxx
+        """
+        import requests
+        
+        # 清理 DOI
+        clean_doi = doi.strip()
+        if clean_doi.startswith('https://doi.org/'):
+            clean_doi = clean_doi[16:]
+        if clean_doi.startswith('http://doi.org/'):
+            clean_doi = clean_doi[15:]
+        
+        if not clean_doi:
+            return None
+        
+        try:
+            url = f"https://api.crossref.org/works/{clean_doi}"
+            r = requests.get(url, headers={'Accept': 'application/json'}, timeout=15)
+            if r.status_code != 200:
+                return None
+            
+            data = r.json().get('message', {})
+            
+            # 提取作者
+            authors = []
+            for a in data.get('author', []):
+                name = ' '.join(filter(None, [a.get('given', ''), a.get('family', '')]))
+                if name:
+                    authors.append(name)
+            
+            # 提取摘要（可能为 HTML，需清理）
+            abstract = data.get('abstract', '') or ''
+            # 去除 HTML 标签
+            import re
+            abstract = re.sub(r'<[^>]+>', '', abstract)
+            
+            # 提取期刊
+            container = data.get('container-title', [])
+            journal = container[0] if container else ''
+            
+            # 提取年份
+            published = data.get('published-print', data.get('published-online', {}))
+            year = ''
+            date_parts = published.get('date-parts', [[]])
+            if date_parts and date_parts[0]:
+                year = str(date_parts[0][0])
+            
+            return {
+                'abstract': abstract,
+                'authors': authors,
+                'journal': journal,
+                'year': year,
+            }
+        except Exception as e:
+            print(f"[Stage 3] CrossRef 获取失败 [{doi[:40]}]: {e}")
+            return None
 
     def run(self, **kwargs) -> Dict[str, Any]:
         """
@@ -135,11 +213,38 @@ class Stage3Extract:
         relations = []
 
         for paper in self.project.literature:
-            # 组合标题 + 摘要 + 作者 + 期刊（摘要为空时用这些补充）
+            # ── 1. 先尝试 CrossRef API 补充元数据（DOI 有摘要时跳过）──
+            original_abstract = paper.abstract or ''
+            original_authors = list(paper.authors) if paper.authors else []
+            
+            # 尝试从 doi 字段或 url 字段提取 DOI
+            doi_to_use = paper.doi or ''
+            if not doi_to_use and paper.url:
+                # 从 URL 中提取 DOI（如 https://doi.org/10.xxxx/xxxxx）
+                import re
+                m = re.search(r'(10\.\d{4,}/[^\s\?#]+)', paper.url)
+                if m:
+                    doi_to_use = m.group(1).rstrip('.')
+            
+            if not original_abstract and doi_to_use:
+                meta = self._fetch_crossref_metadata(doi_to_use)
+                if meta:
+                    paper.abstract = meta.get('abstract', '')
+                    if not paper.authors and meta.get('authors'):
+                        paper.authors = meta['authors']
+                    if not paper.journal and meta.get('journal'):
+                        paper.journal = meta['journal']
+                    print(f"[Stage 3] CrossRef 补充 [{paper.title[:50]}]: "
+                          f"abstract={len(paper.abstract)}chars, "
+                          f"authors={len(paper.authors) if paper.authors else 0}")
+
+            # ── 2. 组合文本用于实体提取 ────────────────────────────
             authors_str = ' '.join(paper.authors) if paper.authors else ''
             text = f"{paper.title} {authors_str} {paper.journal or ''} {paper.abstract or ''}".strip()
+            
             if not text or len(text) < 10:
-                continue
+                # 仅有标题时，也尝试 LLM 实体提取（标题本身含实体）
+                text = paper.title
 
             try:
                 if self.project.language == 'ja':
@@ -153,6 +258,11 @@ class Stage3Extract:
                     ent.related_entities.append(f"paper:{paper.id}")
 
                 entities.extend(paper_entities)
+                
+                # 恢复原始元数据（不修改 project.literature 全局状态）
+                paper.abstract = original_abstract
+                paper.authors = original_authors
+                
             except Exception as e:
                 print(f"[Stage 3] 论文实体提取失败 [{paper.title[:40]}]: {e}")
 
@@ -214,32 +324,43 @@ class Stage3Extract:
     ) -> List[HistoricalEntity]:
         """
         使用 LLM 提取实体（英语等非日语语言）
+        支持标题级提取（text 很短时也尝试提取）
         """
         import uuid
         import json
 
         input_text = text[:3000] if len(text) > 3000 else text
+        topic = getattr(self.project, 'topic', '') or ''
 
-        prompt = f"""You are a historical research assistant. Extract key entities from the following text.
+        # 根据文本长度选择不同策略
+        is_short = len(input_text) < 100
+
+        prompt = f"""You are a historical research assistant specializing in the topic: {topic}
+
+Extract key entities from the following text.
 
 Text: {input_text}
 
 Identify the following entity types:
-- person: historical figures, scholars
-- location: countries, cities, regions
-- event: historical events, movements
-- concept: academic terms, theories, ideologies
-- literature: books, documents, archives
+- person: historical figures, scholars, monarchs, politicians
+- location: countries, cities, regions, continents
+- event: historical events, movements, wars, reforms, religious changes
+- concept: academic terms, theories, ideologies, political systems
+- literature: books, documents, archives, legal texts
 
 Return ONLY valid JSON in this format (no explanation):
 {{
   "entities": [
-    {{"name": "entity name", "category": "person|location|event|concept|literature", "confidence": 0.0-1.0}},
+    {{"name": "entity name", "category": "person|location|event|concept|literature", "confidence": 0.0-1.0, "reason": "brief explanation"}},
     ...
   ]
 }}
 
-Only return entities that are clearly present in the text. Maximum 15 entities."""
+Important:
+- Extract entities clearly present OR strongly implied by the text
+- For short texts (titles), infer likely historical entities from the context
+- Maximum 20 entities, prioritize the most significant
+- confidence: higher for explicit mentions, lower for inferences"""
 
         try:
             llm = self._get_llm_client()
@@ -248,27 +369,37 @@ Only return entities that are clearly present in the text. Maximum 15 entities."
             # 解析返回值（_call_llm 返回 Dict 或 str）
             response = result.get('content', '') if isinstance(result, dict) else (result or '')
 
-            # 解析 JSON
+            # 解析 JSON（支持多行 JSON 对象）
             data = None
-            for line in response.split('\n'):
-                line = line.strip()
-                if line.startswith('{') or line.startswith('['):
-                    try:
-                        data = json.loads(line)
-                        break
-                    except:
-                        continue
+            
+            # 方法1：尝试直接解析整个 response
+            try:
+                data = json.loads(response)
+            except Exception:
+                pass
 
-            # 尝试从代码块中提取
+            # 方法2：尝试从代码块中提取
             if data is None:
                 for chunk in response.split('```'):
                     chunk = chunk.strip()
+                    if chunk.startswith('json'):
+                        chunk = chunk[4:].strip()
                     if chunk.startswith('{') or chunk.startswith('['):
                         try:
                             data = json.loads(chunk)
                             break
-                        except:
+                        except Exception:
                             continue
+
+            # 方法3：用正则找第一个 { ... } JSON 对象
+            if data is None:
+                first_brace = response.find('{')
+                if first_brace >= 0:
+                    possible = response[first_brace:]
+                    try:
+                        data = json.loads(possible)
+                    except json.JSONDecodeError:
+                        pass
 
             entities = []
             if data and 'entities' in data:
