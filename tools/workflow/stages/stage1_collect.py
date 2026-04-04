@@ -50,17 +50,11 @@ class Stage1Collect:
         return self.explorer
 
     def _get_embedding_manager(self):
-        """延迟创建 EmbeddingManager（语义重排用）"""
-        if self.embedding_manager is None:
-            try:
-                from modules.embedding_manager import EmbeddingManager
-                self.embedding_manager = EmbeddingManager(default_model='bge-m3')
-                self.embedding_manager.load_embedding_model('bge-m3')
-                print("[Stage 1] EmbeddingManager loaded for semantic reranking")
-            except Exception as e:
-                print(f"[Stage 1] EmbeddingManager 加载失败: {e}，跳过语义重排")
-                self.embedding_manager = None
-        return self.embedding_manager
+        """延迟创建 EmbeddingManager（暂不使用，改用 LLM 语义重排）"""
+        # EmbeddingManager.__init__ 内部 import transformers 会触发 HuggingFace 连接
+        # 在网络不通环境下会卡死。暂用 LLM 做语义重排替代
+        self.embedding_manager = None
+        return None
 
     def run(self, search_limit: int = 60) -> List[PaperRecord]:
         """
@@ -110,9 +104,9 @@ class Stage1Collect:
 
         papers = list(paper_set.values())
 
-        # ── 语义重排（使用 EmbeddingManager）────────────────────
+        # ── 语义重排（使用 LLM，网终不通时自动降级）─────────────
         if len(papers) > 3 and self.project.language != 'ja':
-            papers = self._semantic_rerank(papers)
+            papers = self._semantic_rerank_llm(papers)
 
         # 按 score 降序
         papers.sort(key=lambda p: p.score, reverse=True)
@@ -126,60 +120,68 @@ class Stage1Collect:
 
         return papers
 
-    def _semantic_rerank(self, papers: List[PaperRecord]) -> List[PaperRecord]:
+    def _semantic_rerank_llm(self, papers: List[PaperRecord]) -> List[PaperRecord]:
         """
-        使用 EmbeddingManager 对论文进行语义重排
+        使用 LLM 对论文进行语义重排（EmbeddingManager 不可用时的替代方案）
 
         让与研究主题最相关的论文排在前面
         """
         try:
-            em = self._get_embedding_manager()
-            if em is None:
-                return papers
-
             topic = self.project.topic
-            print(f"[Stage 1] 语义重排: {len(papers)} 篇论文")
+            print(f"[Stage 1] 语义重排（LLM）: {len(papers)} 篇论文")
 
-            # 构建文档列表
-            docs = []
-            for p in papers:
-                text = f"{p.title} {' '.join(p.authors)} {p.journal or ''} {p.abstract or ''}"
-                docs.append({'id': p.id, 'text': text[:2000]})
-
-            if not docs:
+            if len(papers) <= 1:
                 return papers
 
-            # 创建向量索引
-            em.create_vector_index(docs)
-            index_stats = em.get_index_stats()
-            print(f"[Stage 1] 向量索引: {index_stats.get('document_count', 0)} 文档")
+            titles_str = '\n'.join(
+                f"{i+1}. {p.title} ({', '.join(p.authors[:2]) if p.authors else 'Unknown'}, {p.year or 'n.d.'})"
+                for i, p in enumerate(papers)
+            )
 
-            # 语义搜索重排
+            prompt = f"""Research topic: {topic}
+
+Rank these academic papers by relevance to the research topic (most relevant first).
+Return ONLY a JSON array of paper numbers, no explanation.
+Example: [3, 1, 4, 2]
+
+Papers:
+{titles_str}
+
+Ranking (JSON):"""
+
+            from modules.llm_client import create_llm_client
+            llm = create_llm_client({'provider': 'dashscope'})
+            result = llm._call_llm(prompt, max_tokens=500)
+
+            response = result.get('content', '') if isinstance(result, dict) else (result or '')
+
+            import re, json
+            match = re.search(r'\[\d+(?:,\s*\d+)*\]', response)
+            if not match:
+                print(f"[Stage 1] LLM 重排解析失败，保持原顺序")
+                return papers
+
+            ranking = json.loads(match.group())
+
+            id_to_paper = {p.id: p for p in papers}
             reranked = []
-            seen_ids = set()
+            seen = set()
+            for idx in ranking:
+                paper = papers[idx - 1] if 0 < idx <= len(papers) else None
+                if paper and paper.id not in seen:
+                    reranked.append(paper)
+                    seen.add(paper.id)
 
-            # 前 3 篇：直接取语义搜索最相关的
-            results = em.semantic_search(topic, top_k=min(5, len(papers)))
-            for r in results:
-                pid = r.get('id', '')
-                if pid:
-                    for p in papers:
-                        if p.id == pid and pid not in seen_ids:
-                            reranked.append(p)
-                            seen_ids.add(pid)
-                            break
-
-            # 其余：按原 score 顺序补充
             for p in papers:
-                if p.id not in seen_ids:
+                if p.id not in seen:
                     reranked.append(p)
-                    seen_ids.add(p.id)
+                    seen.add(p.id)
 
             print(f"[Stage 1] 语义重排完成，前3篇: {[p.title[:40] for p in reranked[:3]]}")
             return reranked
 
         except Exception as e:
-            print(f"[Stage 1] 语义重排失败: {e}，保持原顺序")
+            print(f"[Stage 1] LLM 语义重排失败: {e}，保持原顺序")
             return papers
 
     def _normalize_authors(self, author_field) -> List[str]:
