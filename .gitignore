@@ -5,6 +5,8 @@
 # ===========================================
 secrets/
 secrets/**
+secret/
+secret/**
 *.pem
 *.key
 .env
@@ -16,6 +18,10 @@ api_key.txt
 api_keys.txt
 **/api_key.txt
 **/api_keys.txt
+config/api_config.json
+config/current_environment.json
+config/external_config.json
+config/*.local.json
 
 # ===========================================
 # Python 相关
@@ -46,6 +52,8 @@ venv/
 ENV/
 env/
 .venv/
+.venv*/
+*_venv/
 TraeAI-*/
 
 # ===========================================
@@ -196,6 +204,7 @@ frontend/node_modules/.cache/
 
 # TypeScript编译输出
 *.tsbuildinfo
+*.print.html
 
 # ===========================================
 # 浏览器自动化
@@ -216,3 +225,64 @@ webdriver/
 *.dmg
 *.exe
 *.msi
+
+# ===========================================
+# Local research materials and run artifacts - never upload
+# Keep source code, tests, and documentation separate from papers,
+# downloaded sources, OCR outputs, screenshots, checkpoints, and reports.
+# ===========================================
+output/
+ocr_output/
+workflow_output/
+training_workflow_output/
+cache/
+tmp/
+temp/
+downloads/
+test_downloads/
+organized_books/
+local_research_data/
+research_data/
+private_data/
+input_documents/
+reference_documents/
+materials/
+sources/
+corpus/
+
+# Historical citation verification artifacts
+historical_citation_*run*/
+historical_citation_*probe*/
+historical_citation_*spotcheck*/
+page_map_*/
+split_pages/
+spread_scan_*/
+ocr_page_*/
+*_checkpoint.json
+*checkpoint*.json
+page_mapping_cache.json
+verification_results.json
+verification_report.md
+partial_resume_report.md
+resume_checkpoint.json
+tmp_ndl_response.xml
+
+# Browser/OpenClaw/NDL session artifacts
+browser_screenshots/
+openclaw_downloads/
+ndl_browser_*/
+*.crdownload
+*cid_state*.png
+cookies*.json
+session*.json
+storage_state*.json
+
+# Local backups and generated research tables
+*.bak
+*.csv
+*.jsonl
+~$*
+
+# Local historical citation model policy generated from machine-specific Ollama evaluations
+config/historical_citation_ollama_model_policy.json
+config/historical_citation_contained_sources.json

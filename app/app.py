@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify, send_file
 import os
 import uuid
+from dataclasses import asdict, is_dataclass
 from werkzeug.utils import secure_filename
 import io
 import sys
@@ -14,32 +15,181 @@ from modules.llm_client import LLMClient
 from modules.pdf_processor import PDFProcessor
 from modules.ocr_processor import OCRProcessor
 from modules.data_structurer import DataStructurer
+from modules.historical_citation_verifier import HistoricalCitationVerifier
+from modules.historical_citation_workspace import HistoricalCitationWorkspaceInterface
+from modules.ndl_download_workflow import NDLDownloadModule, NDLDownloadRequest
+from modules.pdf_to_ner_workflow import PDFToNERConfig, PDFToNERPipeline
+from modules.task_manager import TaskManager
 from modules.unified_ocr_processor import UnifiedOCRProcessor, UnifiedOCRConfig, OCRModelType
 
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = config['default'].MAX_CONTENT_LENGTH
 
-doc_processor = DocProcessor()
-llm_client = LLMClient(config['default'].LLM_CONFIG)
-pdf_processor = PDFProcessor(config['default'].OUTPUT_DIR)
-ocr_processor = OCRProcessor(config['default'].TESSERACT_PATH)
-data_structurer = DataStructurer()
+class LazyService:
+    def __init__(self, factory, name="", description=""):
+        self._factory = factory
+        self._instance = None
+        self.name = name
+        self.description = description
+
+    def _get_instance(self):
+        if self._instance is None:
+            self._instance = self._factory()
+        return self._instance
+
+    def __getattr__(self, item):
+        return getattr(self._get_instance(), item)
+
+    @property
+    def initialized(self):
+        return self._instance is not None
+
+    def status(self):
+        return {
+            'name': self.name,
+            'description': self.description,
+            'initialized': self.initialized,
+            'class_name': type(self._instance).__name__ if self._instance is not None else None,
+        }
 
 unified_ocr_config = UnifiedOCRConfig(
     ndlocr_path=config['default'].NDLOCR_LITE_PATH or None,
     ndlkoten_path=config['default'].NDLKOTENOCR_LITE_PATH or None,
+    tesseract_path=config['default'].TESSERACT_PATH,
     use_gpu=config['default'].NDLOCR_LITE_GPU,
     enable_visualization=config['default'].NDLOCR_LITE_VIZ,
     timeout=config['default'].NDLOCR_LITE_TIMEOUT,
     default_model=config['default'].DEFAULT_OCR_MODEL
 )
-unified_ocr_processor = UnifiedOCRProcessor(unified_ocr_config)
+doc_processor = LazyService(lambda: DocProcessor(), name='doc_processor', description='Document parsing service')
+llm_client = LazyService(lambda: LLMClient(config['default'].LLM_CONFIG), name='llm_client', description='LLM service')
+pdf_processor = LazyService(lambda: PDFProcessor(config['default'].OUTPUT_DIR), name='pdf_processor', description='PDF service')
+ocr_processor = LazyService(lambda: OCRProcessor(config['default'].TESSERACT_PATH), name='ocr_processor', description='Tesseract OCR service')
+data_structurer = LazyService(lambda: DataStructurer(), name='data_structurer', description='Structured data service')
+unified_ocr_processor = LazyService(lambda: UnifiedOCRProcessor(unified_ocr_config), name='unified_ocr_processor', description='Unified OCR service')
+ndl_download_module = LazyService(lambda: NDLDownloadModule(), name='ndl_download_module', description='NDL download service')
+historical_citation_verifier = LazyService(
+    lambda: HistoricalCitationVerifier(
+        ndl_download_module=ndl_download_module,
+        pdf_processor=pdf_processor,
+        ocr_processor=unified_ocr_processor,
+        llm_client=llm_client,
+    ),
+    name='historical_citation_verifier',
+    description='Historical citation verification service',
+)
+historical_citation_workspace = LazyService(
+    lambda: HistoricalCitationWorkspaceInterface(verifier=historical_citation_verifier),
+    name='historical_citation_workspace',
+    description='Workspace-safe historical citation package interface',
+)
+_task_manager = None
+
+LAZY_SERVICES = {
+    'doc_processor': doc_processor,
+    'llm_client': llm_client,
+    'pdf_processor': pdf_processor,
+    'ocr_processor': ocr_processor,
+    'data_structurer': data_structurer,
+    'unified_ocr_processor': unified_ocr_processor,
+    'ndl_download_module': ndl_download_module,
+    'historical_citation_verifier': historical_citation_verifier,
+    'historical_citation_workspace': historical_citation_workspace,
+}
+
+
+def create_app(test_config=None):
+    """Return the Flask app without initializing lazy services."""
+
+    if test_config:
+        app.config.update(test_config)
+    return app
+
+
+def get_service_status():
+    return {
+        name: service.status()
+        for name, service in LAZY_SERVICES.items()
+    }
+
+
+def _get_task_manager():
+    global _task_manager
+    if _task_manager is None:
+        _task_manager = TaskManager(
+            mode=os.getenv('TASK_EXECUTION_MODE', 'script'),
+            provider=config['default'].LLM_CONFIG.get('provider', 'qwen'),
+        )
+    return _task_manager
 
 
 def allowed_file(filename):
     """检查文件扩展名是否允许"""
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in config['default'].ALLOWED_EXTENSIONS
+
+
+def _parse_bool(value, default=False):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _parse_int(value, default=None):
+    if value in (None, ''):
+        return default
+    return int(value)
+
+
+def _request_payload():
+    return request.get_json(silent=True) or request.form or {}
+
+
+def _save_uploaded_pdf(file_storage, prefix):
+    unique_id = uuid.uuid4().hex[:8]
+    temp_dir = os.path.join(config['default'].TEMP_DIR, f'{prefix}_{unique_id}')
+    os.makedirs(temp_dir, exist_ok=True)
+    filename = secure_filename(file_storage.filename) or 'input.pdf'
+    temp_pdf_path = os.path.join(temp_dir, filename)
+    file_storage.save(temp_pdf_path)
+    return temp_dir, temp_pdf_path
+
+
+def _dataclass_payload(obj):
+    if is_dataclass(obj):
+        return asdict(obj)
+    return obj
+
+
+def _run_reusable_pdf_to_ner_pipeline(temp_pdf_path, options):
+    output_dir = options.get('output_dir') or os.path.join(
+        config['default'].OUTPUT_DIR,
+        'pdf_to_ner_runs',
+        uuid.uuid4().hex[:8],
+    )
+    pipeline = PDFToNERPipeline(
+        PDFToNERConfig(
+            pdf_path=temp_pdf_path,
+            output_dir=output_dir,
+            start_page=_parse_int(options.get('start_page'), 1),
+            end_page=_parse_int(options.get('end_page')),
+            dpi=_parse_int(options.get('dpi'), config['default'].PDF_DPI),
+            ndlocr_device=options.get('ndlocr_device', 'cpu'),
+            run_ocr=_parse_bool(options.get('run_ocr'), True),
+            run_ner=_parse_bool(options.get('run_ner'), True),
+            min_entry_chars=_parse_int(options.get('min_entry_chars'), 40),
+            ner_model=options.get('ner_model', 'qwen3.6-plus'),
+            ner_chunk_size=_parse_int(options.get('ner_chunk_size'), 3),
+            max_retries=_parse_int(options.get('max_retries'), 3),
+            sleep_between_calls=float(options.get('sleep_between_calls', 1.5)),
+            entry_limit_per_page=_parse_int(options.get('entry_limit_per_page')),
+            confirm_ner_cost=_parse_bool(options.get('confirm_ner_cost'), False),
+            continue_on_error=_parse_bool(options.get('continue_on_error'), False),
+        )
+    )
+    return pipeline.run()
 
 
 @app.route('/')
@@ -60,7 +210,9 @@ def index():
             'doc': {
                 'parse': 'POST /api/doc/parse - 解析Word文档',
                 'polish': 'POST /api/doc/polish - 学术润色',
-                'generate': 'POST /api/doc/generate - 生成Word文档'
+                'generate': 'POST /api/doc/generate - 生成Word文档',
+                'verify_historical_citations': 'POST /api/doc/verify-historical-citations - 核对中文引文与 NDL 日文史料原文',
+                'historical_citation_package': 'POST /api/doc/historical-citation-package - 输出工作区统一历史引文 package'
             },
             'pdf': {
                 'info': 'GET /api/pdf/info?path=xxx - 获取PDF信息',
@@ -79,9 +231,130 @@ def index():
             'data': {
                 'structure': 'POST /api/data/structure - 数据结构化',
                 'export': 'POST /api/data/export - 导出结构化数据'
+            },
+            'tasks': {
+                'capabilities': 'GET /api/tasks/capabilities - 查看可用任务、后端、Provider 与多选项',
+                'task_capability': 'GET /api/tasks/capabilities/<task_type> - 查看单个任务的后端选项',
+                'execute': 'POST /api/tasks/execute - 统一任务执行入口'
             }
         }
     })
+
+
+@app.route('/api/system/status', methods=['GET'])
+def system_status():
+    """Lightweight API status endpoint that does not initialize lazy services."""
+
+    return jsonify({
+        'success': True,
+        'data': {
+            'app': {
+                'name': 'History Research AI Tools',
+                'version': '1.1.0',
+            },
+            'services': get_service_status(),
+            'task_manager': {
+                'initialized': _task_manager is not None,
+            },
+            'privacy': {
+                'redacted_status_only': True,
+                'does_not_initialize_lazy_services': True,
+                'does_not_expose_secret_values': True,
+            },
+        },
+    })
+
+
+@app.route('/api/tasks/capabilities', methods=['GET'])
+def list_task_capabilities():
+    """统一任务能力发现接口"""
+    try:
+        manager = _get_task_manager()
+        return jsonify({
+            'success': True,
+            'data': {
+                'tasks': manager.get_available_tasks(detailed=True),
+                'providers': manager.get_available_providers(detailed=True),
+                'default_mode': manager.mode,
+                'default_provider': manager.provider,
+            }
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/tasks/capabilities/<task_type>', methods=['GET'])
+def get_task_capability(task_type):
+    """查询单个任务的能力和后端选项"""
+    try:
+        manager = _get_task_manager()
+        return jsonify({
+            'success': True,
+            'data': manager.get_task_options(task_type)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/tasks/execute', methods=['POST'])
+def execute_task():
+    """统一任务执行接口"""
+    try:
+        data = request.get_json() or {}
+        task_type = data.get('task_type')
+        if not task_type:
+            return jsonify({'error': '未提供 task_type'}), 400
+
+        manager = _get_task_manager()
+        requested_mode = data.get('mode')
+        requested_provider = data.get('provider')
+        if requested_mode:
+            manager.set_mode(requested_mode)
+        if requested_provider:
+            manager.set_provider(requested_provider)
+
+        task_input = data.get('input')
+        if task_input is None:
+            task_input = {
+                key: value
+                for key, value in data.items()
+                if key not in {
+                    'task_type',
+                    'input',
+                    'preset',
+                    'mode',
+                    'provider',
+                }
+            }
+
+        runtime_kwargs = {}
+        for key in [
+            'provider',
+            'model',
+            'backend',
+            'temperature',
+            'max_tokens',
+            'timeout',
+            'max_retries',
+            'cache_enabled',
+            'fallback_backends',
+            'preferred_providers',
+            'extra_params',
+        ]:
+            if key in data:
+                runtime_kwargs[key] = data[key]
+
+        result = manager.execute_task_package(
+            task_type,
+            preset=data.get('preset'),
+            **task_input,
+            **runtime_kwargs,
+        )
+        status_code = 200 if result.get('success') else 500
+        return jsonify(result), status_code
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/doc/parse', methods=['POST'])
@@ -132,6 +405,84 @@ def polish_document():
             'polished': polished_text.get('content', text),
             'usage': polished_text.get('usage', {})
         })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/doc/verify-historical-citations', methods=['POST'])
+def verify_historical_citations():
+    """史料引文核对接口"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': '未提供文档文件'}), 400
+
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': '文件名为空'}), 400
+        if not file.filename.lower().endswith('.docx'):
+            return jsonify({'error': '仅支持 docx 文件'}), 400
+
+        unique_id = uuid.uuid4().hex[:8]
+        temp_dir = os.path.join(config['default'].TEMP_DIR, f'historical_citation_{unique_id}')
+        os.makedirs(temp_dir, exist_ok=True)
+
+        filename = secure_filename(file.filename) or f'citation_{unique_id}.docx'
+        temp_docx_path = os.path.join(temp_dir, filename)
+        file.save(temp_docx_path)
+
+        result = historical_citation_verifier.verify_docx(
+            temp_docx_path,
+            search_ndl=_parse_bool(request.form.get('search_ndl'), True),
+            download_source=_parse_bool(request.form.get('download_source'), False),
+            restricted_download=_parse_bool(request.form.get('restricted_download'), False),
+            max_search_results=_parse_int(request.form.get('max_search_results'), 5) or 5,
+            page_window=_parse_int(request.form.get('page_window'), 4) or 4,
+            ocr_model=request.form.get('ocr_model', OCRModelType.NDLOCR_LITE.value),
+            output_dir=os.path.join(config['default'].OUTPUT_DIR, 'historical_citation_verification', unique_id),
+        )
+
+        return jsonify(result)
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/doc/historical-citation-package', methods=['POST'])
+def historical_citation_package():
+    """工作区统一历史引文 package 接口，默认离线解析。"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': '未提供文档文件'}), 400
+
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': '文件名为空'}), 400
+
+        unique_id = uuid.uuid4().hex[:8]
+        temp_dir = os.path.join(config['default'].TEMP_DIR, f'historical_citation_package_{unique_id}')
+        os.makedirs(temp_dir, exist_ok=True)
+
+        filename = secure_filename(file.filename) or f'citation_{unique_id}.docx'
+        temp_docx_path = os.path.join(temp_dir, filename)
+        file.save(temp_docx_path)
+
+        action = request.form.get('action', 'parse')
+        output_dir = os.path.join(config['default'].OUTPUT_DIR, 'historical_citation_packages', unique_id)
+        result = historical_citation_workspace.build_package(
+            file_path=temp_docx_path,
+            action=action,
+            include_unquoted=_parse_bool(request.form.get('include_unquoted'), False),
+            search_ndl=_parse_bool(request.form.get('search_ndl'), False),
+            download_source=_parse_bool(request.form.get('download_source'), False),
+            restricted_download=_parse_bool(request.form.get('restricted_download'), False),
+            max_search_results=_parse_int(request.form.get('max_search_results'), 5) or 5,
+            page_window=_parse_int(request.form.get('page_window'), 4) or 4,
+            ocr_model=request.form.get('ocr_model', OCRModelType.NDLOCR_LITE.value),
+            output_dir=output_dir,
+        )
+
+        return jsonify(result), 200 if result.get('success') else 500
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -782,6 +1133,16 @@ def pdf_ocr_pipeline():
         if file.filename == '':
             return jsonify({'error': '文件名为空'}), 400
 
+        if request.form.get('pipeline_type') in {'pdf_to_ner', 'ner'}:
+            _, temp_pdf_path = _save_uploaded_pdf(file, 'pdf_to_ner')
+            result = _run_reusable_pdf_to_ner_pipeline(temp_pdf_path, request.form)
+            return jsonify({
+                'success': result.success,
+                'pipeline_type': 'pdf_to_ner',
+                'data': _dataclass_payload(result),
+                'message': 'PDF 到 NER 工作流完成' if result.success else 'PDF 到 NER 工作流失败'
+            }), 200 if result.success else 500
+
         language = request.form.get('language', 'zh')
         ocr_method = request.form.get('method', 'tesseract')
         output_format = request.form.get('output', 'json')
@@ -835,6 +1196,98 @@ def pdf_ocr_pipeline():
                 'format': 'csv',
                 'message': '处理完成'
             })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/pdf/ner/pipeline', methods=['POST'])
+def pdf_to_ner_pipeline():
+    """PDF 到 NER 全流程接口"""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': '未提供文件'}), 400
+
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': '文件名为空'}), 400
+
+        _, temp_pdf_path = _save_uploaded_pdf(file, 'pdf_to_ner')
+        result = _run_reusable_pdf_to_ner_pipeline(temp_pdf_path, request.form)
+
+        return jsonify({
+            'success': result.success,
+            'pipeline_type': 'pdf_to_ner',
+            'data': _dataclass_payload(result),
+            'message': 'PDF 到 NER 工作流完成' if result.success else 'PDF 到 NER 工作流失败'
+        }), 200 if result.success else 500
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ndl/search', methods=['POST'])
+def ndl_search():
+    """NDL 搜索接口"""
+    try:
+        data = _request_payload()
+        keyword = data.get('keyword')
+        if not keyword:
+            return jsonify({'error': '未提供 keyword'}), 400
+
+        max_results = _parse_int(data.get('max_results'), 10)
+        use_api = _parse_bool(data.get('use_api'), True)
+        headless = _parse_bool(data.get('headless'), True)
+        output_dir = data.get('output_dir')
+
+        results = ndl_download_module.search(
+            keyword,
+            max_results=max_results,
+            use_api=use_api,
+            headless=headless,
+            output_dir=output_dir,
+        )
+
+        return jsonify({
+            'success': True,
+            'keyword': keyword,
+            'count': len(results),
+            'results': [_dataclass_payload(item) for item in results],
+            'message': 'NDL 搜索完成'
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/ndl/download', methods=['POST'])
+def ndl_download():
+    """NDL 下载接口"""
+    try:
+        data = _request_payload()
+        keyword = data.get('keyword')
+        if not keyword:
+            return jsonify({'error': '未提供 keyword'}), 400
+
+        request_model = NDLDownloadRequest(
+            keyword=keyword,
+            output_dir=data.get('output_dir') or os.path.join(config['default'].OUTPUT_DIR, 'ndl_downloads'),
+            filename=data.get('filename'),
+            max_results=_parse_int(data.get('max_results'), 5),
+            max_attempts=_parse_int(data.get('max_attempts'), 5),
+            use_api=_parse_bool(data.get('use_api'), True),
+            headless=_parse_bool(data.get('headless'), True),
+            restricted=_parse_bool(data.get('restricted'), False),
+            result_index=_parse_int(data.get('result_index'), 0),
+        )
+
+        outcome = ndl_download_module.download(request_model)
+
+        return jsonify({
+            'success': outcome.success,
+            'data': _dataclass_payload(outcome),
+            'message': 'NDL 下载完成' if outcome.success else 'NDL 下载失败'
+        }), 200 if outcome.success else 500
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500

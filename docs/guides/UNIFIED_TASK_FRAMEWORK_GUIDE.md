@@ -24,10 +24,10 @@
 
 ```
 # 阿里云通义千问
-qwen3.5-plus = sk-your-qwen-api-key
+qwen3.5-plus = QWEN_API_KEY_PLACEHOLDER
 
 # Minimax AI
-Minimax2.7 = sk-your-minimax-api-key
+Minimax2.7 = MINIMAX_API_KEY_PLACEHOLDER
 ```
 
 ### 2. 基本使用

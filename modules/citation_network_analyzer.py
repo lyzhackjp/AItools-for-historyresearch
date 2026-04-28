@@ -1,633 +1,504 @@
 """
-引文网络分析模块
+Citation network analysis helpers.
 
-分析和可视化学术文献的引文网络
-支持构建知识图谱、识别学术流派等
-
-核心功能：
-- 从文献中提取引用关系
-- 构建引文网络图谱
-- 分析理论演进脉络
-- 识别学术流派及其分支
-- 发现边缘但有启发性的研究
-- 可视化输出
-
-依赖模块：
-- data_structurer.py
+This module provides a stable citation-record schema plus graph-building and
+summary utilities for workflow stages.
 """
 
-import re
+from __future__ import annotations
+
+import hashlib
 import json
-from typing import Dict, List, Optional, Any, Tuple, Set
-from collections import defaultdict, Counter
-from pathlib import Path
+import re
+from collections import Counter, defaultdict
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 
 
 class CitationNetworkAnalyzer:
-    """引文网络分析器"""
-    
+    """Analyze citation relationships and produce normalized graph data."""
+
     CITATION_PATTERNS = {
-        'japanese': [
-            r'(?:[^（）\(\)]+?)[\[（]([^）\)]+?)[\]）]',
-            r'(?:[^""'']+?)「([^""''「」]+?)」',
-            r'\[(\d+)\]',
-            r'（\d+）'
+        "japanese": [
+            re.compile(r"\[(\d+)\]"),
+            re.compile(r"([一-龥ぁ-んァ-ンA-Za-z0-9\s]{4,})（(\d{4})）"),
         ],
-        'chinese': [
-            r'(?:[^（）\(\)]+?)[\[（]([^）\)]+?)[\]）]',
-            r'(?:[^""'']+?)『([^""''『』]+?)』',
-            r'\[(\d+)\]',
-            r'（\d+）'
+        "chinese": [
+            re.compile(r"\[(\d+)\]"),
+            re.compile(r"([一-龥A-Za-z0-9\s]{4,})（(\d{4})）"),
         ],
-        'english': [
-            r'\(([A-Za-z]+(?:,?\s*(?:et\s*al\.|&)?\s*[A-Za-z]+)?(?:\s*\(\d{4}\))?(?:,\s*\d+(?:-\d+)?)?)\)',
-            r'\[(\d+)\]',
-            r'([A-Za-z]+\s+et\s+al\.,?\s+\d{4})'
-        ]
+        "english": [
+            re.compile(r"\(([A-Z][A-Za-z]+(?:\s+et al\.)?,?\s*\d{4})\)"),
+            re.compile(r"\[(\d+)\]"),
+        ],
     }
-    
+
     def __init__(self):
-        """初始化引文网络分析器"""
-        self.citation_graph = {
-            'nodes': [],
-            'edges': [],
-            'metadata': {}
-        }
-        
-        self.documents = {}
+        self.citation_graph: Dict[str, Any] = {"nodes": [], "edges": [], "metadata": {}}
+        self.documents: Dict[str, Dict[str, Any]] = {}
         self.citations = defaultdict(list)
         self.cited_by = defaultdict(list)
-        
-        self.academic_schools = []
-        self.evolution_timeline = []
-    
-    def extract_citations(self, text: str, 
-                         language: str = 'chinese') -> List[Dict[str, str]]:
-        """
-        从文献中提取引用关系
-        
-        Args:
-            text: 文献文本
-            language: 语言类型 ('chinese', 'japanese', 'english')
-            
-        Returns:
-            list: 提取的引用列表
-        """
-        citations = []
-        patterns = self.CITATION_PATTERNS.get(language, self.CITATION_PATTERNS['chinese'])
-        
-        for pattern in patterns:
-            matches = re.findall(pattern, text)
-            
-            for match in matches:
-                citation = self._parse_citation(match.strip())
-                
-                if citation and citation not in citations:
-                    citations.append(citation)
-        
-        return citations
-    
-    def build_citation_graph(self, documents: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        构建引文网络图谱
-        
-        Args:
-            documents: 文献列表，每项包含title、text、metadata
-            
-        Returns:
-            dict: 引文图谱数据
-        """
-        nodes = []
-        edges = []
-        
-        for i, doc in enumerate(documents):
-            title = doc.get('title', f'文档{i}')
-            doc_id = self._generate_doc_id(title)
-            
-            nodes.append({
-                'id': doc_id,
-                'label': title,
-                'title': title,
-                'authors': doc.get('authors', []),
-                'year': doc.get('year', ''),
-                'type': 'source',
-                'metadata': doc.get('metadata', {})
-            })
-            
-            self.documents[doc_id] = {
-                'title': title,
-                'text': doc.get('text', ''),
-                'metadata': doc.get('metadata', {})
-            }
-        
-        for doc_id, doc_data in self.documents.items():
-            text = doc_data.get('text', '')
-            
-            citations = self.extract_citations(text)
-            
-            for cited_doc in citations:
-                cited_title = cited_doc.get('title', '')
-                
-                cited_doc_id = None
-                for existing_id, existing_doc in self.documents.items():
-                    if cited_title and (
-                        cited_title in existing_doc['title'] or 
-                        existing_doc['title'] in cited_title
-                    ):
-                        cited_doc_id = existing_id
-                        break
-                
-                if cited_doc_id and cited_doc_id != doc_id:
-                    edges.append({
-                        'source': doc_id,
-                        'target': cited_doc_id,
-                        'type': 'cites',
-                        'strength': cited_doc.get('page', '')
-                    })
-                    
-                    self.citations[doc_id].append(cited_doc_id)
-                    self.cited_by[cited_doc_id].append(doc_id)
-        
-        for doc_id, doc_data in self.documents.items():
-            if doc_id not in self.citations or not self.citations[doc_id]:
-                for node in nodes:
-                    if node['id'] == doc_id:
-                        node['type'] = 'foundational'
-        
-        self.citation_graph = {
-            'nodes': nodes,
-            'edges': edges,
-            'metadata': {
-                'total_nodes': len(nodes),
-                'total_edges': len(edges),
-                'source_documents': len(documents)
-            }
+        self.academic_schools: List[Dict[str, Any]] = []
+        self.evolution_timeline: List[Dict[str, Any]] = []
+        self.records: List[Dict[str, Any]] = []
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        """Return a workflow-facing capability snapshot."""
+        return {
+            "module": "citation_network_analyzer",
+            "backend": "script",
+            "provider": "rule_based_graph",
+            "model": None,
+            "capabilities": [
+                "citation_record_normalization",
+                "citation_graph_building",
+                "citation_graph_summary",
+                "review_flagging",
+            ],
+            "fallback_order": ["script:rule_based_graph", "llm_citation_extractor", "mcp_citation_service"],
         }
-        
+
+    def normalize_document(self, doc: Dict[str, Any], index: int = 0) -> Dict[str, Any]:
+        """Normalize a source document into the citation-record schema."""
+
+        title = (doc.get("title") or f"Document {index + 1}").strip()
+        authors = doc.get("authors") or []
+        if isinstance(authors, str):
+            authors = [item.strip() for item in authors.split(",") if item.strip()]
+        record_type = doc.get("type") or ("article" if doc.get("journal") else "source")
+        record = {
+            "id": doc.get("id") or self._generate_doc_id(title),
+            "title": title,
+            "authors": authors,
+            "year": str(doc.get("year", "") or ""),
+            "text": doc.get("text", "") or doc.get("abstract", "") or "",
+            "journal": doc.get("journal", "") or "",
+            "source": doc.get("source", "") or "",
+            "record_type": record_type,
+            "metadata": dict(doc.get("metadata", {})),
+            "confidence": float(doc.get("confidence", 0.7)),
+        }
+        return record
+
+    def extract_citations(self, text: str, language: str = "chinese") -> List[Dict[str, Any]]:
+        """Extract lightweight citation mentions from text."""
+
+        citations: List[Dict[str, Any]] = []
+        seen = set()
+        patterns = self.CITATION_PATTERNS.get(language, self.CITATION_PATTERNS["english"])
+
+        for pattern in patterns:
+            for match in pattern.finditer(text or ""):
+                mention = match.group(0).strip()
+                parsed = self._parse_citation(mention)
+                if not parsed:
+                    continue
+                key = (parsed.get("title", ""), parsed.get("year", ""), parsed.get("raw", ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                parsed["matched_text"] = mention
+                citations.append(parsed)
+        return citations
+
+    def analyze_documents(self, documents: List[Dict[str, Any]], language: str = "english") -> Dict[str, Any]:
+        """Normalize documents, build the graph, and compute a summary."""
+
+        self.documents.clear()
+        self.citations.clear()
+        self.cited_by.clear()
+        self.records = [self.normalize_document(doc, index) for index, doc in enumerate(documents)]
+        graph = self.build_citation_graph(self.records, language=language)
+        summary = self._build_graph_summary(graph)
+        return {"graph": graph, "records": self.records, "summary": summary}
+
+    def analyze_documents_package(self, documents: List[Dict[str, Any]], language: str = "english") -> Dict[str, Any]:
+        """Analyze documents and wrap the graph in the unified workflow envelope."""
+        result = self.analyze_documents(documents, language=language)
+        graph = result["graph"]
+        summary = result["summary"]
+        quality_flags: List[str] = []
+        if not documents:
+            quality_flags.append("no_documents")
+        if summary.get("total_nodes", 0) and summary.get("total_edges", 0) == 0:
+            quality_flags.append("no_citation_edges")
+        if summary.get("orphan_count", 0) == summary.get("total_nodes", 0) and summary.get("total_nodes", 0) > 1:
+            quality_flags.append("all_documents_isolated")
+        if summary.get("average_edge_confidence", 0.0) and summary["average_edge_confidence"] < 0.55:
+            quality_flags.append("low_average_edge_confidence")
+
+        confidence = self._estimate_package_confidence(summary, quality_flags)
+        graph.setdefault("metadata", {})
+        graph["metadata"]["execution"] = {
+            **self.get_capabilities(),
+            "confidence": confidence,
+            "needs_review": bool(quality_flags),
+            "quality_flags": quality_flags,
+        }
+        return {
+            "type": "citation_network",
+            "language": language,
+            "records": result["records"],
+            "nodes": graph.get("nodes", []),
+            "edges": graph.get("edges", []),
+            "graph": graph,
+            "summary": summary,
+            "backend": "script",
+            "provider": "rule_based_graph",
+            "model": None,
+            "confidence": confidence,
+            "needs_review": bool(quality_flags),
+            "quality_flags": quality_flags,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    def build_citation_graph(self, documents: List[Dict[str, Any]], language: str = "english") -> Dict[str, Any]:
+        """Build citation graph data using normalized records."""
+
+        nodes: List[Dict[str, Any]] = []
+        edges: List[Dict[str, Any]] = []
+        self.documents = {}
+
+        for index, doc in enumerate(documents):
+            record = self.normalize_document(doc, index) if "record_type" not in doc else dict(doc)
+            record_id = record["id"]
+            self.documents[record_id] = record
+            nodes.append(
+                {
+                    "id": record_id,
+                    "label": record["title"],
+                    "title": record["title"],
+                    "authors": record["authors"],
+                    "year": record["year"],
+                    "type": record["record_type"],
+                    "is_core": False,
+                    "citation_count": 0,
+                    "cited_by_count": 0,
+                    "confidence": record.get("confidence", 0.7),
+                    "metadata": {
+                        "journal": record.get("journal", ""),
+                        "source": record.get("source", ""),
+                    },
+                }
+            )
+
+        for source_id, record in self.documents.items():
+            citations = self.extract_citations(record.get("text", ""), language=language)
+            self.citations[source_id] = []
+            for target_id, target in self.documents.items():
+                if source_id == target_id:
+                    continue
+                confidence = self._match_confidence(record, target, citations)
+                if confidence <= 0:
+                    continue
+                edges.append(
+                    {
+                        "source": source_id,
+                        "target": target_id,
+                        "type": "cites",
+                        "confidence": round(confidence, 3),
+                        "evidence": {"matched_title": target["title"]},
+                    }
+                )
+                self.citations[source_id].append(target_id)
+                self.cited_by[target_id].append(source_id)
+
+        node_index = {node["id"]: node for node in nodes}
+        for edge in edges:
+            node_index[edge["source"]]["citation_count"] += 1
+            node_index[edge["target"]]["cited_by_count"] += 1
+
+        ranked = sorted(nodes, key=lambda node: (node["cited_by_count"] + node["citation_count"], node["year"]), reverse=True)
+        cutoff = max(1, len(ranked) // 5) if ranked else 0
+        key_source_ids = {node["id"] for node in ranked[:cutoff] if (node["cited_by_count"] + node["citation_count"]) > 0}
+        for node in nodes:
+            node["is_core"] = node["id"] in key_source_ids
+
+        self.citation_graph = {
+            "nodes": nodes,
+            "edges": edges,
+            "metadata": {
+                "total_nodes": len(nodes),
+                "total_edges": len(edges),
+                "source_documents": len(documents),
+                "language": language,
+                "generated_at": datetime.now().isoformat(timespec="seconds"),
+            },
+        }
         return self.citation_graph
-    
+
     def analyze_academic_evolution(self) -> List[Dict[str, Any]]:
-        """
-        分析理论演进脉络
-        
-        Returns:
-            list: 演进时间线
-        """
-        if not self.citation_graph['nodes']:
+        """Summarize graph activity by publication year."""
+
+        if not self.citation_graph["nodes"]:
             return []
-        
-        timeline = []
-        
+
         nodes_by_year = defaultdict(list)
-        for node in self.citation_graph['nodes']:
-            year = node.get('year', '')
-            if year:
-                nodes_by_year[year].append(node)
-        
-        sorted_years = sorted(nodes_by_year.keys())
-        
-        for year in sorted_years:
+        for node in self.citation_graph["nodes"]:
+            if node.get("year"):
+                nodes_by_year[node["year"]].append(node)
+
+        timeline = []
+        for year in sorted(nodes_by_year):
             year_nodes = nodes_by_year[year]
-            
-            works_count = len(year_nodes)
-            
-            foundational_works = [
-                n for n in year_nodes 
-                if n.get('type') == 'foundational'
-            ]
-            
-            cited_by_count = 0
-            for node in year_nodes:
-                cited_by_count += len(self.cited_by.get(node['id'], []))
-            
-            timeline.append({
-                'year': year,
-                'works_count': works_count,
-                'foundational_works': [
-                    w['title'] for w in foundational_works
-                ],
-                'total_citations': cited_by_count,
-                'key_works': [
-                    n['title'] for n in year_nodes[:3]
-                ]
-            })
-        
+            timeline.append(
+                {
+                    "year": year,
+                    "works_count": len(year_nodes),
+                    "total_citations": sum(item["citation_count"] for item in year_nodes),
+                    "key_works": [item["title"] for item in sorted(year_nodes, key=lambda x: x["cited_by_count"], reverse=True)[:3]],
+                    "foundational_works": [item["title"] for item in year_nodes if item["is_core"]],
+                }
+            )
+
         self.evolution_timeline = timeline
         return timeline
-    
+
     def identify_academic_schools(self) -> List[Dict[str, Any]]:
-        """
-        识别学术流派及其分支
-        
-        Returns:
-            list: 学术流派列表
-        """
-        if not self.citation_graph['nodes']:
+        """Identify citation clusters around highly connected records."""
+
+        if not self.citation_graph["nodes"]:
             return []
-        
+
         schools = []
-        
-        citation_counts = {}
-        for doc_id, cited_list in self.citations.items():
-            citation_counts[doc_id] = len(cited_list)
-        
-        highly_cited = [
-            (doc_id, count) 
-            for doc_id, count in citation_counts.items() 
-            if count >= 2
-        ]
-        highly_cited.sort(key=lambda x: x[1], reverse=True)
-        
-        for doc_id, count in highly_cited[:5]:
-            for node in self.citation_graph['nodes']:
-                if node['id'] == doc_id:
-                    school_node = node
-                    break
-            
+        ranked = sorted(
+            self.citation_graph["nodes"],
+            key=lambda node: (node["cited_by_count"], node["citation_count"]),
+            reverse=True,
+        )
+        for node in ranked[:5]:
+            if node["cited_by_count"] + node["citation_count"] < 2:
+                continue
+            member_ids = set(self.citations.get(node["id"], [])) | set(self.cited_by.get(node["id"], []))
             members = []
-            
-            for edge in self.citation_graph['edges']:
-                if edge['source'] == doc_id:
-                    for node in self.citation_graph['nodes']:
-                        if node['id'] == edge['target']:
-                            members.append({
-                                'id': node['id'],
-                                'title': node['title'],
-                                'authors': node.get('authors', []),
-                                'year': node.get('year', '')
-                            })
-            
-            schools.append({
-                'id': f"school_{len(schools) + 1}",
-                'founder': school_node['title'],
-                'founder_id': doc_id,
-                'members': members,
-                'member_count': len(members),
-                'citation_count': count,
-                'description': f"以《{school_node['title']}》为核心的学术流派"
-            })
-        
+            for item in self.citation_graph["nodes"]:
+                if item["id"] in member_ids:
+                    members.append(
+                        {
+                            "id": item["id"],
+                            "title": item["title"],
+                            "authors": item.get("authors", []),
+                            "year": item.get("year", ""),
+                        }
+                    )
+            schools.append(
+                {
+                    "id": f"school_{len(schools) + 1}",
+                    "founder": node["title"],
+                    "founder_id": node["id"],
+                    "members": members,
+                    "member_count": len(members),
+                    "citation_count": node["cited_by_count"] + node["citation_count"],
+                    "description": f"Citation cluster centered on {node['title']}.",
+                }
+            )
+
         self.academic_schools = schools
         return schools
-    
-    def find_peripheral_works(self, 
-                             centrality_threshold: float = 0.1) -> List[Dict[str, Any]]:
-        """
-        发现边缘但有启发性的研究
-        
-        Args:
-            centrality_threshold: 中心性阈值
-            
-        Returns:
-            list: 边缘作品列表
-        """
-        if not self.citation_graph['nodes']:
+
+    def find_peripheral_works(self, centrality_threshold: float = 0.1) -> List[Dict[str, Any]]:
+        """Find low-centrality records that still receive some attention."""
+
+        if not self.citation_graph["nodes"]:
             return []
-        
-        centrality_scores = self._calculate_centrality()
-        
-        peripheral_works = []
-        
-        for node in self.citation_graph['nodes']:
-            node_id = node['id']
-            
-            centrality = centrality_scores.get(node_id, 0)
-            
-            if centrality < centrality_threshold:
-                cited_by_count = len(self.cited_by.get(node_id, []))
-                
-                if cited_by_count > 0:
-                    peripheral_works.append({
-                        'id': node_id,
-                        'title': node['title'],
-                        'authors': node.get('authors', []),
-                        'year': node.get('year', ''),
-                        'centrality': centrality,
-                        'cited_by_count': cited_by_count,
-                        'novelty_score': self._calculate_novelty(node_id)
-                    })
-        
-        peripheral_works.sort(key=lambda x: x['novelty_score'], reverse=True)
-        
-        return peripheral_works[:10]
-    
-    def get_citation_statistics(self) -> Dict[str, Any]:
-        """
-        获取引文统计信息
-        
-        Returns:
-            dict: 统计信息
-        """
-        if not self.citation_graph['nodes']:
-            return {}
-        
-        all_citations = []
-        for cited_list in self.citations.values():
-            all_citations.extend(cited_list)
-        
-        citation_counts = Counter(all_citations)
-        
-        most_cited = []
-        for doc_id, count in citation_counts.most_common(10):
-            for node in self.citation_graph['nodes']:
-                if node['id'] == doc_id:
-                    most_cited.append({
-                        'id': doc_id,
-                        'title': node['title'],
-                        'authors': node.get('authors', []),
-                        'citation_count': count
-                    })
-                    break
-        
-        return {
-            'total_documents': len(self.documents),
-            'total_citations': len(all_citations),
-            'avg_citations_per_doc': len(all_citations) / len(self.documents) if self.documents else 0,
-            'most_cited_works': most_cited,
-            'isolated_documents': len([
-                n for n in self.citation_graph['nodes']
-                if not self.citations.get(n['id']) and not self.cited_by.get(n['id'])
-            ])
-        }
-    
-    def generate_graph_export(self, format: str = 'json') -> str:
-        """
-        生成图谱导出数据
-        
-        Args:
-            format: 导出格式 ('json', 'gexf', 'csv')
-            
-        Returns:
-            str: 格式化后的图谱数据
-        """
-        if format == 'json':
-            return json.dumps(self.citation_graph, ensure_ascii=False, indent=2)
-        
-        elif format == 'gexf':
-            return self._export_as_gexf()
-        
-        elif format == 'csv':
-            return self._export_as_csv()
-        
-        else:
-            return json.dumps(self.citation_graph, ensure_ascii=False)
-    
-    def visualize_as_markdown(self) -> str:
-        """
-        生成Markdown格式的可视化报告
-        
-        Returns:
-            str: Markdown报告
-        """
-        lines = [
-            "# 引文网络分析报告",
-            "",
-            f"**分析时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            "",
-            "## 基本统计",
-            "",
-            f"- 总文档数: {self.citation_graph['metadata'].get('total_nodes', 0)}",
-            f"- 总引用关系数: {self.citation_graph['metadata'].get('total_edges', 0)}",
-            "",
-            "## 引用统计",
-            ""
-        ]
-        
-        stats = self.get_citation_statistics()
-        if stats.get('most_cited_works'):
-            lines.append("### 高被引文献")
-            lines.append("")
-            for work in stats['most_cited_works'][:5]:
-                authors = ', '.join(work.get('authors', [])[:2])
-                lines.append(f"- **{work['title']}**")
-                lines.append(f"  - 作者: {authors}")
-                lines.append(f"  - 被引次数: {work['citation_count']}")
-                lines.append("")
-        
-        if self.academic_schools:
-            lines.extend([
-                "## 学术流派",
-                ""
-            ])
-            
-            for school in self.academic_schools:
-                lines.append(f"### {school['founder']}")
-                lines.append(f"- 核心成员数: {school['member_count']}")
-                lines.append(f"- 引用次数: {school['citation_count']}")
-                lines.append(f"- 描述: {school['description']}")
-                lines.append("")
-        
-        if self.evolution_timeline:
-            lines.extend([
-                "## 理论演进时间线",
-                ""
-            ])
-            
-            for entry in self.evolution_timeline[:10]:
-                lines.append(f"### {entry['year']}年")
-                lines.append(f"- 发表作品数: {entry['works_count']}")
-                if entry.get('key_works'):
-                    lines.append(f"- 重要作品: {', '.join(entry['key_works'][:2])}")
-                lines.append("")
-        
-        if self.find_peripheral_works():
-            lines.extend([
-                "## 边缘创新研究",
-                ""
-            ])
-            
-            peripheral = self.find_peripheral_works()[:5]
-            for work in peripheral:
-                lines.append(f"- **{work['title']}**")
-                lines.append(f"  - 发表年份: {work['year']}")
-                lines.append(f"  - 创新性评分: {work['novelty_score']:.2f}")
-                lines.append("")
-        
-        return '\n'.join(lines)
-    
-    def add_document(self, document: Dict[str, Any]) -> bool:
-        """
-        向网络中添加新文档
-        
-        Args:
-            document: 文档数据
-            
-        Returns:
-            bool: 是否添加成功
-        """
-        try:
-            title = document.get('title')
-            doc_id = self._generate_doc_id(title)
-            
-            if doc_id in self.documents:
-                return False
-            
-            self.documents[doc_id] = {
-                'title': title,
-                'text': document.get('text', ''),
-                'metadata': document.get('metadata', {})
-            }
-            
-            node = {
-                'id': doc_id,
-                'label': title,
-                'title': title,
-                'authors': document.get('authors', []),
-                'year': document.get('year', ''),
-                'type': 'source',
-                'metadata': document.get('metadata', {})
-            }
-            
-            self.citation_graph['nodes'].append(node)
-            self.citation_graph['metadata']['total_nodes'] += 1
-            
-            text = document.get('text', '')
-            citations = self.extract_citations(text)
-            
-            for cited_doc in citations:
-                cited_title = cited_doc.get('title', '')
-                
-                cited_doc_id = None
-                for existing_id, existing_doc in self.documents.items():
-                    if cited_title and (
-                        cited_title in existing_doc['title'] or
-                        existing_doc['title'] in cited_title
-                    ):
-                        cited_doc_id = existing_id
-                        break
-                
-                if cited_doc_id:
-                    edge = {
-                        'source': doc_id,
-                        'target': cited_doc_id,
-                        'type': 'cites',
-                        'strength': cited_doc.get('page', '')
+
+        centrality = self._calculate_centrality()
+        works = []
+        for node in self.citation_graph["nodes"]:
+            score = centrality.get(node["id"], 0.0)
+            if score < centrality_threshold and node["cited_by_count"] > 0:
+                works.append(
+                    {
+                        "id": node["id"],
+                        "title": node["title"],
+                        "authors": node.get("authors", []),
+                        "year": node.get("year", ""),
+                        "centrality": score,
+                        "cited_by_count": node["cited_by_count"],
+                        "novelty_score": self._calculate_novelty_score(node["id"]),
                     }
-                    
-                    self.citation_graph['edges'].append(edge)
-                    self.citation_graph['metadata']['total_edges'] += 1
-                    
-                    self.citations[doc_id].append(cited_doc_id)
-                    self.cited_by[cited_doc_id].append(doc_id)
-            
-            return True
-        except Exception as e:
-            print(f"添加文档失败: {e}")
-            return False
-    
-    def _parse_citation(self, citation_str: str) -> Dict[str, str]:
-        """解析引用字符串"""
-        citation = {'raw': citation_str}
-        
-        year_match = re.search(r'\d{4}', citation_str)
+                )
+        works.sort(key=lambda item: item["novelty_score"], reverse=True)
+        return works[:10]
+
+    def get_citation_statistics(self) -> Dict[str, Any]:
+        """Return aggregate graph statistics."""
+
+        if not self.citation_graph["nodes"]:
+            return {}
+
+        most_cited = sorted(self.citation_graph["nodes"], key=lambda node: node["cited_by_count"], reverse=True)[:10]
+        return {
+            "total_documents": len(self.documents),
+            "total_citations": len(self.citation_graph["edges"]),
+            "avg_citations_per_doc": len(self.citation_graph["edges"]) / len(self.documents) if self.documents else 0.0,
+            "most_cited_works": [
+                {
+                    "id": node["id"],
+                    "title": node["title"],
+                    "authors": node.get("authors", []),
+                    "citation_count": node["cited_by_count"],
+                }
+                for node in most_cited
+            ],
+            "isolated_documents": len(
+                [
+                    node
+                    for node in self.citation_graph["nodes"]
+                    if node["citation_count"] == 0 and node["cited_by_count"] == 0
+                ]
+            ),
+        }
+
+    def generate_graph_export(self, format: str = "json") -> str:
+        """Export the current citation graph."""
+
+        if format == "json":
+            return json.dumps(self.citation_graph, ensure_ascii=False, indent=2)
+        if format == "gexf":
+            return self._export_as_gexf()
+        if format == "csv":
+            return self._export_as_csv()
+        return json.dumps(self.citation_graph, ensure_ascii=False)
+
+    def visualize_as_markdown(self) -> str:
+        """Render a compact Markdown report for the current graph."""
+
+        stats = self.get_citation_statistics()
+        lines = [
+            "# Citation Network Report",
+            "",
+            f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "",
+            "## Summary",
+            "",
+            f"- Total documents: {stats.get('total_documents', 0)}",
+            f"- Total citation edges: {stats.get('total_citations', 0)}",
+            f"- Isolated documents: {stats.get('isolated_documents', 0)}",
+            "",
+        ]
+        if stats.get("most_cited_works"):
+            lines.extend(["## Most Cited", ""])
+            for work in stats["most_cited_works"][:5]:
+                lines.append(f"- **{work['title']}** ({work['citation_count']} incoming citations)")
+        return "\n".join(lines)
+
+    def _build_graph_summary(self, graph: Dict[str, Any]) -> Dict[str, Any]:
+        nodes = graph.get("nodes", [])
+        edges = graph.get("edges", [])
+        key_source_ids = [node["id"] for node in nodes if node.get("is_core")]
+        orphan_ids = [node["id"] for node in nodes if node.get("citation_count", 0) == 0 and node.get("cited_by_count", 0) == 0]
+        return {
+            "total_nodes": len(nodes),
+            "total_edges": len(edges),
+            "key_source_count": len(key_source_ids),
+            "key_source_ids": key_source_ids,
+            "orphan_count": len(orphan_ids),
+            "orphan_ids": orphan_ids,
+            "average_edge_confidence": round(sum(edge.get("confidence", 0.0) for edge in edges) / len(edges), 3) if edges else 0.0,
+        }
+
+    def _estimate_package_confidence(self, summary: Dict[str, Any], quality_flags: List[str]) -> float:
+        if summary.get("total_nodes", 0) == 0:
+            return 0.2
+        confidence = 0.45
+        if summary.get("total_edges", 0) > 0:
+            confidence += 0.25
+        if summary.get("key_source_count", 0) > 0:
+            confidence += 0.10
+        confidence += min(0.15, summary.get("average_edge_confidence", 0.0) * 0.15)
+        confidence -= min(0.25, len(quality_flags) * 0.08)
+        return round(max(0.1, min(confidence, 0.95)), 2)
+
+    def _parse_citation(self, citation_str: str) -> Dict[str, Any]:
+        """Parse a citation mention into a lightweight record."""
+
+        citation = {"raw": citation_str, "title": citation_str.strip(), "confidence": 0.35}
+        year_match = re.search(r"(19|20)\d{2}", citation_str)
         if year_match:
-            citation['year'] = year_match.group()
-        
-        title_match = re.search(r'[『""''「」（）(）《》]([^『""''「」（）(）《》]+)[』""''「」（）(）《》]', citation_str)
-        if title_match:
-            citation['title'] = title_match.group(1)
+            citation["year"] = year_match.group(0)
+            citation["confidence"] += 0.15
+
+        quoted = re.search(r"[\"“「『《](.+?)[\"”」』》]", citation_str)
+        if quoted:
+            citation["title"] = quoted.group(1).strip()
+            citation["confidence"] += 0.15
         else:
-            citation['title'] = re.sub(r'\[\d+\]|\(\d{4}\)', '', citation_str).strip()
-        
-        page_match = re.search(r'[pp.]?\s*(\d+)(?:-(\d+))?', citation_str)
+            stripped = re.sub(r"\[\d+\]|\((19|20)\d{2}\)", "", citation_str).strip(" ,.;")
+            if stripped:
+                citation["title"] = stripped
+
+        page_match = re.search(r"(?:pp?\.?\s*)?(\d+(?:-\d+)?)", citation_str)
         if page_match:
-            citation['page'] = page_match.group()
-        
+            citation["page"] = page_match.group(1)
         return citation
-    
+
     def _generate_doc_id(self, title: str) -> str:
-        """生成文档ID"""
-        import hashlib
-        hash_obj = hashlib.md5(title.encode('utf-8'))
-        return f"doc_{hash_obj.hexdigest()[:8]}"
-    
+        return "doc_" + hashlib.md5(title.encode("utf-8")).hexdigest()[:8]
+
+    def _match_confidence(
+        self,
+        source_record: Dict[str, Any],
+        target_record: Dict[str, Any],
+        extracted_citations: List[Dict[str, Any]],
+    ) -> float:
+        """Estimate confidence that source cites target."""
+
+        target_title = target_record["title"].lower()
+        source_text = (source_record.get("text", "") or "").lower()
+        title_words = [word.lower() for word in re.findall(r"[A-Za-z\u4e00-\u9fff]{4,}", target_record["title"]) if len(word) >= 4]
+        if title_words:
+            overlap = sum(1 for word in title_words if word in source_text)
+            if overlap >= 2:
+                return min(0.9, 0.4 + 0.15 * overlap)
+
+        for citation in extracted_citations:
+            cited_title = citation.get("title", "").lower()
+            if cited_title and (cited_title in target_title or target_title in cited_title):
+                return max(0.55, citation.get("confidence", 0.4))
+        return 0.0
+
     def _calculate_centrality(self) -> Dict[str, float]:
-        """计算节点中心性"""
-        centrality = {}
-        
-        for doc_id in self.documents.keys():
-            cited_by_count = len(self.cited_by.get(doc_id, []))
-            cites_count = len(self.citations.get(doc_id, []))
-            
-            centrality[doc_id] = (cited_by_count + cites_count) / (len(self.documents) * 2)
-        
-        return centrality
-    
+        total = max(1, len(self.documents) * 2)
+        return {
+            node_id: (len(self.cited_by.get(node_id, [])) + len(self.citations.get(node_id, []))) / total
+            for node_id in self.documents
+        }
+
     def _calculate_novelty_score(self, doc_id: str) -> float:
-        """计算创新性评分"""
         cited_by_count = len(self.cited_by.get(doc_id, []))
         cites_count = len(self.citations.get(doc_id, []))
-        
         if cites_count > 0:
             novelty = cited_by_count / cites_count
         else:
             novelty = cited_by_count * 0.5
-        
         return min(novelty, 1.0)
-    
+
     def _export_as_gexf(self) -> str:
-        """导出为GEXF格式（用于Gephi等工具）"""
         lines = [
             '<?xml version="1.0" encoding="UTF-8"?>',
             '<gexf xmlns="http://www.gexf.net/1.3" version="1.3">',
             '  <graph mode="static" defaultedgettype="directed">',
-            '    <attributes class="node">',
-            '      <attribute id="0" title="title" type="string"/>',
-            '      <attribute id="1" title="authors" type="string"/>',
-            '      <attribute id="2" title="year" type="string"/>',
-            '    </attributes>',
-            '    <nodes>'
+            "    <nodes>",
         ]
-        
-        for node in self.citation_graph['nodes']:
-            lines.append(
-                f'      <node id="{node["id"]}" label="{node["label"]}">'
-            )
-            lines.append(
-                f'        <attvalues>'
-            )
-            lines.append(f'          <attvalue for="0" value="{node.get("title", "")}"/>')
-            lines.append(f'          <attvalue for="1" value="{",".join(node.get("authors", []))}"/>')
-            lines.append(f'          <attvalue for="2" value="{node.get("year", "")}"/>')
-            lines.append(
-                f'        </attvalues>'
-            )
-            lines.append(
-                f'      </node>'
-            )
-        
-        lines.append('    </nodes>')
-        lines.append('    <edges>')
-        
-        for i, edge in enumerate(self.citation_graph['edges']):
-            lines.append(
-                f'      <edge id="{i}" source="{edge["source"]}" target="{edge["target"]}" />'
-            )
-        
-        lines.append('    </edges>')
-        lines.append('  </graph>')
-        lines.append('</gexf>')
-        
-        return '\n'.join(lines)
-    
+        for node in self.citation_graph.get("nodes", []):
+            lines.append(f'      <node id="{node["id"]}" label="{node["label"]}" />')
+        lines.extend(["    </nodes>", "    <edges>"])
+        for index, edge in enumerate(self.citation_graph.get("edges", [])):
+            lines.append(f'      <edge id="{index}" source="{edge["source"]}" target="{edge["target"]}" />')
+        lines.extend(["    </edges>", "  </graph>", "</gexf>"])
+        return "\n".join(lines)
+
     def _export_as_csv(self) -> str:
-        """导出为CSV格式"""
-        lines = ['Source,Target,Type']
-        
-        for edge in self.citation_graph['edges']:
+        lines = ["Source,Target,Type,Confidence"]
+        for edge in self.citation_graph.get("edges", []):
             lines.append(
-                f'"{edge["source"]}","{edge["target"]}","{edge["type"]}"'
+                f'"{edge["source"]}","{edge["target"]}","{edge["type"]}","{edge.get("confidence", 0.0)}"'
             )
-        
-        return '\n'.join(lines)
+        return "\n".join(lines)
 
 
 def create_citation_analyzer() -> CitationNetworkAnalyzer:
-    """
-    工厂函数：创建引文网络分析器实例
-    
-    Returns:
-        CitationNetworkAnalyzer: 分析器实例
-    """
+    """Factory helper preserved for compatibility."""
+
     return CitationNetworkAnalyzer()

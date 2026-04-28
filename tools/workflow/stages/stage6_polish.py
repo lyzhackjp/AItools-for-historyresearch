@@ -1,311 +1,392 @@
 """
-Stage 6: 论文修改润色
+Stage 6: polish the draft.
 
-输入：
-    project.paper_draft: str — 论文草稿（Stage 5 产出）
-    project.outline_review: OutlineReview — 审视报告（Stage 4 产出，可选）
-    project.language: str — 主要语言
-
-输出：
-    project.polished_draft: str — 精简后草稿
-    project.style_transferred_draft: str — 文风调整版（可选）
-    project.outline_review: OutlineReview — 更新后的逻辑审视报告
-
-依赖模块：
-    modules.paper_polisher.PaperPolisher
-    modules.style_transfer.StyleTransfer
-    modules.reverse_outline_analyzer.ReverseOutlineAnalyzer
+This stage now consumes paper polishing, reverse-outline review, and optional
+style transfer through unified protocol surfaces and writes the results back
+into project metadata.
 """
 
-import sys
-import os
-from typing import Dict, Any, Optional
+from __future__ import annotations
 
-_AI_TOOLS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '..')
+import os
+import sys
+from typing import Any, Dict, List, Optional
+
+_AI_TOOLS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "..")
 if _AI_TOOLS not in sys.path:
     sys.path.insert(0, _AI_TOOLS)
 
-from tools.workflow.research_project import ResearchProject, OutlineReview
+from modules.task_manager import TaskManager
+from tools.workflow.research_project import OutlineReview, ResearchProject
 
 
 class Stage6Polish:
-    """
-    Stage 6: 论文修改润色
-
-    使用方法：
-        stage = Stage6Polish(project)
-        result = stage.run()
-
-        # 只精简
-        polished = stage.polish_paper(paper_text)
-
-        # 只文风迁移
-        styled = stage.transfer_style(paper_text, target_author="G.R. Elton")
-    """
+    """Polish the draft, optionally transfer style, then re-run outline review."""
 
     NAME = "polish"
     STAGE_NUM = 6
 
     def __init__(self, project: ResearchProject):
         self.project = project
+        self.task_manager: Optional[TaskManager] = None
         self.polisher = None
         self.style_transfer = None
         self.outline_analyzer = None
+        self._warnings: List[str] = []
+        self._review_items: List[Dict[str, Any]] = []
+        self._registered_packages: List[Dict[str, Any]] = []
+        self._last_polish_result: Optional[Dict[str, Any]] = None
+        self._last_outline_result: Optional[Dict[str, Any]] = None
+
+    def _get_task_manager(self) -> TaskManager:
+        if self.task_manager is None:
+            self.task_manager = TaskManager(mode="api", provider="qwen")
+        return self.task_manager
 
     def _get_polisher(self):
-        """延迟创建论文精简器"""
         if self.polisher is None:
             from modules.paper_polisher import PaperPolisher
-            self.polisher = PaperPolisher(api_provider="qwen")
+
+            self.polisher = PaperPolisher(api_provider="qwen", test_mode=False)
         return self.polisher
 
+    def _get_outline_analyzer(self):
+        if self.outline_analyzer is None:
+            from modules.reverse_outline_analyzer import ReverseOutlineAnalyzer
+
+            self.outline_analyzer = ReverseOutlineAnalyzer(api_provider="qwen", test_mode=False)
+        return self.outline_analyzer
+
     def _get_style_transfer(self):
-        """延迟创建文风迁移器"""
         if self.style_transfer is None:
             from modules.style_transfer import StyleTransfer
+
             self.style_transfer = StyleTransfer(api_provider="qwen", test_mode=False)
         return self.style_transfer
 
-    def _get_outline_analyzer(self):
-        """延迟创建逆向大纲审视器"""
-        if self.outline_analyzer is None:
-            from modules.reverse_outline_analyzer import ReverseOutlineAnalyzer
-            self.outline_analyzer = ReverseOutlineAnalyzer(
-                api_provider="qwen",
-                test_mode=False
-            )
-        return self.outline_analyzer
-
     def run(self, **kwargs) -> Dict[str, Any]:
-        """
-        执行 Stage 6：论文修改润色
-
-        Returns:
-            Dict 含 'polished_draft', 'style_transferred_draft', 'outline_review'
-        """
         if not self.project.paper_draft:
-            print("[Stage 6] 无论文草稿可润色（Stage 5 未完成），跳过")
-            self.project.mark_stage_skipped()
+            print("[Stage 6] No draft available, skipping")
+            self.project.mark_stage_skipped(self.STAGE_NUM)
             return {}
 
-        print(f"[Stage 6] 开始论文润色 | 原文: {len(self.project.paper_draft)} 字符")
+        self._warnings = []
+        self._review_items = []
+        self._registered_packages = []
+        print(f"[Stage 6] Start polishing | original draft: {len(self.project.paper_draft)} chars")
         self.project.mark_stage_start(self.STAGE_NUM)
+        self.project.set_stage_metadata(
+            self.STAGE_NUM,
+            capability_snapshot={
+                "paper_polish": self._get_task_manager().get_task_options("paper_polish"),
+                "reverse_outline": self._get_task_manager().get_task_options("reverse_outline"),
+                "style_transfer": self._get_task_manager().get_task_options("style_transfer"),
+            },
+            requested_execution=self._build_requested_execution(kwargs),
+        )
 
-        results = {}
+        results: Dict[str, Any] = {}
+        polished_result = self._run_polish(self.project.paper_draft, **kwargs)
+        polished_text = polished_result.get("polished_text") or self.project.paper_draft
+        self.project.polished_draft = polished_text
+        self._last_polish_result = polished_result
+        results["polished_draft"] = polished_text
 
-        # ── 6a. 精简论文 ────────────────────────────────────────
-        try:
-            polished = self.polish_paper(self.project.paper_draft)
-            self.project.polished_draft = polished
-            results['polished_draft'] = polished
-            print(f"[Stage 6] 精简完成: {len(self.project.paper_draft)} → {len(polished)} 字符 "
-                  f"({len(polished)/max(len(self.project.paper_draft),1):.1%})")
-        except Exception as e:
-            print(f"[Stage 6] 精简失败: {e}，保留原文")
-            self.project.polished_draft = self.project.paper_draft
-            results['polished_draft'] = self.project.paper_draft
+        if polished_result.get("needs_review"):
+            self.project.add_quality_flag("stage6_polish_review_needed")
+            self._review_items.append(
+                {
+                    "stage": self.STAGE_NUM,
+                    "type": "paper_polish",
+                    "message": "Paper polish used a fallback or returned a low-confidence result.",
+                    "backend": polished_result.get("backend"),
+                    "provider": polished_result.get("provider"),
+                    "model": polished_result.get("model"),
+                }
+            )
 
-        # ── 6b. 文风迁移（可选）────────────────────────────────
-        target_style = kwargs.get('target_style', '')
+        style_result = None
+        target_style = kwargs.get("target_style", "")
         if target_style:
-            try:
-                styled = self.transfer_style(self.project.paper_draft, target_style=target_style)
-                self.project.style_transferred_draft = styled
-                results['style_transferred_draft'] = styled
-                print(f"[Stage 6] 文风迁移完成: {len(styled)} 字符")
-            except Exception as e:
-                print(f"[Stage 6] 文风迁移失败: {e}，跳过")
-                results['style_transferred_draft'] = None
+            style_kwargs = dict(kwargs)
+            style_kwargs.pop("target_style", None)
+            style_result = self._run_style_transfer(polished_text, target_style=target_style, **style_kwargs)
+            styled_text = style_result.get("rewritten_text") or polished_text
+            self.project.style_transferred_draft = styled_text
+            results["style_transferred_draft"] = styled_text
+            if style_result.get("needs_review"):
+                self.project.add_quality_flag("stage6_style_transfer_review_needed")
+                self._review_items.append(
+                    {
+                        "stage": self.STAGE_NUM,
+                        "type": "style_transfer",
+                        "message": "Style transfer returned a low-confidence or fallback result.",
+                        "backend": style_result.get("backend"),
+                        "provider": style_result.get("provider"),
+                        "model": style_result.get("model"),
+                    }
+                )
         else:
-            print("[Stage 6] 未指定 target_style，跳过文风迁移")
-            results['style_transferred_draft'] = None
+            self.project.style_transferred_draft = ""
+            results["style_transferred_draft"] = None
 
-        # ── 6c. 更新逻辑审视 ───────────────────────────────────
-        try:
-            review = self._recheck_outline(self.project.paper_draft)
-            self.project.outline_review = review
-            results['outline_review'] = review
-        except Exception as e:
-            print(f"[Stage 6] 逻辑审视失败: {e}")
+        review_input = self.project.style_transferred_draft or polished_text
+        outline_result = self._run_outline_review(review_input, **kwargs)
+        self._last_outline_result = outline_result
+        review_obj = outline_result.get("review")
+        if review_obj is not None:
+            self.project.outline_review = review_obj
+            results["outline_review"] = review_obj
+            self._register_outline_review_items(review_obj, outline_result)
+        else:
+            results["outline_review"] = None
+
+        self._flush_review_items()
+        self.project.set_stage_metadata(
+            self.STAGE_NUM,
+            execution_summary={
+                "paper_polish": {
+                    "backend": polished_result.get("backend"),
+                    "provider": polished_result.get("provider"),
+                    "model": polished_result.get("model"),
+                    "confidence": polished_result.get("confidence"),
+                    "needs_review": polished_result.get("needs_review"),
+                    "quality_flags": polished_result.get("quality_flags", []),
+                    "package_type": polished_result.get("package", {}).get("type"),
+                    "original_chars": len(self.project.paper_draft),
+                    "polished_chars": len(polished_text),
+                    "revision_note_count": len(polished_result.get("revision_notes", [])),
+                },
+                "style_transfer": {
+                    "requested": bool(target_style),
+                    "backend": style_result.get("backend") if style_result else None,
+                    "provider": style_result.get("provider") if style_result else None,
+                    "model": style_result.get("model") if style_result else None,
+                    "confidence": style_result.get("confidence") if style_result else None,
+                    "needs_review": style_result.get("needs_review") if style_result else None,
+                    "quality_flags": style_result.get("quality_flags", []) if style_result else [],
+                    "package_type": style_result.get("package", {}).get("type") if style_result else None,
+                    "target_style": target_style or None,
+                    "output_chars": len(self.project.style_transferred_draft) if self.project.style_transferred_draft else 0,
+                },
+                "reverse_outline": {
+                    "backend": outline_result.get("backend"),
+                    "provider": outline_result.get("provider"),
+                    "model": outline_result.get("model"),
+                    "confidence": outline_result.get("confidence"),
+                    "needs_review": outline_result.get("needs_review"),
+                    "quality_flags": outline_result.get("quality_flags", []),
+                    "package_type": outline_result.get("package", {}).get("type"),
+                    "logical_gaps": len(review_obj.logical_gaps) if review_obj else 0,
+                    "deviation_flags": len(review_obj.deviation_flags) if review_obj else 0,
+                },
+                "warning_count": len(self._warnings),
+                "review_count": len(self._review_items),
+            },
+            package_protocol={
+                "registry": "ResearchProject.register_package",
+                "registered_package_count": len(self._registered_packages),
+                "registered_packages": self._registered_packages,
+            },
+            warnings=self._warnings,
+        )
 
         self.project.mark_stage_done(self.STAGE_NUM)
-        print(f"[Stage 6] 完成！")
+        print("[Stage 6] Done")
         return results
 
-    def polish_paper(self, paper_text: str) -> str:
-        """
-        精简论文（删除冗余内容）
+    def polish_paper(self, paper_text: str, **kwargs: Any) -> str:
+        result = self._run_polish(paper_text, **kwargs)
+        self._last_polish_result = result
+        return result.get("polished_text") or paper_text
 
-        Args:
-            paper_text: 原始论文
-
-        Returns:
-            str: 精简后的论文
-        """
-        print("[Stage 6] 开始精简论文...")
-
-        # 如果太短，直接返回
-        if len(paper_text) < 500:
-            print("[Stage 6] 论文过短，跳过精简")
+    def transfer_style(self, paper_text: str, target_style: str = "", **kwargs: Any) -> str:
+        if not target_style:
             return paper_text
+        result = self._run_style_transfer(paper_text, target_style=target_style, **kwargs)
+        return result.get("rewritten_text") or paper_text
 
-        # 按段落分割处理
-        paragraphs = self._split_paragraphs(paper_text)
-        polished_paras = []
-        total_deleted = 0
+    def _recheck_outline(self, paper_text: str, **kwargs: Any) -> Optional[OutlineReview]:
+        result = self._run_outline_review(paper_text, **kwargs)
+        self._last_outline_result = result
+        return result.get("review")
 
-        try:
-            polisher = self._get_polisher()
-            polisher._init_llm_client()
-        except Exception as e:
-            print(f"[Stage 6] LLM 客户端初始化失败: {e}，使用简化精简")
-            return self._simple_polish(paper_text)
+    def _run_polish(self, paper_text: str, **kwargs: Any) -> Dict[str, Any]:
+        polisher = self._get_polisher()
+        polish_kwargs = {
+            "backend": self._resolve_backend(kwargs, "paper_polish"),
+            "fallback_backends": self._resolve_fallbacks(kwargs, "paper_polish"),
+            "provider": kwargs.get("provider", "qwen"),
+            "model": kwargs.get("model"),
+        }
+        if hasattr(polisher, "polish_text_package"):
+            package = polisher.polish_text_package(
+                paper_text,
+                language=self.project.language,
+                **polish_kwargs,
+            )
+            self._register_stage_package(package, source="paper_polisher")
+            result = {
+                "polished_text": package.get("polished_text"),
+                "revision_notes": package.get("revision_notes", []),
+                "backend": package.get("backend"),
+                "provider": package.get("provider"),
+                "model": package.get("model"),
+                "confidence": package.get("confidence"),
+                "needs_review": package.get("needs_review"),
+                "quality_flags": package.get("quality_flags", []),
+                "package": package,
+            }
+        else:
+            result = polisher.polish_text(
+                paper_text,
+                language=self.project.language,
+                **polish_kwargs,
+            )
+        if len(result.get("polished_text", "")) < max(100, len(paper_text) * 0.2):
+            self._warnings.append("paper_polish_output_suspiciously_short")
+            result["polished_text"] = paper_text
+            result["needs_review"] = True
+            result.setdefault("quality_flags", []).append("suspicious_length_change")
+        return result
 
-        for i, para in enumerate(paragraphs):
-            if len(para) < 50:
-                polished_paras.append(para)
-                continue
+    def _run_style_transfer(self, paper_text: str, target_style: str, **kwargs: Any) -> Dict[str, Any]:
+        transfer = self._get_style_transfer()
+        transfer_kwargs = {
+            "target_style": target_style,
+            "provider": kwargs.get("style_provider") or kwargs.get("provider") or "qwen",
+            "model": kwargs.get("style_model") or kwargs.get("model"),
+            "backend": self._resolve_backend(kwargs, "style_transfer"),
+            "fallback_backends": self._resolve_fallbacks(kwargs, "style_transfer"),
+            "temperature": kwargs.get("style_temperature", 0.2),
+            "max_tokens": kwargs.get("style_max_tokens", 4000),
+        }
+        if hasattr(transfer, "transfer_style_package"):
+            package = transfer.transfer_style_package(paper_text, **transfer_kwargs)
+            self._register_stage_package(package, source="style_transfer")
+            result = {
+                "rewritten_text": package.get("rewritten_text"),
+                "style_analysis": package.get("style_analysis", {}),
+                "target_style": package.get("target_style"),
+                "backend": package.get("backend"),
+                "provider": package.get("provider"),
+                "model": package.get("model"),
+                "confidence": package.get("confidence"),
+                "needs_review": package.get("needs_review"),
+                "quality_flags": package.get("quality_flags", []),
+                "package": package,
+            }
+        else:
+            result = transfer.transfer_style_result(paper_text, **transfer_kwargs)
+        if result.get("needs_review"):
+            self._warnings.append("style_transfer_review_needed")
+        return result
 
-            try:
-                result = polisher.polish_paragraph(para)
-                modified = result[0]  # (modified_text, changes)
-                polished_paras.append(modified)
-
-                # 统计删除
-                if len(result) > 1 and result[1]:
-                    changes = result[1]
-                    if isinstance(changes, list):
-                        total_deleted += len(changes)
-            except Exception as e:
-                # 单段失败保留原文
-                polished_paras.append(para)
-
-            if (i + 1) % 20 == 0:
-                print(f"[Stage 6] 精简进度: {i+1}/{len(paragraphs)}")
-
-        polished_text = '\n\n'.join(polished_paras)
-        print(f"[Stage 6] 精简统计: 删除 {total_deleted} 处冗余")
-        return polished_text
-
-    def _split_paragraphs(self, text: str) -> list:
-        """按段落分割文本"""
-        # 优先用双换行分割
-        paras = text.split('\n\n')
-        if len(paras) > 1:
-            return [p.strip() for p in paras if p.strip()]
-        # 否则按单换行
-        return [p.strip() for p in text.split('\n') if p.strip()]
-
-    def _simple_polish(self, paper_text: str) -> str:
-        """
-        简化精简（LLM 不可用时的兜底）
-        基于规则的简单冗余检测
-        """
-        import re
-
-        text = paper_text
-
-        # 删除连续重复的词（如 "非常非常" → "非常"）
-        text = re.sub(r'(.{2,})\1{2,}', r'\1\1', text)
-
-        # 删除连续空行
-        text = re.sub(r'\n{3,}', '\n\n', text)
-
-        # 删除句末连续重复的句子（简单启发式）
-        # 这是一个很粗略的实现
-        lines = text.split('\n\n')
-        deduped = []
-        seen = set()
-        for line in lines:
-            key = line.lower().strip()[:50]
-            if key and key not in seen:
-                seen.add(key)
-                deduped.append(line)
-            elif key:
-                pass  # 重复行跳过
-
-        return '\n\n'.join(deduped)
-
-    def transfer_style(
-        self,
-        paper_text: str,
-        target_style: str = "",
-        style_reference: str = ""
-    ) -> str:
-        """
-        文风迁移/调整
-
-        Args:
-            paper_text: 原始论文
-            target_style: 目标风格关键词（如 'academic_history', 'historiographical'）
-            style_reference: 参考风格文本（可选）
-
-        Returns:
-            str: 风格调整后的论文
-        """
-        print(f"[Stage 6] 开始文风迁移: {target_style}")
-
-        try:
-            st = self._get_style_transfer()
-            st._init_llm_client()
-        except Exception as e:
-            print(f"[Stage 6] StyleTransfer LLM 初始化失败: {e}，跳过")
-            return paper_text
-
-        # 确定目标风格的描述
-        style_descriptions = {
-            'academic_history': '学术历史论文风格：严谨的论证逻辑，使用历史学专业术语，避免口语化表达',
-            'historiographical': 'Historiographical review style: 主要回顾史学史和学术流派，而非原创论证',
-            'source_analysis': '史料分析风格：注重一手史料的批判性分析，强调史料鉴定的过程',
-            'narrative': '叙事史风格：在严谨论证基础上注重叙事流畅性，可读性更强',
+    def _run_outline_review(self, paper_text: str, **kwargs: Any) -> Dict[str, Any]:
+        analyzer = self._get_outline_analyzer()
+        outline_kwargs = {
+            "use_llm": not bool(kwargs.get("test_mode")),
+            "language": self.project.language,
+            "backend": self._resolve_backend(kwargs, "reverse_outline"),
+            "fallback_backends": self._resolve_fallbacks(kwargs, "reverse_outline"),
+            "provider": kwargs.get("outline_provider") or kwargs.get("provider") or "qwen",
+            "model": kwargs.get("outline_model") or kwargs.get("model"),
+        }
+        if hasattr(analyzer, "analyze_package"):
+            package = analyzer.analyze_package(paper_text, **outline_kwargs)
+            self._register_stage_package(package, source="reverse_outline_analyzer")
+            result = {
+                "section_word_counts": package.get("section_word_counts", {}),
+                "section_ratios": package.get("section_ratios", {}),
+                "logical_gaps": package.get("logical_gaps", []),
+                "deviation_flags": package.get("deviation_flags", []),
+                "suggestions": package.get("suggestions", []),
+                "backend": package.get("backend"),
+                "provider": package.get("provider"),
+                "model": package.get("model"),
+                "confidence": package.get("confidence"),
+                "needs_review": package.get("needs_review"),
+                "quality_flags": package.get("quality_flags", []),
+                "package": package,
+            }
+        else:
+            result = analyzer.analyze(paper_text, **outline_kwargs)
+        review = OutlineReview(
+            section_word_counts=result.get("section_word_counts", {}),
+            section_ratios=result.get("section_ratios", {}),
+            logical_gaps=list(result.get("logical_gaps", [])),
+            deviation_flags=list(result.get("deviation_flags", [])),
+            suggestions=list(result.get("suggestions", [])),
+        )
+        return {
+            "review": review,
+            "backend": result.get("backend"),
+            "provider": result.get("provider"),
+            "model": result.get("model"),
+            "confidence": result.get("confidence"),
+            "needs_review": result.get("needs_review"),
+            "quality_flags": result.get("quality_flags", []),
+            "package": result.get("package"),
         }
 
-        style_desc = style_descriptions.get(target_style, target_style or '学术历史论文风格')
+    def _build_requested_execution(self, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "paper_polish_backend": self._resolve_backend(kwargs, "paper_polish"),
+            "style_transfer_backend": self._resolve_backend(kwargs, "style_transfer"),
+            "reverse_outline_backend": self._resolve_backend(kwargs, "reverse_outline"),
+            "target_style": kwargs.get("target_style") or None,
+            "test_mode": bool(kwargs.get("test_mode", False)),
+        }
 
-        # 构建 prompt
-        prompt = f"""请将以下学术论文的文风调整为：{style_desc}
+    def _resolve_backend(self, kwargs: Dict[str, Any], task_name: str) -> Optional[str]:
+        if kwargs.get("test_mode"):
+            return "script"
+        task_specific = kwargs.get(f"{task_name}_backend")
+        if task_specific:
+            return task_specific
+        return kwargs.get("backend")
 
-要求：
-1. 保持所有核心学术内容和论点
-2. 调整句式结构和词汇选择以匹配目标风格
-3. 保留所有引用和注释
-4. 翻译或改写时不改变学术准确性
+    def _resolve_fallbacks(self, kwargs: Dict[str, Any], task_name: str) -> List[str]:
+        if kwargs.get("test_mode"):
+            return []
+        task_specific = kwargs.get(f"{task_name}_fallback_backends")
+        if task_specific is not None:
+            return list(task_specific)
+        generic = kwargs.get("fallback_backends")
+        if generic is not None:
+            return list(generic)
+        return ["local_llm", "script"] if task_name != "reverse_outline" else ["script"]
 
-原文：
+    def _register_stage_package(self, package: Optional[Dict[str, Any]], *, source: str) -> None:
+        if not isinstance(package, dict):
+            return
+        summary = self.project.register_package(package, stage=self.STAGE_NUM, source=source)
+        self._registered_packages.append(summary)
 
-{paper_text}
+    def _register_outline_review_items(self, review: OutlineReview, outline_result: Dict[str, Any]) -> None:
+        if review.logical_gaps:
+            self.project.add_quality_flag("stage6_outline_review_needed")
+        if outline_result.get("needs_review"):
+            self.project.add_quality_flag("stage6_polish_review_needed")
+        for item in review.logical_gaps:
+            self._review_items.append(
+                {
+                    "stage": self.STAGE_NUM,
+                    "type": "outline_gap",
+                    "message": item,
+                    "backend": outline_result.get("backend"),
+                }
+            )
+        for item in review.deviation_flags:
+            self._review_items.append(
+                {
+                    "stage": self.STAGE_NUM,
+                    "type": "outline_deviation",
+                    "message": item,
+                    "backend": outline_result.get("backend"),
+                }
+            )
 
-改写后的论文："""
-
-        try:
-            client = st.llm_client
-            response = client._call_llm(prompt, max_tokens=4000)
-            # 清理响应
-            response = response.strip()
-            if response.startswith('```'):
-                response = response.split('```')[1]
-                if response.startswith('markdown') or response.startswith('md'):
-                    response = response[markdown_len:]
-            return response.strip()
-        except Exception as e:
-            print(f"[Stage 6] 文风迁移失败: {e}")
-            return paper_text
-
-    def _recheck_outline(self, paper_text: str) -> Optional[OutlineReview]:
-        """重新审视论文逻辑"""
-        try:
-            analyzer = self._get_outline_analyzer()
-            result = analyzer.analyze(paper_text)
-
-            if isinstance(result, dict):
-                return OutlineReview(
-                    section_word_counts=result.get('section_word_counts', {}),
-                    section_ratios=result.get('section_ratios', {}),
-                    logical_gaps=result.get('logical_gaps', []),
-                    deviation_flags=result.get('deviation_flags', []),
-                    suggestions=result.get('suggestions', []),
-                )
-            return None
-        except Exception as e:
-            print(f"[Stage 6] 逻辑审视失败: {e}")
-            return None
+    def _flush_review_items(self) -> None:
+        for item in self._review_items:
+            self.project.add_review_item(item)

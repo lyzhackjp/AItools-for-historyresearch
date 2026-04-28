@@ -5,6 +5,8 @@ from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 import io
 import zipfile
+from datetime import datetime
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 from lxml import etree
 
@@ -34,6 +36,22 @@ class DocProcessor:
         doc = Document(io.BytesIO(file_bytes))
         return self._parse_document(doc)
 
+    def extract_document_package(self, file_path: str) -> Dict[str, Any]:
+        """Return a workflow-ready document package for writing stages."""
+        parsed = self.extract_text(file_path)
+        parsed['source_path'] = str(file_path)
+        return self._normalize_document_package(parsed)
+
+    def extract_document_package_from_bytes(
+        self,
+        file_bytes: bytes,
+        source_name: str = "uploaded.docx"
+    ) -> Dict[str, Any]:
+        """Return a workflow-ready document package from uploaded bytes."""
+        parsed = self.extract_text_from_bytes(file_bytes)
+        parsed['source_path'] = source_name
+        return self._normalize_document_package(parsed)
+
     def _parse_document(self, doc: Document, file_path: str = None) -> dict:
         """
         解析Word文档，提取所有元素
@@ -55,7 +73,12 @@ class DocProcessor:
             'footnotes': [],
             'endnotes': [],
             'page_numbers': [],
-            'metadata': {}
+            'metadata': {},
+            'section_tree': [],
+            'footnote_map': {},
+            'endnote_map': {},
+            'revision_hooks': [],
+            'workflow_metadata': {}
         }
 
         result['title'] = self._extract_title(doc)
@@ -81,6 +104,12 @@ class DocProcessor:
         for table in doc.tables:
             table_data = self._parse_table(table)
             result['tables'].append(table_data)
+
+        result['section_tree'] = self._build_section_tree(result['paragraphs'])
+        result['footnote_map'] = self._build_note_map(result['footnotes'])
+        result['endnote_map'] = self._build_note_map(result['endnotes'])
+        result['revision_hooks'] = self._collect_revision_hooks(result)
+        result['workflow_metadata'] = self._estimate_document_quality(result, file_path=file_path)
 
         return result
 
@@ -406,6 +435,157 @@ class DocProcessor:
             table_data['data'].append(row_data)
 
         return table_data
+
+    def _normalize_document_package(self, parsed: Dict[str, Any]) -> Dict[str, Any]:
+        """Wrap legacy parse output in the shared workflow document contract."""
+        metadata = parsed.get('workflow_metadata') or self._estimate_document_quality(parsed)
+        artifacts = []
+        if parsed.get('source_path'):
+            artifacts.append({
+                'path': parsed.get('source_path'),
+                'type': 'docx',
+                'stage': 'document_ingest',
+                'description': 'source Word document'
+            })
+        return {
+            'document': parsed,
+            'plain_text': '\n\n'.join(
+                para.get('text', '')
+                for para in parsed.get('paragraphs', [])
+                if para.get('text')
+            ),
+            'section_tree': parsed.get('section_tree', []),
+            'footnote_map': parsed.get('footnote_map', {}),
+            'endnote_map': parsed.get('endnote_map', {}),
+            'revision_hooks': parsed.get('revision_hooks', []),
+            'backend': 'script',
+            'provider': 'python-docx',
+            'model': None,
+            'confidence': metadata.get('confidence', 0.0),
+            'needs_review': metadata.get('needs_review', True),
+            'quality_flags': metadata.get('quality_flags', []),
+            'artifacts': artifacts,
+            'summary': metadata,
+        }
+
+    def _build_section_tree(self, paragraphs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Build a lightweight heading tree from parsed paragraphs."""
+        sections: List[Dict[str, Any]] = []
+        stack: List[Dict[str, Any]] = []
+
+        for index, para in enumerate(paragraphs):
+            level = self._heading_level(para.get('style') or '')
+            if not level:
+                continue
+            node = {
+                'title': para.get('text', '').strip(),
+                'level': level,
+                'paragraph_index': index,
+                'children': [],
+            }
+            while stack and stack[-1]['level'] >= level:
+                stack.pop()
+            if stack:
+                stack[-1]['children'].append(node)
+            else:
+                sections.append(node)
+            stack.append(node)
+        return sections
+
+    def _heading_level(self, style_name: str) -> Optional[int]:
+        if not style_name:
+            return None
+        if style_name.startswith('Heading'):
+            for part in reversed(style_name.split()):
+                if part.isdigit():
+                    return int(part)
+            return 1
+        if style_name.startswith('Title'):
+            return 1
+        return None
+
+    def _build_note_map(self, notes: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        note_map: Dict[str, Dict[str, Any]] = {}
+        for note in notes:
+            note_id = str(note.get('id') or len(note_map) + 1)
+            note_map[note_id] = {
+                'id': note_id,
+                'type': note.get('type', 'normal'),
+                'text': note.get('text', ''),
+                'needs_review': not bool(note.get('text')),
+            }
+        return note_map
+
+    def _collect_revision_hooks(self, parsed: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Collect safe hook points for downstream polish/revision modules."""
+        hooks: List[Dict[str, Any]] = []
+        for index, para in enumerate(parsed.get('paragraphs', [])):
+            text = para.get('text', '')
+            style = para.get('style', 'Normal')
+            if self._heading_level(style):
+                hooks.append({
+                    'type': 'section_heading',
+                    'paragraph_index': index,
+                    'text': text,
+                    'action': 'preserve_heading_structure',
+                })
+            elif len(text) > 900:
+                hooks.append({
+                    'type': 'long_paragraph',
+                    'paragraph_index': index,
+                    'text_preview': text[:120],
+                    'action': 'consider_split_or_review',
+                })
+        for note_id in self._build_note_map(parsed.get('footnotes', [])).keys():
+            hooks.append({
+                'type': 'footnote',
+                'note_id': note_id,
+                'action': 'preserve_or_relink',
+            })
+        return hooks
+
+    def _estimate_document_quality(
+        self,
+        parsed: Dict[str, Any],
+        file_path: Optional[str] = None
+    ) -> Dict[str, Any]:
+        paragraphs = parsed.get('paragraphs', [])
+        footnotes = parsed.get('footnotes', [])
+        endnotes = parsed.get('endnotes', [])
+        section_tree = parsed.get('section_tree') or self._build_section_tree(paragraphs)
+        quality_flags: List[str] = []
+
+        if not paragraphs:
+            quality_flags.append('no_paragraph_text')
+        if paragraphs and not section_tree:
+            quality_flags.append('no_heading_structure')
+        if file_path and not Path(file_path).exists():
+            quality_flags.append('source_path_missing')
+
+        confidence = 0.35
+        if paragraphs:
+            confidence += 0.30
+        if section_tree:
+            confidence += 0.20
+        if footnotes or endnotes:
+            confidence += 0.10
+        if not quality_flags:
+            confidence += 0.05
+
+        return {
+            'backend': 'script',
+            'provider': 'python-docx',
+            'model': None,
+            'paragraph_count': len(paragraphs),
+            'table_count': len(parsed.get('tables', [])),
+            'footnote_count': len(footnotes),
+            'endnote_count': len(endnotes),
+            'section_count': len(section_tree),
+            'quality_flags': quality_flags,
+            'needs_review': bool(quality_flags),
+            'confidence': round(min(confidence, 0.98), 2),
+            'created_at': datetime.now().isoformat(timespec='seconds'),
+        }
 
     def create_document(self, content: dict, output_path: str, preserve_footnotes: bool = True) -> bool:
         """

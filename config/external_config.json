@@ -1,28 +1,39 @@
 {
-    "dify": {
-        "enabled": false,
-        "base_url": "http://localhost/v1",
-        "api_key_env": "DIFY_API_KEY",
-        "dataset_id": "",
-        "timeout": 60,
-        "description": "Dify LLM应用开发平台"
-    },
-    "ragflow": {
-        "enabled": false,
-        "base_url": "http://localhost",
-        "api_key_env": "RAGFLOW_API_KEY",
-        "dataset_name": "history-research",
-        "timeout": 60,
-        "description": "Ragflow RAG引擎"
-    },
-    "ndlocr": {
-        "enabled": true,
-        "model_path": "./external/ndlocr-lite/src/model",
-        "description": "NDL OCR-Lite 近代现代文献识别"
-    },
-    "ndlkotenocr": {
-        "enabled": true,
-        "model_path": "./external/ndlkotenocr-lite/src/model",
-        "description": "NDL古典籍OCR-Lite 古典籍识别"
-    }
+  "_comment": "Public external integration template. Keep real endpoint secrets in environment variables or secrets/.",
+  "_version": "1.0.1",
+  "_updated": "2026-04-28",
+  "dify": {
+    "enabled": false,
+    "base_url": "http://localhost:5001",
+    "api_key_env": "DIFY_API_KEY",
+    "dataset_id": "",
+    "timeout": 60,
+    "description": "Optional local/private Dify integration. Do not commit dataset tokens or keys."
+  },
+  "ragflow": {
+    "enabled": false,
+    "base_url": "http://localhost:9380",
+    "api_key_env": "RAGFLOW_API_KEY",
+    "dataset_name": "history-research",
+    "timeout": 60,
+    "description": "Optional local/private RAGFlow integration. Do not commit real API keys."
+  },
+  "ndlocr": {
+    "enabled": false,
+    "model_path": "external/ndlocr-lite",
+    "description": "Relative local model path placeholder. Install models outside tracked config."
+  },
+  "ndlkotenocr": {
+    "enabled": false,
+    "model_path": "external/ndlkotenocr-lite",
+    "description": "Relative local model path placeholder. Install models outside tracked config."
+  },
+  "privacy": {
+    "contains_local_absolute_paths": false,
+    "contains_credentials": false,
+    "credential_sources": [
+      "environment variables",
+      "secrets/"
+    ]
+  }
 }

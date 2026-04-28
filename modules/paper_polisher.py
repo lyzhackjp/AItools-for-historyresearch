@@ -1,410 +1,538 @@
 """
-学术论文智能精简处理模块
+Academic paper polishing facade.
 
-专为日本史学术论文设计的智能内容精简工具
-基于阿里通义千问，能够智能识别并删除冗余内容
-同时保留核心学术信息。
-
-核心功能：
-- 智能内容精简：自动识别并删除逻辑冗余的论述
-- 专业文档处理：正确区分正文与脚注内容
-- Word原生修订追踪：使用w:del和w:ins元素实现专业修订模式
-- 学术严谨性保障：保护历史专有名词和学术术语
-
-技术架构：
-- 文档处理：基于 python-docx 库处理 .docx 文档
-- AI处理：集成阿里通义千问 / 次要支持 Minimax
-- 修订追踪：实现 Word 原生 Track Changes 功能
-- 配置管理：使用 .env 格式管理配置参数
+This module keeps the old public surface area while routing the actual text
+polishing work through the unified task layer.
 """
 
-import os
-import sys
-import re
-import json
-import random
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from __future__ import annotations
+
+import shutil
 from datetime import datetime
-import hashlib
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from modules.task_manager import TaskManager
 
 try:
-    import docx
     from docx import Document
-    from docx.shared import RGBColor, Pt
-    from docx.enum.text import WD_COLOR_INDEX
-    from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
-except ImportError:
-    print("警告: python-docx 未安装，使用 pip install python-docx")
+    from docx.oxml.ns import qn
 
-from modules.llm_client import create_llm_client
+    DOCX_AVAILABLE = True
+except ImportError:  # pragma: no cover - optional dependency
+    Document = None
+    OxmlElement = None
+    qn = None
+    DOCX_AVAILABLE = False
 
 
 class PaperPolisher:
-    """学术论文智能精简处理器"""
-    
-    DEFAULT_SYSTEM_PROMPT = """你是一位专业的日本史学术论文编辑，擅长精简学术论文内容。
+    """Conservative writing polisher for academic prose."""
 
-请分析以下学术论文内容，识别并删除：
-1. 逻辑冗余的论述（重复论证同一观点）
-2. 修辞上重复的表达（相同的修饰词反复使用）
-3. 非必要的过渡句和重复强调
-
-请务必保留：
-1. 核心学术观点和结论
-2. 历史史实和重要事件
-3. 人物生卒年份和重要事迹
-4. 所有脚注、注释和参考文献标注
-5. 历史专有名词和学术术语
-6. 原文的论证逻辑结构
-
-输出格式要求：
-返回JSON格式，包含以下字段：
-- "modified_text": 修改后的精简文本（保留所有脚注）
-- "deletions": 被删除的内容列表，每项包含"text"和"reason"
-- "summary": 精简处理的总结说明
-
-请确保输出是有效的JSON格式。"""
-    
+    DEFAULT_SYSTEM_PROMPT = (
+        "Polish academic writing conservatively while preserving claims, evidence, "
+        "citations, and footnotes."
+    )
     MIN_PARAGRAPH_LENGTH = 30
 
-    def __init__(self, api_provider: str = "qwen"):
-        """
-        初始化论文润色器
-        
-        Args:
-            api_provider: API提供商 ('qwen' 或 'minimax')
-        """
-        self.base_dir = Path(__file__).parent.parent
+    def __init__(
+        self,
+        api_provider: str = "qwen",
+        test_mode: bool = True,
+        backend: Optional[str] = None,
+        model: Optional[str] = None,
+    ):
         self.api_provider = api_provider
+        self.test_mode = test_mode
+        self.backend = backend
+        self.model = model
         self.llm_client = None
         self.system_prompt = self.DEFAULT_SYSTEM_PROMPT
-        self.history_terms = set()
-        self.history_figures = set()
-        
-    def _init_llm_client(self):
-        """初始化LLM客户端"""
-        if self.llm_client is None:
-            if self.api_provider == "qwen":
-                provider = "dashscope"
-            elif self.api_provider == "minimax":
-                provider = "minimax"
-            else:
-                provider = "dashscope"
-            
-            self.llm_client = create_llm_client({'provider': provider})
-    
-    def _load_history_knowledge(self, doc: Document):
-        """
-        从文档中提取历史专有名词和人物
-        
-        Args:
-            doc: Word文档对象
-        """
-        text_content = []
-        
-        for para in doc.paragraphs:
-            text_content.append(para.text)
-        
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    text_content.append(cell.text)
-        
-        full_text = "\n".join(text_content)
-        
-        date_pattern = r'\d{4,4}年\d{1,2}月\d{1,2}日|\d{4,4}年-\d{4,4}年|\d{1,2}世纪'
-        dates = re.findall(date_pattern, full_text)
-        
-        name_pattern = r'[一-龥]{2,4}(氏|公爵|侯爵|伯爵|子爵|男爵)'
-        names = re.findall(name_pattern, full_text)
-        
-        self.history_terms.update(dates)
-        self.history_figures.update(names)
-    
-    def polish_paragraph(self, paragraph_text: str) -> Tuple[str, List[Dict[str, str]]]:
-        """
-        精简单个段落
-        
-        Args:
-            paragraph_text: 原始段落文本
-            
-        Returns:
-            Tuple[str, List[Dict]]: (精简后的文本, 删除内容列表)
-        """
+        self._task_manager: Optional[TaskManager] = None
+
+    def _get_task_manager(self) -> TaskManager:
+        if self._task_manager is None:
+            self._task_manager = TaskManager(mode="api", provider=self.api_provider)
+        return self._task_manager
+
+    def _init_llm_client(self) -> TaskManager:
+        """Compatibility shim for older callers."""
+
+        self.llm_client = self._get_task_manager()
+        return self.llm_client
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        task_options = self._get_task_manager().get_task_options("paper_polish")
+        task_options.update(
+            {
+                "module": "PaperPolisher",
+                "task": "paper_polish",
+                "output_type": "paper_polish",
+                "test_mode": self.test_mode,
+                "legacy_methods": ["polish_paragraph", "polish_text", "process_document"],
+                "fallback_order": ["llm_api", "local_llm", "script", "skill", "mcp"],
+                "quality_signals": [
+                    "empty_input",
+                    "short_input_skipped",
+                    "empty_output",
+                    "fallback_backend",
+                    "low_confidence",
+                    "suspicious_length_change",
+                ],
+            }
+        )
+        return task_options
+
+    def polish_paragraph(
+        self,
+        paragraph_text: str,
+        language: str = "zh",
+        **kwargs: Any,
+    ) -> Tuple[str, List[Dict[str, str]]]:
+        """Polish a single paragraph and return `(text, revision_notes)`."""
+
         if not paragraph_text.strip():
             return paragraph_text, []
-        
-        if len(paragraph_text) < self.MIN_PARAGRAPH_LENGTH:
+        if len(paragraph_text.strip()) < self.MIN_PARAGRAPH_LENGTH:
             return paragraph_text, []
-        
-        self._init_llm_client()
-        
-        user_prompt = f"""作为学术论文编辑，请精简以下段落。要求：
 
-1. 删除冗余表述、重复修饰词、不必要的过渡句
-2. 合并表达相同意思的句子
-3. 保留核心观点、史实、人物信息、脚注标记
-4. 输出必须比原文短，精简20%-40%
+        result = self._execute_polish(paragraph_text, language=language, **kwargs)
+        polished_text = result.get("polished_text") or paragraph_text
+        revision_notes = self._normalize_revision_notes(
+            result.get("revision_notes", []),
+            original_text=paragraph_text,
+            polished_text=polished_text,
+        )
+        return polished_text, revision_notes
 
-原文（{len(paragraph_text)}字）：
-{paragraph_text}
+    def polish_text(
+        self,
+        text: str,
+        language: str = "zh",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Polish multi-paragraph text and keep execution metadata."""
 
-直接输出精简后的文本（不要解释，不要扩展）："""
-        
-        try:
-            response = self.llm_client._call_llm(user_prompt, temperature=0.3, max_tokens=2000)
-            
-            result_text = response.get('content', paragraph_text).strip()
-            
-            result_text = self._clean_response(result_text)
-            
-            if not result_text or len(result_text) < 10:
-                return paragraph_text, []
-            
-            if result_text == paragraph_text:
-                return paragraph_text, []
-            
-            deletions = [{
-                'text': f'精简了约{(1-len(result_text)/len(paragraph_text))*100:.1f}%的内容',
-                'reason': '删除冗余表述，优化句式结构'
-            }]
-            
-            return result_text, deletions
-                
-        except Exception as e:
-            print(f"段落精简失败: {e}")
-            return paragraph_text, []
-    
-    def _clean_response(self, response: str) -> str:
-        """清理响应文本"""
-        result = response.strip()
-        
-        prefixes = [
-            "润色后：", "润色后:", "修改后：", "修改后:",
-            "精简后：", "精简后:", "以下是润色后的文本：",
-            "以下是润色后的文本:", "润色后的文本：", "润色后的文本:",
-            "精简后的文本：", "精简后的文本:"
-        ]
-        for prefix in prefixes:
-            if result.startswith(prefix):
-                result = result[len(prefix):].strip()
-        
-        if result.startswith("```"):
-            first_newline = result.find('\n')
-            if first_newline != -1:
-                result = result[first_newline + 1:]
-            if result.endswith("```"):
-                result = result[:-3]
-        
-        return result.strip()
-    
-    def process_document(self, input_path: str, output_path: str,
-                        enable_track_changes: bool = True) -> Dict[str, Any]:
-        """
-        处理完整的Word文档
-        
-        Args:
-            input_path: 输入文档路径
-            output_path: 输出文档路径
-            enable_track_changes: 是否启用修订追踪
-            
-        Returns:
-            Dict: 处理结果统计
-        """
-        input_path = Path(input_path)
-        output_path = Path(output_path)
-        
-        if not input_path.exists():
-            raise FileNotFoundError(f"输入文件不存在: {input_path}")
-        
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        import shutil
-        shutil.copy2(str(input_path), str(output_path))
-        
-        doc = Document(str(output_path))
-        
-        self._load_history_knowledge(doc)
-        
+        paragraphs = self._split_paragraphs(text)
+        if not paragraphs:
+            return {
+                "polished_text": text,
+                "revision_notes": [],
+                "backend": self.backend or ("script" if self.test_mode else None),
+                "provider": self.api_provider,
+                "model": self.model,
+                "confidence": 0.0,
+                "needs_review": False,
+            }
+
+        polished_paragraphs: List[str] = []
+        revision_notes: List[Dict[str, str]] = []
+        backends_used: List[str] = []
+        providers_used: List[str] = []
+        models_used: List[str] = []
+        needs_review = False
+        confidence_values: List[float] = []
+
+        for paragraph in paragraphs:
+            if len(paragraph.strip()) < self.MIN_PARAGRAPH_LENGTH:
+                polished_paragraphs.append(paragraph)
+                continue
+
+            result = self._execute_polish(paragraph, language=language, **kwargs)
+            polished_text = result.get("polished_text") or paragraph
+            polished_paragraphs.append(polished_text)
+            revision_notes.extend(
+                self._normalize_revision_notes(
+                    result.get("revision_notes", []),
+                    original_text=paragraph,
+                    polished_text=polished_text,
+                )
+            )
+            if result.get("backend"):
+                backends_used.append(str(result["backend"]))
+            if result.get("provider"):
+                providers_used.append(str(result["provider"]))
+            if result.get("model"):
+                models_used.append(str(result["model"]))
+            if isinstance(result.get("confidence"), (int, float)):
+                confidence_values.append(float(result["confidence"]))
+            needs_review = needs_review or bool(result.get("needs_review"))
+
+        if not polished_paragraphs:
+            polished_paragraphs = paragraphs
+
+        return {
+            "polished_text": "\n\n".join(polished_paragraphs),
+            "revision_notes": revision_notes,
+            "backend": backends_used[0] if backends_used else self.backend or ("script" if self.test_mode else None),
+            "provider": providers_used[0] if providers_used else self.api_provider,
+            "model": models_used[0] if models_used else self.model,
+            "confidence": round(sum(confidence_values) / len(confidence_values), 2) if confidence_values else 0.55,
+            "needs_review": needs_review,
+            "backend_chain": backends_used,
+        }
+
+    def polish_paragraph_package(
+        self,
+        paragraph_text: str,
+        language: str = "zh",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Polish one paragraph and return a `paper_polish` envelope."""
+
+        result = self.polish_text(paragraph_text, language=language, **kwargs)
+        package = self._build_polish_package(
+            original_text=paragraph_text,
+            polish_result=result,
+            language=language,
+            scope="paragraph",
+        )
+        if paragraph_text.strip() and len(paragraph_text.strip()) < self.MIN_PARAGRAPH_LENGTH:
+            package["quality_flags"] = sorted(set(package["quality_flags"] + ["short_input_skipped"]))
+            package["needs_review"] = bool(package["quality_flags"])
+        return package
+
+    def polish_text_package(
+        self,
+        text: str,
+        language: str = "zh",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Polish text and return a workflow-friendly `paper_polish` envelope."""
+
+        result = self.polish_text(text, language=language, **kwargs)
+        return self._build_polish_package(
+            original_text=text,
+            polish_result=result,
+            language=language,
+            scope="text",
+        )
+
+    def process_document(
+        self,
+        input_path: str,
+        output_path: str,
+        enable_track_changes: bool = True,
+        language: str = "zh",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Polish a `.docx` file while preserving footnote references."""
+
+        if not DOCX_AVAILABLE:
+            raise RuntimeError("python-docx is required for process_document")
+
+        source = Path(input_path)
+        target = Path(output_path)
+        if not source.exists():
+            raise FileNotFoundError(f"Input file does not exist: {source}")
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+        doc = Document(str(target))
         if enable_track_changes:
             self._enable_track_revisions(doc)
-            print(f"✓ 已启用修订追踪模式")
-        
-        total_paragraphs = len(doc.paragraphs)
+
         processed_paragraphs = 0
-        all_deletions = []
-        
-        print(f"\n开始处理 {total_paragraphs} 个段落...\n")
-        
-        for i, para in enumerate(doc.paragraphs, 1):
-            original_text = para.text
-            
+        modified_paragraphs = 0
+        all_notes: List[Dict[str, str]] = []
+        backends_used: List[str] = []
+
+        for paragraph in doc.paragraphs:
+            original_text = paragraph.text
             if not original_text.strip():
                 continue
-            
             processed_paragraphs += 1
-            
-            print(f"[{i}/{total_paragraphs}] 处理段落...", end=" ", flush=True)
-            
-            modified_text, deletions = self.polish_paragraph(original_text)
-            
-            if deletions:
-                all_deletions.extend(deletions)
-            
-            if modified_text != original_text:
+            result = self._execute_polish(original_text, language=language, **kwargs)
+            polished_text = result.get("polished_text") or original_text
+            if polished_text != original_text:
+                modified_paragraphs += 1
                 if enable_track_changes:
-                    self._apply_track_changes(para, original_text, modified_text)
+                    self._apply_track_changes(paragraph, original_text, polished_text)
                 else:
-                    para.clear()
-                    para.add_run(modified_text)
-                
-                print(f"✓ ({len(deletions)} 处修改)")
-            else:
-                print(f"- (无修改)")
-        
-        doc.save(str(output_path))
-        
-        result = {
-            'success': True,
-            'input_file': str(input_path),
-            'output_file': str(output_path),
-            'total_paragraphs': total_paragraphs,
-            'processed_paragraphs': processed_paragraphs,
-            'total_deletions': len(all_deletions),
-            'deletions': all_deletions,
-            'track_changes_enabled': enable_track_changes,
-            'timestamp': datetime.now().isoformat()
+                    paragraph.clear()
+                    paragraph.add_run(polished_text)
+            all_notes.extend(
+                self._normalize_revision_notes(
+                    result.get("revision_notes", []),
+                    original_text=original_text,
+                    polished_text=polished_text,
+                )
+            )
+            if result.get("backend"):
+                backends_used.append(str(result["backend"]))
+
+        doc.save(str(target))
+        return {
+            "success": True,
+            "input_file": str(source),
+            "output_file": str(target),
+            "total_paragraphs": len(doc.paragraphs),
+            "processed_paragraphs": processed_paragraphs,
+            "modified_paragraphs": modified_paragraphs,
+            "total_deletions": len(all_notes),
+            "revision_notes": all_notes,
+            "backend_chain": backends_used,
         }
-        
-        print(f"\n✓ 处理完成: {output_path}")
-        
-        return result
-    
-    def _enable_track_revisions(self, doc):
-        """启用文档的修订追踪设置"""
-        settings = doc.settings.element
-        
-        track_revisions = settings.find(qn('w:trackRevisions'))
+
+    def process_document_package(
+        self,
+        input_path: str,
+        output_path: str,
+        enable_track_changes: bool = True,
+        language: str = "zh",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Process a DOCX and wrap the result as a `paper_polish_document` package."""
+
+        result = self.process_document(
+            input_path,
+            output_path,
+            enable_track_changes=enable_track_changes,
+            language=language,
+            **kwargs,
+        )
+        flags = []
+        if not result.get("success"):
+            flags.append("document_polish_failed")
+        if not result.get("modified_paragraphs"):
+            flags.append("no_paragraphs_modified")
+        return {
+            "type": "paper_polish_document",
+            "schema_version": "2026-04-25",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "source_path": result.get("input_file"),
+            "output_path": result.get("output_file"),
+            "backend": result.get("backend_chain", [None])[0] if result.get("backend_chain") else "script",
+            "provider": self.api_provider,
+            "model": self.model,
+            "confidence": 0.7 if result.get("success") else 0.0,
+            "needs_review": bool(flags),
+            "quality_flags": flags,
+            "statistics": {
+                "total_paragraphs": result.get("total_paragraphs", 0),
+                "processed_paragraphs": result.get("processed_paragraphs", 0),
+                "modified_paragraphs": result.get("modified_paragraphs", 0),
+                "revision_note_count": len(result.get("revision_notes", [])),
+            },
+            "revision_notes": result.get("revision_notes", []),
+            "artifacts": [
+                {
+                    "kind": "docx",
+                    "path": result.get("output_file"),
+                }
+            ] if result.get("output_file") else [],
+            "capabilities": self.get_capabilities(),
+            "raw_result": result,
+        }
+
+    def _execute_polish(self, text: str, language: str = "zh", **kwargs: Any) -> Dict[str, Any]:
+        manager = self._get_task_manager()
+        backend = kwargs.get("backend", self.backend)
+        fallback_backends = kwargs.get("fallback_backends")
+        if fallback_backends is None:
+            fallback_backends = ["local_llm", "script"]
+        if self.test_mode and not backend:
+            backend = "script"
+            fallback_backends = []
+
+        response = manager.paper_polish(
+            text=text,
+            language=language,
+            provider=kwargs.get("provider", self.api_provider),
+            model=kwargs.get("model", self.model),
+            backend=backend,
+            fallback_backends=list(fallback_backends),
+            temperature=kwargs.get("temperature", 0.2),
+            max_tokens=kwargs.get("max_tokens", 2500),
+        )
+
+        payload = response.get("data", {}) if response.get("success") else {}
+        polished_text = payload.get("polished_text") or text
+        revision_notes = payload.get("revision_notes", [])
+        if not response.get("success"):
+            revision_notes = revision_notes or ["polish fallback returned original text"]
+
+        return {
+            "polished_text": self._clean_response(polished_text),
+            "revision_notes": revision_notes,
+            "backend": response.get("backend") or response.get("metadata", {}).get("backend"),
+            "provider": response.get("metadata", {}).get("provider", self.api_provider),
+            "model": response.get("metadata", {}).get("model", self.model),
+            "confidence": payload.get("confidence", 0.7 if polished_text != text else 0.55),
+            "needs_review": bool(payload.get("needs_review", False)),
+        }
+
+    def _build_polish_package(
+        self,
+        *,
+        original_text: str,
+        polish_result: Dict[str, Any],
+        language: str,
+        scope: str,
+    ) -> Dict[str, Any]:
+        flags = self._package_quality_flags(original_text, polish_result)
+        confidence = self._package_confidence(polish_result, flags)
+        return {
+            "type": "paper_polish",
+            "schema_version": "2026-04-25",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "scope": scope,
+            "language": language,
+            "original_text": original_text,
+            "polished_text": polish_result.get("polished_text", original_text),
+            "revision_notes": polish_result.get("revision_notes", []),
+            "backend": polish_result.get("backend") or ("script" if self.test_mode else self.backend),
+            "provider": polish_result.get("provider", self.api_provider),
+            "model": polish_result.get("model", self.model),
+            "confidence": confidence,
+            "needs_review": bool(flags) or bool(polish_result.get("needs_review")),
+            "quality_flags": flags,
+            "statistics": {
+                "original_chars": len(original_text or ""),
+                "polished_chars": len(polish_result.get("polished_text", "") or ""),
+                "revision_note_count": len(polish_result.get("revision_notes", [])),
+                "paragraph_count": len(self._split_paragraphs(original_text)),
+            },
+            "backend_chain": polish_result.get("backend_chain", []),
+            "capabilities": self.get_capabilities(),
+        }
+
+    def _package_quality_flags(self, original_text: str, polish_result: Dict[str, Any]) -> List[str]:
+        flags = []
+        original = original_text or ""
+        polished = polish_result.get("polished_text", "") or ""
+        if not original.strip():
+            flags.append("empty_input")
+        if original.strip() and not polished.strip():
+            flags.append("empty_output")
+        if polish_result.get("backend") in {"script", "fallback"} and not self.test_mode:
+            flags.append("fallback_backend")
+        if polish_result.get("needs_review"):
+            flags.append("backend_review_requested")
+        confidence = polish_result.get("confidence")
+        if isinstance(confidence, (int, float)) and confidence < 0.6:
+            flags.append("low_confidence")
+        if original.strip() and polished.strip():
+            ratio = len(polished) / max(len(original), 1)
+            if ratio < 0.3 or ratio > 1.8:
+                flags.append("suspicious_length_change")
+        return sorted(set(flags))
+
+    def _package_confidence(self, polish_result: Dict[str, Any], flags: List[str]) -> float:
+        confidence = polish_result.get("confidence")
+        if not isinstance(confidence, (int, float)):
+            confidence = 0.65
+        if "fallback_backend" in flags:
+            confidence -= 0.1
+        if "empty_output" in flags:
+            confidence -= 0.35
+        if "suspicious_length_change" in flags:
+            confidence -= 0.15
+        if "low_confidence" in flags:
+            confidence = min(confidence, 0.55)
+        return round(max(0.0, min(1.0, float(confidence))), 3)
+
+    def _normalize_revision_notes(
+        self,
+        notes: List[Any],
+        *,
+        original_text: str,
+        polished_text: str,
+    ) -> List[Dict[str, str]]:
+        normalized: List[Dict[str, str]] = []
+        if isinstance(notes, list):
+            for note in notes:
+                if isinstance(note, dict):
+                    normalized.append(
+                        {
+                            "text": str(note.get("text") or note.get("reason") or ""),
+                            "reason": str(note.get("reason") or note.get("text") or ""),
+                        }
+                    )
+                elif isinstance(note, str):
+                    normalized.append({"text": note, "reason": note})
+        if not normalized and polished_text != original_text:
+            normalized.append(
+                {
+                    "text": "conservative rewrite applied",
+                    "reason": f"reduced text length from {len(original_text)} to {len(polished_text)} characters",
+                }
+            )
+        return [item for item in normalized if item.get("text") or item.get("reason")]
+
+    def _split_paragraphs(self, text: str) -> List[str]:
+        paragraphs = [part.strip() for part in text.split("\n\n") if part.strip()]
+        if paragraphs:
+            return paragraphs
+        return [part.strip() for part in text.splitlines() if part.strip()]
+
+    def _clean_response(self, response: str) -> str:
+        text = (response or "").strip()
+        prefixes = [
+            "润色后：",
+            "润色后:",
+            "修改后：",
+            "修改后:",
+            "精简后：",
+            "精简后:",
+            "以下是润色后的文本：",
+            "以下是润色后的文本:",
+        ]
+        for prefix in prefixes:
+            if text.startswith(prefix):
+                text = text[len(prefix) :].strip()
+
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+        return text
+
+    def _enable_track_revisions(self, doc: Any) -> None:
+        track_revisions = doc.settings.element.find(qn("w:trackRevisions"))
         if track_revisions is None:
-            track_revisions = OxmlElement('w:trackRevisions')
-            settings.append(track_revisions)
-    
-    def _apply_track_changes(self, para, original_text: str, modified_text: str):
-        """
-        应用Word原生修订追踪格式
-        
-        Args:
-            para: 段落对象
-            original_text: 原始文本
-            modified_text: 修改后文本
-        """
-        footnote_refs = []
-        for child in para._p:
-            if child.tag == qn('w:r'):
-                fn_ref = child.find(qn('w:footnoteReference'))
-                if fn_ref is not None:
-                    footnote_refs.append(child)
-        
-        para.clear()
-        
-        author = "AI润色助手"
-        date_str = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
-        revision_id = str(random.randint(1, 999999))
-        
-        del_elem = OxmlElement('w:del')
-        del_elem.set(qn('w:id'), revision_id)
-        del_elem.set(qn('w:author'), author)
-        del_elem.set(qn('w:date'), date_str)
-        
-        del_run = OxmlElement('w:r')
-        del_rPr = OxmlElement('w:rPr')
-        del_run.append(del_rPr)
-        
-        del_text = OxmlElement('w:delText')
-        del_text.text = original_text
-        del_text.set(qn('xml:space'), 'preserve')
-        del_run.append(del_text)
-        del_elem.append(del_run)
-        
-        para._p.append(del_elem)
-        
-        ins_elem = OxmlElement('w:ins')
-        ins_elem.set(qn('w:id'), str(int(revision_id) + 1))
-        ins_elem.set(qn('w:author'), author)
-        ins_elem.set(qn('w:date'), date_str)
-        
-        ins_run = OxmlElement('w:r')
-        ins_rPr = OxmlElement('w:rPr')
-        ins_run.append(ins_rPr)
-        
-        ins_text = OxmlElement('w:t')
-        ins_text.text = modified_text
-        ins_text.set(qn('xml:space'), 'preserve')
-        ins_run.append(ins_text)
-        ins_elem.append(ins_run)
-        
-        para._p.append(ins_elem)
-        
-        for fn_ref in footnote_refs:
-            para._p.append(fn_ref)
-    
-    def set_system_prompt(self, prompt: str):
-        """
-        设置系统提示词
-        
-        Args:
-            prompt: 新的系统提示词
-        """
-        self.system_prompt = prompt
-    
-    def add_history_term(self, term: str):
-        """
-        添加历史专有名词保护
-        
-        Args:
-            term: 历史术语
-        """
-        self.history_terms.add(term)
-    
-    def add_history_figure(self, figure: str):
-        """
-        添加历史人物保护
-        
-        Args:
-            figure: 历史人物名称
-        """
-        self.history_figures.add(figure)
+            track_revisions = OxmlElement("w:trackRevisions")
+            doc.settings.element.append(track_revisions)
+
+    def _apply_track_changes(self, paragraph: Any, original_text: str, modified_text: str) -> None:
+        footnote_runs = []
+        for child in list(paragraph._p):
+            if child.find(qn("w:footnoteReference")) is not None:
+                footnote_runs.append(child)
+            paragraph._p.remove(child)
+
+        if original_text:
+            deletion = OxmlElement("w:del")
+            deletion.set(qn("w:author"), "Codex")
+            deletion.set(qn("w:date"), "2026-04-21T00:00:00Z")
+            run = OxmlElement("w:r")
+            text = OxmlElement("w:delText")
+            text.text = original_text
+            run.append(text)
+            deletion.append(run)
+            paragraph._p.append(deletion)
+
+        if modified_text:
+            insertion = OxmlElement("w:ins")
+            insertion.set(qn("w:author"), "Codex")
+            insertion.set(qn("w:date"), "2026-04-21T00:00:00Z")
+            run = OxmlElement("w:r")
+            text = OxmlElement("w:t")
+            text.text = modified_text
+            run.append(text)
+            insertion.append(run)
+            paragraph._p.append(insertion)
+
+        for footnote_run in footnote_runs:
+            paragraph._p.append(footnote_run)
 
 
-def create_paper_polisher(api_provider: str = "qwen") -> PaperPolisher:
-    """
-    工厂函数 - 创建论文润色器
-    
-    Args:
-        api_provider: API提供商 ('qwen' 或 'minimax')
-        
-    Returns:
-        PaperPolisher: 论文润色器实例
-    """
-    return PaperPolisher(api_provider)
+def create_paper_polisher(api_provider: str = "qwen", **kwargs: Any) -> PaperPolisher:
+    """Compatibility factory."""
 
-
-if __name__ == "__main__":
-    print("学术论文智能精简处理工具")
-    print("="*60)
-    print("\n使用方法:")
-    print("```python")
-    print("from modules.paper_polisher import create_paper_polisher")
-    print("")
-    print("# 创建润色器（优先使用通义千问）")
-    print("polisher = create_paper_polisher('qwen')")
-    print("")
-    print("# 处理文档")
-    print("result = polisher.process_document(")
-    print("    'input.docx',")
-    print("    'output.docx',")
-    print("    enable_track_changes=True")
-    print(")")
-    print("```")
+    return PaperPolisher(api_provider=api_provider, **kwargs)

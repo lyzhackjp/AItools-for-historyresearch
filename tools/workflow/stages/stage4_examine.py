@@ -1,360 +1,374 @@
 """
-Stage 4: 史料考察
+Stage 4: examine sources via citation-network analysis and outline review.
 
-分析引文网络 + 论文逻辑审视
-
-输入：
-    project.literature: List[PaperRecord] — 文献列表
-    project.paper_draft: str — 论文草稿（Stage 5 产出，可选）
-    project.language: str — 主要语言
-
-输出：
-    project.citation_network: CitationNetwork
-    project.key_source_ids: List[str] — 核心文献 ID 列表
-    project.outline_review: OutlineReview — 论文逻辑审视报告（草稿阶段）
-
-依赖模块：
-    modules.citation_network_analyzer.CitationNetworkAnalyzer
-    modules.reverse_outline_analyzer.ReverseOutlineAnalyzer
+This stage now records structured execution summaries and quality flags back
+into the workflow project metadata.
 """
 
-import sys
-import os
-from typing import List, Dict, Any, Optional
+from __future__ import annotations
 
-_AI_TOOLS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '..')
+import os
+import sys
+from typing import Any, Dict, List, Optional
+
+_AI_TOOLS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "..")
 if _AI_TOOLS not in sys.path:
     sys.path.insert(0, _AI_TOOLS)
 
-from tools.workflow.research_project import (
-    ResearchProject, PaperRecord, CitationNetwork, OutlineReview
-)
+from tools.workflow.research_project import CitationNetwork, OutlineReview, PaperRecord, ResearchProject
 
 
 class Stage4Examine:
-    """
-    Stage 4: 史料考察
-
-    使用方法：
-        stage = Stage4Examine(project)
-        result = stage.run()
-
-        # 只分析引文网络
-        network = stage.analyze_citation_network(literature)
-
-        # 只审视论文逻辑
-        review = stage.analyze_paper_outline(paper_draft)
-    """
+    """Stage 4 citation-network and outline-review workflow."""
 
     NAME = "examine"
     STAGE_NUM = 4
 
     def __init__(self, project: ResearchProject):
         self.project = project
-        self.cna = None  # CitationNetworkAnalyzer
-        self.roa = None  # ReverseOutlineAnalyzer
+        self.cna = None
+        self.roa = None
+        self._warnings: List[str] = []
+        self._review_items: List[Dict[str, Any]] = []
 
     def _get_citation_analyzer(self):
-        """延迟创建引文网络分析器"""
+        """Create the citation-network analyzer lazily."""
+
         if self.cna is None:
             from modules.citation_network_analyzer import CitationNetworkAnalyzer
+
             self.cna = CitationNetworkAnalyzer()
         return self.cna
 
     def _get_outline_analyzer(self):
-        """延迟创建逆向大纲审视器"""
+        """Create the outline analyzer lazily."""
+
         if self.roa is None:
             from modules.reverse_outline_analyzer import ReverseOutlineAnalyzer
-            self.roa = ReverseOutlineAnalyzer(
-                api_provider="qwen",
-                test_mode=False
-            )
+
+            self.roa = ReverseOutlineAnalyzer(api_provider="qwen", test_mode=False)
         return self.roa
 
     def run(self, **kwargs) -> Dict[str, Any]:
-        """
-        执行 Stage 4：史料考察
+        """Run stage 4 and write structured metadata into the project."""
 
-        Returns:
-            Dict 含 'citation_network', 'key_sources', 'outline_review'
-        """
-        print(f"[Stage 4] 开始史料考察")
-        print(f"[Stage 4] 文献: {len(self.project.literature)} 篇")
+        del kwargs  # reserved for future stage-specific options
+        print("[Stage 4] Start source examination")
+        stage2_records = self._get_stage2_citation_records()
+        print(f"[Stage 4] Literature: {len(self.project.literature)}")
+        print(f"[Stage 4] Stage 2 citation records: {len(stage2_records)}")
 
         self.project.mark_stage_start(self.STAGE_NUM)
+        citation_capabilities = self._get_citation_analyzer().get_capabilities()
+        self.project.set_stage_metadata(
+            self.STAGE_NUM,
+            capability_snapshot={
+                "citation_analysis": citation_capabilities,
+                "outline_review": "reverse_outline_analyzer",
+            },
+        )
 
-        results = {}
+        results: Dict[str, Any] = {}
+        citation_summary: Dict[str, Any] = {
+            "nodes": 0,
+            "edges": 0,
+            "key_sources": 0,
+            "orphan_sources": 0,
+        }
 
-        # ── 4a. 引文网络分析 ───────────────────────────────────
-        if self.project.literature:
-            network_result = self.analyze_citation_network(self.project.literature)
-            results['citation_network'] = network_result['network']
-            results['key_sources'] = network_result['key_source_ids']
-            self.project.citation_network = network_result['network']
-            self.project.key_source_ids = network_result['key_source_ids']
-            print(f"[Stage 4] 引文网络: {len(network_result['network'].nodes)} 节点, "
-                  f"{len(network_result['network'].edges)} 边")
-            print(f"[Stage 4] 核心文献: {len(network_result['key_source_ids'])} 篇")
+        if self.project.literature or stage2_records:
+            network_result = self.analyze_citation_network(
+                self.project.literature,
+                citation_records=stage2_records,
+            )
+            network = network_result["network"]
+            results["citation_network"] = network
+            results["citation_package"] = network_result["package"]
+            self.project.register_package(
+                network_result["package"],
+                stage=self.STAGE_NUM,
+                source="citation_network_analyzer",
+            )
+            results["key_sources"] = network_result["key_source_ids"]
+            self.project.citation_network = network
+            self.project.key_source_ids = network_result["key_source_ids"]
+            citation_summary = network_result["summary"]
+            print(
+                f"[Stage 4] Citation network: {len(network.nodes)} nodes, "
+                f"{len(network.edges)} edges"
+            )
+            print(f"[Stage 4] Key sources: {len(network_result['key_source_ids'])}")
         else:
-            print("[Stage 4] 无文献可分析引文网络")
-            results['citation_network'] = None
-            results['key_sources'] = []
+            print("[Stage 4] No literature available for citation analysis")
+            results["citation_network"] = None
+            results["key_sources"] = []
+            self._warnings.append("citation_network_skipped_no_sources")
 
-        # ── 4b. 论文逻辑审视（草稿阶段可选）─────────────────────
         outline_review = None
+        outline_summary = {"available": False, "logical_gaps": 0, "deviation_flags": 0}
         if self.project.paper_draft and len(self.project.paper_draft) > 200:
             try:
                 outline_review = self.analyze_paper_outline(self.project.paper_draft)
-                results['outline_review'] = outline_review
+                results["outline_review"] = outline_review
                 self.project.outline_review = outline_review
-                print(f"[Stage 4] 逻辑审视完成")
-            except Exception as e:
-                print(f"[Stage 4] 逻辑审视失败: {e}")
-                results['outline_review'] = None
+                outline_summary = {
+                    "available": True,
+                    "logical_gaps": len(outline_review.logical_gaps),
+                    "deviation_flags": len(outline_review.deviation_flags),
+                }
+                outline_package = self._build_outline_package(outline_review)
+                results["outline_package"] = outline_package
+                self.project.register_package(
+                    outline_package,
+                    stage=self.STAGE_NUM,
+                    source="reverse_outline_analyzer",
+                )
+                self._register_outline_review_items(outline_review)
+                print("[Stage 4] Outline review complete")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Stage 4] Outline review failed: {exc}")
+                results["outline_review"] = None
+                self._warnings.append("outline_review_failed")
         else:
-            print("[Stage 4] 无论文草稿可审视（Stage 5 未完成），跳过")
+            print("[Stage 4] No usable paper draft for outline review, skipping")
+            results["outline_review"] = None
+            self._warnings.append("outline_review_skipped_no_draft")
+
+        self._flush_review_items()
+        self.project.set_stage_metadata(
+            self.STAGE_NUM,
+            execution_summary={
+                "citation_analysis": citation_summary,
+                "outline_review": outline_summary,
+                "warning_count": len(self._warnings),
+                "review_count": len(self._review_items),
+            },
+            warnings=self._warnings,
+        )
 
         self.project.mark_stage_done(self.STAGE_NUM)
-
-        print(f"[Stage 4] 完成！")
+        print("[Stage 4] Done")
         return results
 
     def analyze_citation_network(
         self,
-        literature: List[PaperRecord]
+        literature: List[PaperRecord],
+        citation_records: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        """
-        分析引文网络
+        """Build a lightweight citation network from project literature."""
 
-        Args:
-            literature: 文献列表
+        citation_records = citation_records or []
+        print(
+            f"[Stage 4] Analyze citation network: "
+            f"{len(literature)} papers + {len(citation_records)} citation records"
+        )
+        analyzer = self._get_citation_analyzer()
+        documents = [
+            {
+                "id": paper.id,
+                "title": paper.title,
+                "authors": paper.authors,
+                "year": paper.year,
+                "journal": paper.journal,
+                "source": paper.source,
+                "text": f"{paper.title}\n{paper.abstract or ''}",
+                "metadata": {"doi": paper.doi, "url": paper.url},
+            }
+            for paper in literature
+        ]
+        documents.extend(
+            self._citation_record_to_document(record, index)
+            for index, record in enumerate(citation_records, start=len(documents) + 1)
+        )
+        language = self._detect_language()
+        language_map = {"english": "english", "japanese": "japanese", "chinese": "chinese"}
+        analysis = analyzer.analyze_documents_package(documents, language=language_map.get(language, "english"))
+        graph = analysis["graph"]
+        summary = analysis["summary"]
 
-        Returns:
-            Dict 含 'network' (CitationNetwork) 和 'key_source_ids' (List[str])
-        """
-        print(f"[Stage 4] 分析引文网络: {len(literature)} 篇文献")
-
-        cna = self._get_citation_analyzer()
-        lang = self._detect_language()
-
-        # ── 构建引文节点 ────────────────────────────────────────
-        nodes = []
-        for paper in literature:
-            nodes.append({
-                'id': paper.id,
-                'title': paper.title,
-                'authors': paper.authors,
-                'year': paper.year,
-                'cited_by_count': 0,  # CrossRef 不提供引用数，标记为 0
-                'is_core': False,
-                'source': paper.source,
-                'journal': paper.journal,
-                'abstract': (paper.abstract or '')[:200],
-            })
-
-        # ── 简单核心文献识别 ────────────────────────────────────
-        # 策略：被多篇文献引用（从同主题推断）+ 年份早的经典文献
-        # 由于无真实引用数据，使用启发式：
-        # - 来自权威期刊 (Nature/Science 类 → 降权，因为是历史)
-        # - 年份早 (15年以上) → 经典文献
-        # - 有 DOI/URL → 质量有保障
-        current_year = 2026
-        key_ids = []
-
-        for node in nodes:
-            score = 0
-            # 经典文献加分
-            try:
-                year = int(node['year']) if node['year'] else 0
-                if 0 < year < current_year - 15:
-                    score += (current_year - year) // 5  # 越老分越高
-                if year >= current_year - 5:
-                    score += 2  # 前沿研究加分
-            except:
-                pass
-
-            # 有 DOI 保障
-            if node.get('id') and len(str(node['id'])) > 5:
-                score += 1
-
-            node['network_score'] = score
-
-        # 取分数最高的前 20% 作为核心文献
-        if nodes:
-            threshold = sorted((n['network_score'] for n in nodes), reverse=True)
-            if threshold:
-                cutoff = threshold[max(0, len(threshold) // 5 - 1)]
-                for node in nodes:
-                    if node['network_score'] >= cutoff and node['network_score'] > 0:
-                        node['is_core'] = True
-                        key_ids.append(node['id'])
-
-        # ── 从摘要中提取引用关系 ────────────────────────────────
-        edges = []
-        cited_titles = {n['title'].lower(): n['id'] for n in nodes}
-
-        for i, paper in enumerate(literature):
-            abstract = (paper.abstract or '').lower()
-            # 简单检测：paper i 被 paper j 引用 → 检测 paper i 的标题词是否在 paper j 的摘要中
-            for j, other in enumerate(literature):
-                if i == j:
-                    continue
-                other_abstract = (other.abstract or '').lower()
-                # 如果 other 的摘要提到 paper i 的关键词（标题词）
-                title_words = [w for w in paper.title.split() if len(w) > 4]
-                matches = sum(1 for w in title_words if w in other_abstract)
-                if matches >= 2:  # 至少 2 个关键词匹配
-                    edges.append({
-                        'from_id': other.id,
-                        'to_id': paper.id,
-                        'type': 'cites',
-                    })
-
-        # ── 构建 CitationNetwork ────────────────────────────────
         network = CitationNetwork(
-            nodes=nodes,
-            edges=edges[:500],  # 限制边数量
-            key_source_ids=key_ids,
-            orphan_ids=[n['id'] for n in nodes if not any(e['to_id'] == n['id'] for e in edges)],
+            nodes=graph.get("nodes", []),
+            edges=[
+                {
+                    "from_id": edge["source"],
+                    "to_id": edge["target"],
+                    "type": edge["type"],
+                    "confidence": edge.get("confidence", 0.0),
+                }
+                for edge in graph.get("edges", [])[:500]
+            ],
+            key_source_ids=summary.get("key_source_ids", []),
+            orphan_ids=summary.get("orphan_ids", []),
         )
 
-        print(f"[Stage 4] 引文网络: {len(nodes)} 节点, {len(edges)} 边, {len(key_ids)} 核心")
-        if key_ids:
-            key_titles = [n['title'] for n in nodes if n['id'] in key_ids[:5]]
-            for t in key_titles:
-                print(f"  ★ {t[:60]}")
+        if summary.get("total_edges", 0) == 0 and summary.get("total_nodes", 0) > 3:
+            self.project.add_quality_flag("stage4_sparse_citation_network")
+        for flag in analysis.get("quality_flags", []):
+            self.project.add_quality_flag(f"stage4_{flag}")
+        if analysis.get("needs_review"):
+            self._review_items.append(
+                {
+                    "stage": self.STAGE_NUM,
+                    "type": "citation_network_quality",
+                    "message": "Citation network package requires manual review.",
+                    "quality_flags": analysis.get("quality_flags", []),
+                    "confidence": analysis.get("confidence", 0.0),
+                }
+            )
 
         return {
-            'network': network,
-            'key_source_ids': key_ids,
+            "network": network,
+            "package": {
+                "type": analysis.get("type"),
+                "backend": analysis.get("backend"),
+                "provider": analysis.get("provider"),
+                "model": analysis.get("model"),
+                "confidence": analysis.get("confidence"),
+                "needs_review": analysis.get("needs_review"),
+                "quality_flags": analysis.get("quality_flags", []),
+                "summary": summary,
+            },
+            "key_source_ids": summary.get("key_source_ids", []),
+            "summary": {
+                "nodes": summary.get("total_nodes", 0),
+                "edges": summary.get("total_edges", 0),
+                "key_sources": summary.get("key_source_count", 0),
+                "orphan_sources": summary.get("orphan_count", 0),
+                "average_edge_confidence": summary.get("average_edge_confidence", 0.0),
+                "stage2_citation_records": len(citation_records),
+                "backend": analysis.get("backend"),
+                "provider": analysis.get("provider"),
+                "confidence": analysis.get("confidence"),
+                "needs_review": analysis.get("needs_review"),
+                "quality_flags": analysis.get("quality_flags", []),
+            },
         }
 
-    def _detect_language(self) -> str:
-        """检测项目语言"""
-        lang = self.project.language.lower()
-        if lang in ('en', 'english'):
-            return 'english'
-        if lang in ('ja', 'japanese'):
-            return 'japanese'
-        return 'chinese'
+    def _get_stage2_citation_records(self) -> List[Dict[str, Any]]:
+        metadata = self.project.get_stage_metadata(2)
+        records = metadata.get("book_citation_records", [])
+        return [record for record in records if isinstance(record, dict)]
+
+    def _citation_record_to_document(self, record: Dict[str, Any], index: int) -> Dict[str, Any]:
+        authors = record.get("authors") or record.get("author") or []
+        if isinstance(authors, str):
+            authors = [item.strip() for item in authors.split(",") if item.strip()]
+        title = record.get("title") or f"Citation Record {index}"
+        return {
+            "id": record.get("id") or f"citation_record_{index}",
+            "title": title,
+            "authors": authors,
+            "year": record.get("year", ""),
+            "journal": record.get("journal", ""),
+            "source": record.get("journal_or_publisher") or record.get("publisher") or record.get("source", ""),
+            "type": record.get("type") or record.get("record_type") or "source",
+            "confidence": record.get("confidence", 0.7),
+            "text": "\n".join(
+                str(part)
+                for part in (
+                    title,
+                    record.get("normalized_citation", ""),
+                    record.get("raw_text", ""),
+                )
+                if part
+            ),
+            "metadata": {
+                "doi": record.get("doi", ""),
+                "url": record.get("url", ""),
+                "needs_review": record.get("needs_review", False),
+                "from_stage2_citation_record": True,
+            },
+        }
 
     def analyze_paper_outline(self, paper_text: str) -> Optional[OutlineReview]:
-        """
-        逆向审视论文逻辑
+        """Analyze paper logic with the outline analyzer or a rule-based fallback."""
 
-        Args:
-            paper_text: 论文全文
-
-        Returns:
-            OutlineReview: 审视报告
-        """
-        print(f"[Stage 4] 审视论文逻辑: {len(paper_text)} 字符")
-
+        print(f"[Stage 4] Analyze paper outline: {len(paper_text)} chars")
         try:
-            roa = self._get_outline_analyzer()
-            lang = self._detect_language()
-
-            # 调用逆向大纲审视器
-            result = roa.analyze(paper_text, language=lang)
-
-            # 解析结果
-            review = self._parse_outline_result(result, paper_text)
-            return review
-
-        except Exception as e:
-            print(f"[Stage 4] 逻辑审视失败: {e}")
+            analyzer = self._get_outline_analyzer()
+            language = self._detect_language()
+            result = analyzer.analyze(paper_text, language=language)
+            return self._parse_outline_result(result)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Stage 4] Outline analyzer unavailable, fallback to rules: {exc}")
             return self._fallback_outline_review(paper_text)
 
-    def _parse_outline_result(self, result: Any, paper_text: str) -> OutlineReview:
-        """解析 OutlineAnalyzer 输出"""
-        if isinstance(result, dict):
-            section_word_counts = result.get('section_word_counts', {})
-            section_ratios = result.get('section_ratios', {})
-            logical_gaps = result.get('logical_gaps', [])
-            deviation_flags = result.get('deviation_flags', [])
-            suggestions = result.get('suggestions', [])
-        else:
-            # 结构未知，尝试从 result 提取基本信息
-            section_word_counts = {}
-            section_ratios = {}
-            logical_gaps = []
-            deviation_flags = []
-            suggestions = []
+    def _detect_language(self) -> str:
+        """Resolve the workflow language into analyzer labels."""
 
-        return OutlineReview(
-            section_word_counts=section_word_counts,
-            section_ratios=section_ratios,
-            logical_gaps=logical_gaps,
-            deviation_flags=deviation_flags,
-            suggestions=suggestions,
-        )
+        lang = self.project.language.lower()
+        if lang in ("en", "english"):
+            return "english"
+        if lang in ("ja", "japanese"):
+            return "japanese"
+        return "chinese"
+
+    def _parse_outline_result(self, result: Any) -> OutlineReview:
+        """Normalize analyzer output into OutlineReview."""
+
+        if isinstance(result, dict):
+            return OutlineReview(
+                section_word_counts=result.get("section_word_counts", {}),
+                section_ratios=result.get("section_ratios", {}),
+                logical_gaps=result.get("logical_gaps", []),
+                deviation_flags=result.get("deviation_flags", []),
+                suggestions=result.get("suggestions", []),
+            )
+        return OutlineReview()
 
     def _fallback_outline_review(self, paper_text: str) -> OutlineReview:
-        """
-        兜底的论文审视（当 LLM 不可用时）
-        基于规则的简单分析
-        """
+        """Rule-based fallback when the outline analyzer is unavailable."""
+
         import re
 
-        # 识别章节
         section_headers = {
-            'abstract': r'(摘要|Abstract)',
-            'introduction': r'(序章|导论|Introduction|前言)',
-            'literature_review': r'(文献综述|研究回顾|Literature Review)',
-            'methodology': r'(研究方法|Methodology)',
-            'analysis': r'(分析|Analysis|正文)',
-            'discussion': r'(讨论|Discussion)',
-            'conclusion': r'(结论|Conclusion|结语)',
-            'references': r'(参考文献|References)',
+            "abstract": r"(摘要|Abstract)",
+            "introduction": r"(序章|导论|Introduction|前言)",
+            "literature_review": r"(文献综述|研究回顾|Literature Review)",
+            "methodology": r"(研究方法|Methodology)",
+            "analysis": r"(分析|Analysis|正文)",
+            "discussion": r"(讨论|Discussion)",
+            "conclusion": r"(结论|Conclusion|结语)",
+            "references": r"(参考文献|References)",
         }
 
-        section_word_counts = {}
+        section_word_counts: Dict[str, int] = {}
         sections_found = set()
-
         for section_name, pattern in section_headers.items():
             matches = list(re.finditer(pattern, paper_text, re.IGNORECASE))
-            if matches:
-                start = matches[0].end()
-                # 找下一个标题或参考文献之前
-                next_pattern = '|'.join(section_headers.values())
-                next_match = re.search(next_pattern, paper_text[start:], re.IGNORECASE)
-                if next_match:
-                    end = start + next_match.start()
-                else:
-                    end = len(paper_text)
-                section_text = paper_text[start:end]
-                word_count = len(section_text)
-                section_word_counts[section_name] = word_count
-                sections_found.add(section_name)
+            if not matches:
+                continue
+            start = matches[0].end()
+            next_pattern = "|".join(section_headers.values())
+            next_match = re.search(next_pattern, paper_text[start:], re.IGNORECASE)
+            end = start + next_match.start() if next_match else len(paper_text)
+            section_text = paper_text[start:end]
+            section_word_counts[section_name] = len(section_text)
+            sections_found.add(section_name)
 
-        # 计算比例
         total = sum(section_word_counts.values()) or 1
-        section_ratios = {
-            k: round(v / total, 3) for k, v in section_word_counts.items()
-        }
+        section_ratios = {key: round(value / total, 3) for key, value in section_word_counts.items()}
 
-        # 逻辑缺口检测
         logical_gaps = []
-        if 'abstract' not in sections_found:
-            logical_gaps.append('缺少摘要章节')
-        if 'introduction' not in sections_found:
-            logical_gaps.append('缺少引言章节')
-        if 'conclusion' not in sections_found:
-            logical_gaps.append('缺少结论章节')
-        if 'literature_review' not in sections_found:
-            logical_gaps.append('缺少文献综述章节')
+        if "abstract" not in sections_found:
+            logical_gaps.append("missing abstract")
+        if "introduction" not in sections_found:
+            logical_gaps.append("missing introduction")
+        if "conclusion" not in sections_found:
+            logical_gaps.append("missing conclusion")
+        if "literature_review" not in sections_found:
+            logical_gaps.append("missing literature review")
 
-        # 偏离检测
         deviation_flags = []
         for section, ratio in section_ratios.items():
-            if section in ('references',) and ratio > 0.4:
-                deviation_flags.append(f'{section} 章节占比过高 ({ratio:.1%})')
+            if section == "references" and ratio > 0.4:
+                deviation_flags.append(f"{section} too long ({ratio:.1%})")
 
         suggestions = []
         if logical_gaps:
-            suggestions.append('补充缺失章节：' + ', '.join(logical_gaps))
+            suggestions.append("add missing sections: " + ", ".join(logical_gaps))
         if not sections_found:
-            suggestions.append('无法识别论文章节结构，请检查格式')
+            suggestions.append("unable to detect section structure")
 
         return OutlineReview(
             section_word_counts=section_word_counts,
@@ -364,31 +378,69 @@ class Stage4Examine:
             suggestions=suggestions,
         )
 
+    def _build_outline_package(self, review: OutlineReview) -> Dict[str, Any]:
+        quality_flags: List[str] = []
+        if review.logical_gaps:
+            quality_flags.append("logical_gaps")
+        if review.deviation_flags:
+            quality_flags.append("outline_deviation_flags")
+        if not review.section_word_counts:
+            quality_flags.append("section_structure_missing")
+        confidence = max(0.25, 0.9 - 0.1 * len(quality_flags))
+        return {
+            "type": "outline_review",
+            "success": True,
+            "backend": "script",
+            "provider": "reverse_outline_analyzer",
+            "model": None,
+            "confidence": round(confidence, 2),
+            "needs_review": bool(quality_flags),
+            "quality_flags": quality_flags,
+            "summary": {
+                "logical_gaps": len(review.logical_gaps),
+                "deviation_flags": len(review.deviation_flags),
+                "suggestions": len(review.suggestions),
+                "sections": len(review.section_word_counts),
+            },
+            "data": review.to_dict(),
+            "artifacts": [],
+        }
+
+    def _register_outline_review_items(self, review: OutlineReview) -> None:
+        """Convert outline warnings into workflow review items."""
+
+        for item in review.logical_gaps:
+            self._review_items.append(
+                {
+                    "stage": self.STAGE_NUM,
+                    "type": "outline_gap",
+                    "message": item,
+                }
+            )
+        for item in review.deviation_flags:
+            self._review_items.append(
+                {
+                    "stage": self.STAGE_NUM,
+                    "type": "outline_deviation",
+                    "message": item,
+                }
+            )
+        if review.logical_gaps:
+            self.project.add_quality_flag("stage4_outline_review_needed")
+
+    def _flush_review_items(self) -> None:
+        """Persist stage review items to the project."""
+
+        for item in self._review_items:
+            self.project.add_review_item(item)
+
     def print_review_summary(self, review: OutlineReview) -> None:
-        """打印审视报告摘要"""
+        """Print a compact review summary."""
+
         if not review:
             return
-
-        print("\n[Stage 4] 论文审视报告")
-        print("─" * 40)
-
-        if review.section_word_counts:
-            print("\n章节字数分布:")
-            for sec, count in review.section_word_counts.items():
-                ratio = review.section_ratios.get(sec, 0)
-                print(f"  {sec}: {count} 字 ({ratio:.1%})")
-
-        if review.logical_gaps:
-            print("\n逻辑缺口:")
-            for gap in review.logical_gaps:
-                print(f"  ! {gap}")
-
-        if review.deviation_flags:
-            print("\n偏离警告:")
-            for flag in review.deviation_flags:
-                print(f"  ! {flag}")
-
-        if review.suggestions:
-            print("\n改进建议:")
-            for sug in review.suggestions:
-                print(f"  → {sug}")
+        print("\n[Stage 4] Outline review summary")
+        print("-" * 40)
+        print(f"Sections: {len(review.section_word_counts)}")
+        print(f"Logical gaps: {len(review.logical_gaps)}")
+        print(f"Deviation flags: {len(review.deviation_flags)}")

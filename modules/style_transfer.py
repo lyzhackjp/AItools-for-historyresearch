@@ -1,728 +1,458 @@
 """
-文风分析与迁移模块
+Style analysis and conservative style transfer facade.
 
-分析特定作者的写作风格，实现文风迁移与模仿
-支持文风矩阵四维度分析
-
-核心功能：
-- 构建文风矩阵分析
-- 句法结构分析
-- 词汇选择分析
-- 语气与叙事声音分析
-- 学术修辞机制分析
-- 基于文风矩阵的文本改写
-- 少样本文风模仿
-
-文风矩阵四维度：
-1. 句法结构
-2. 词汇深度与选择
-3. 语气与叙事声音
-4. 学术修辞机制
-
-API优先级：
-1. 阿里通义千问 (dashscope)
-2. MiniMax
-3. Gemini/ChatGPT（备选）
-
-测试模式：使用模拟数据，不调用真实API
-
-依赖模块：
-- llm_client.py
-- paper_polisher.py（用于Prompt工程参考）
+This module keeps the older public API while routing rewrite work through the
+unified task layer and using local heuristics for style-matrix analysis.
 """
 
+from __future__ import annotations
+
 import re
-import json
-import os
-from typing import Dict, List, Optional, Any, Tuple
-from pathlib import Path
 from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+from modules.task_manager import TaskManager
 
 
 class StyleTransfer:
-    """文风分析与迁移模块"""
-    
+    """Analyze writing style and rewrite text toward a target style."""
+
     STYLE_MATRIX_DIMENSIONS = [
-        'sentence_structure',
-        'vocabulary_choices', 
-        'tone_narrative',
-        'rhetorical_patterns'
+        "sentence_structure",
+        "vocabulary_choices",
+        "tone_narrative",
+        "rhetorical_patterns",
     ]
-    
-    DEFAULT_SYSTEM_PROMPT = """你是一位精通文本风格迁移的顶级学术写作助手。
 
-你的专长包括：
-1. 深度分析文章风格矩阵
-2. 识别作者的写作习惯和特征
-3. 精确模仿特定作者的文风
-4. 进行高质量的文风迁移
+    DEFAULT_SYSTEM_PROMPT = (
+        "Analyze academic style and rewrite text conservatively while preserving "
+        "claims, evidence, and citations."
+    )
 
-请严格按照要求输出分析结果。"""
-    
-    def __init__(self, api_provider: str = "qwen", test_mode: bool = True):
-        """
-        初始化文风分析与迁移模块
-        
-        Args:
-            api_provider: API提供商
-            test_mode: 测试模式标志
-        """
+    def __init__(
+        self,
+        api_provider: str = "qwen",
+        test_mode: bool = True,
+        backend: Optional[str] = None,
+        model: Optional[str] = None,
+    ):
         self.api_provider = api_provider
         self.test_mode = test_mode
+        self.backend = backend
+        self.model = model
         self.llm_client = None
-        
-        self.provider_mapping = {
-            'qwen': 'dashscope',
-            'minimax': 'minimax',
-            'gemini': 'custom',
-            'chatgpt': 'openai'
-        }
-        
-        self.analyzed_styles = {}
-    
-    def _init_llm_client(self):
-        """初始化LLM客户端"""
-        if self.test_mode:
-            return None
-            
-        if self.llm_client is None:
-            provider = self.provider_mapping.get(self.api_provider, 'dashscope')
-            
-            config = self._create_provider_config(provider)
-            self.llm_client = create_llm_client(config)
-    
-    def _create_provider_config(self, provider: str) -> Dict[str, Any]:
-        """创建provider配置字典"""
-        configs = {
-            'dashscope': {
-                'provider': 'dashscope',
-                'model': 'qwen-turbo',
-                'api_key': os.getenv('DASHSCOPE_API_KEY'),
-                'base_url': 'https://dashscope.aliyuncs.com/api/v1'
-            },
-            'minimax': {
-                'provider': 'minimax',
-                'model': 'abab6-chat',
-                'api_key': os.getenv('MINIMAX_API_KEY'),
-                'base_url': 'https://api.minimax.chat/v1'
-            },
-            'openai': {
-                'provider': 'openai',
-                'model': 'gpt-4',
-                'api_key': os.getenv('OPENAI_API_KEY'),
-                'base_url': None
+        self.analyzed_styles: Dict[str, Dict[str, Any]] = {}
+        self._task_manager: Optional[TaskManager] = None
+
+    def _get_task_manager(self) -> TaskManager:
+        if self._task_manager is None:
+            self._task_manager = TaskManager(mode="api", provider=self.api_provider)
+        return self._task_manager
+
+    def _init_llm_client(self) -> TaskManager:
+        """Compatibility shim for older callers."""
+
+        self.llm_client = self._get_task_manager()
+        return self.llm_client
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        task_options = self._get_task_manager().get_task_options("style_transfer")
+        task_options.update(
+            {
+                "module": "StyleTransfer",
+                "task": "style_transfer",
+                "output_type": "style_transfer",
+                "test_mode": self.test_mode,
+                "legacy_methods": [
+                    "analyze_style_matrix",
+                    "transfer_style",
+                    "transfer_style_result",
+                    "few_shot_style_imitation",
+                ],
+                "fallback_order": ["llm_api", "local_llm", "script", "skill", "mcp"],
+                "quality_signals": [
+                    "empty_input",
+                    "empty_output",
+                    "fallback_backend",
+                    "low_confidence",
+                    "suspicious_length_change",
+                    "aggressive_rewrite_risk",
+                ],
             }
+        )
+        return task_options
+
+    def analyze_style_matrix(self, text: str, author_name: Optional[str] = None) -> Dict[str, Any]:
+        """Produce a stable local style matrix."""
+
+        sentence_structure = self.extract_sentence_patterns(text)
+        vocabulary_profile = self.extract_vocabulary_profile(text)
+        tone_narrative = self.analyze_tone_narrative(text)
+        rhetorical_patterns = self.analyze_rhetorical_patterns(text)
+
+        analysis = {
+            "sentence_structure": sentence_structure,
+            "vocabulary_choices": vocabulary_profile,
+            "tone_narrative": tone_narrative,
+            "rhetorical_patterns": rhetorical_patterns,
+            "overall_style_summary": self._build_style_summary(
+                author_name,
+                sentence_structure,
+                vocabulary_profile,
+                tone_narrative,
+                rhetorical_patterns,
+            ),
         }
-        
-        return configs.get(provider, configs['dashscope'])
-    
-    def analyze_style_matrix(self, text: str, 
-                            author_name: Optional[str] = None) -> Dict[str, Any]:
-        """
-        构建文风矩阵分析
-        
-        Args:
-            text: 待分析的文本
-            author_name: 作者名称（可选）
-            
-        Returns:
-            dict: 文风矩阵分析结果
-        """
-        if self.test_mode:
-            return self._analyze_style_matrix_mock(text, author_name)
-        
-        self._init_llm_client()
-        
-        prompt = f"""请分析以下文本的文风矩阵，从四个维度进行深度分析：
-
-【分析维度】
-1. 句法结构（Sentence structure）
-   - 节奏剖析：长短句交替的起伏节奏
-   - 语态频率：主动语态vs被动语态
-   - 句式习惯：复杂句式、从句嵌套等
-
-2. 词汇深度与选择（Vocabulary choices）
-   - 术语偏好：高频学术术语
-   - 词源倾向：古汉语词、日文借词、文言句式
-   - 选词特点：书面语vs口语
-
-3. 语气与叙事声音（Tone and narrative voice）
-   - 叙事视角：客观抽离vs主观介入
-   - 情感色彩：冷峻vs热情
-   - 批判性：强烈批判vs温和建议
-
-4. 学术修辞机制（Rhetorical mechanisms）
-   - 修辞偏好：比喻、排比、对比等
-   - 逻辑关节：过渡词、因果连词
-   - 论证模式：归纳vs演绎
-
-{'【目标作者】' + author_name if author_name else '【分析文本】'}
-{text[:5000]}
-
-请以JSON格式输出：
-{{
-    "sentence_structure": {{
-        "rhythm_analysis": "节奏分析描述",
-        "voice_frequency": {{"active": 百分比, "passive": 百分比}},
-        "sentence_patterns": ["句式特征列表"],
-        "examples": ["原文例句"]
-    }},
-    "vocabulary_choices": {{
-        "term_preferences": ["高频术语"],
-        "etymology_tendency": "词源倾向描述",
-        "register": "语域描述",
-        "examples": ["原文例句"]
-    }},
-    "tone_narrative": {{
-        "narrative_perspective": "叙事视角描述",
-        "emotional_color": "情感色彩描述",
-        "critical_stance": "批判立场描述",
-        "examples": ["原文例句"]
-    }},
-    "rhetorical_patterns": {{
-        "rhetorical_preferences": ["修辞偏好"],
-        "logical_connectors": ["逻辑连接词"],
-        "argumentation_mode": "论证模式描述",
-        "examples": ["原文例句"]
-    }},
-    "overall_style_summary": "整体风格画像（100-200字）"
-}}"""
-        
-        response = self._call_llm(prompt)
-        
-        try:
-            analysis = json.loads(response)
-            
-            if author_name:
-                self.analyzed_styles[author_name] = analysis
-            
-            return analysis
-        except json.JSONDecodeError:
-            return self._parse_style_matrix_from_text(response)
-    
-    def extract_sentence_patterns(self, text: str) -> Dict[str, Any]:
-        """
-        提取句法结构特征
-        
-        Args:
-            text: 待分析的文本
-            
-        Returns:
-            dict: 句法结构特征
-        """
-        sentences = self._split_sentences(text)
-        
-        sentence_lengths = [len(s) for s in sentences]
-        
-        avg_length = sum(sentence_lengths) / len(sentence_lengths) if sentences else 0
-        
-        active_count = len(re.findall(r'[^\s]+(?:が|は|を|に)[^\s]+(?:が|を|に|で)[^\s]+[^\s]+', text))
-        passive_count = len(re.findall(r'[^\s]+(?:れた|られる|される)', text))
-        
-        total_verbs = active_count + passive_count
-        active_ratio = active_count / total_verbs if total_verbs > 0 else 0.5
-        passive_ratio = passive_count / total_verbs if total_verbs > 0 else 0
-        
-        complex_sentences = len(re.findall(r'[,，][^,，]*[,，][^,，]*[,，]', text))
-        
-        long_sentences = [s for s in sentences if len(s) > 50]
-        short_sentences = [s for s in sentences if len(s) <= 20]
-        
-        return {
-            'average_length': avg_length,
-            'voice_distribution': {
-                'active': active_ratio,
-                'passive': passive_ratio
-            },
-            'complex_sentences_count': complex_sentences,
-            'long_sentences_ratio': len(long_sentences) / len(sentences) if sentences else 0,
-            'short_sentences_ratio': len(short_sentences) / len(sentences) if sentences else 0,
-            'sample_sentences': {
-                'long': long_sentences[:3] if long_sentences else [],
-                'short': short_sentences[:3] if short_sentences else []
-            }
-        }
-    
-    def extract_vocabulary_profile(self, text: str) -> Dict[str, Any]:
-        """
-        提取词汇选择特征
-        
-        Args:
-            text: 待分析的文本
-            
-        Returns:
-            dict: 词汇选择特征
-        """
-        words = self._tokenize(text)
-        
-        word_freq = {}
-        for word in words:
-            if len(word) > 1:
-                word_freq[word] = word_freq.get(word, 0) + 1
-        
-        sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
-        top_words = sorted_words[:50]
-        
-        classical_chinese = len(re.findall(r'[之乎者也焉哉]', text))
-        total_chars = len(text)
-        classical_ratio = classical_chinese / total_chars if total_chars > 0 else 0
-        
-        academic_terms = self._identify_academic_terms(text)
-        
-        informal_words = ['大概', '可能', '好像', '我觉得', '其实']
-        informal_count = sum(1 for word in informal_words if word in text)
-        
-        formal_ratio = 1 - (informal_count / len(words)) if words else 1
-        
-        return {
-            'top_frequency_words': top_words,
-            'classical_ratio': classical_ratio,
-            'academic_terms': academic_terms,
-            'formality_score': formal_ratio,
-            'estimated_register': 'formal' if formal_ratio > 0.7 else 'semi-formal' if formal_ratio > 0.4 else 'informal'
-        }
-    
-    def analyze_tone_narrative(self, text: str) -> Dict[str, Any]:
-        """
-        分析语气与叙事声音
-        
-        Args:
-            text: 待分析的文本
-            
-        Returns:
-            dict: 语气与叙事特征
-        """
-        subjective_markers = ['我认为', '我觉得', '在我看来', '不言而喻', '毫无疑问']
-        objective_markers = ['研究表明', '数据显示', '根据', '客观上', '事实上']
-        
-        subjective_count = sum(1 for marker in subjective_markers if marker in text)
-        objective_count = sum(1 for marker in objective_markers if marker in text)
-        
-        if subjective_count > objective_count:
-            narrative_perspective = 'subjective'
-            perspective_description = '以主观视角为主'
-        elif objective_count > subjective_count:
-            narrative_perspective = 'objective'
-            perspective_description = '以客观视角为主'
-        else:
-            narrative_perspective = 'mixed'
-            perspective_description = '主客观结合'
-        
-        emotional_markers = ['令人', '可惜', '遗憾', '值得', '应该']
-        emotional_count = sum(1 for marker in emotional_markers if marker in text)
-        
-        if emotional_count > 5:
-            emotional_color = 'emotional'
-        elif emotional_count > 2:
-            emotional_color = 'moderate'
-        else:
-            emotional_color = 'restrained'
-        
-        critical_markers = ['批判', '反对', '质疑', '错误', '不足', '然而']
-        supportive_markers = ['赞同', '肯定', '支持', '正确', '合理']
-        
-        critical_count = sum(1 for marker in critical_markers if marker in text)
-        supportive_count = sum(1 for marker in supportive_markers if marker in text)
-        
-        if critical_count > supportive_count:
-            critical_stance = 'critical'
-        elif supportive_count > critical_count:
-            critical_stance = 'supportive'
-        else:
-            critical_stance = 'balanced'
-        
-        return {
-            'narrative_perspective': narrative_perspective,
-            'perspective_description': perspective_description,
-            'emotional_color': emotional_color,
-            'emotional_markers_count': emotional_count,
-            'critical_stance': critical_stance,
-            'argumentation_balance': critical_count - supportive_count
-        }
-    
-    def analyze_rhetorical_patterns(self, text: str) -> Dict[str, Any]:
-        """
-        分析学术修辞机制
-        
-        Args:
-            text: 待分析的文本
-            
-        Returns:
-            dict: 修辞模式特征
-        """
-        metaphor_patterns = [
-            r'如同.+一样',
-            r'犹如.+一般', 
-            r'仿佛.+似的',
-            r'像.+那样'
-        ]
-        
-        metaphor_count = 0
-        for pattern in metaphor_patterns:
-            metaphor_count += len(re.findall(pattern, text))
-        
-        parallelism_patterns = [
-            r'[^，。]+[,，][^，。]+[,，][^，。]+',
-            r'不但.+而且.+',
-            r'既.+又.+'
-        ]
-        
-        parallelism_count = 0
-        for pattern in parallelism_patterns:
-            parallelism_count += len(re.findall(pattern, text))
-        
-        comparison_patterns = [
-            r'.+与.+不同',
-            r'.+相比',
-            r'然而.+则.+',
-            r'反观.+'
-        ]
-        
-        comparison_count = 0
-        for pattern in comparison_patterns:
-            comparison_count += len(re.findall(pattern, text))
-        
-        logical_connectors = {
-            'cause': ['因为', '由于', '所以', '因此'],
-            'contrast': ['然而', '但是', '不过', '然而'],
-            'addition': ['此外', '并且', '同时', '再者'],
-            'conclusion': ['总之', '综上所述', '简言之', '由此可见']
-        }
-        
-        connector_usage = {}
-        for category, connectors in logical_connectors.items():
-            count = sum(1 for conn in connectors if conn in text)
-            connector_usage[category] = count
-        
-        if metaphor_count > 3:
-            rhetorical_preference = 'metaphor-heavy'
-        elif parallelism_count > 2:
-            rhetorical_preference = 'parallelism-heavy'
-        elif comparison_count > 2:
-            rhetorical_preference = 'comparison-heavy'
-        else:
-            rhetorical_preference = 'logical-argumentation'
-        
-        return {
-            'metaphor_count': metaphor_count,
-            'parallelism_count': parallelism_count,
-            'comparison_count': comparison_count,
-            'rhetorical_preference': rhetorical_preference,
-            'logical_connectors': connector_usage,
-            'argumentation_mode': 'inductive' if connector_usage['cause']['count'] > connector_usage['conclusion']['count'] else 'deductive'
-        }
-    
-    def transfer_style(self, text: str, 
-                      style_matrix: Dict[str, Any]) -> str:
-        """
-        基于文风矩阵进行文本改写
-        
-        Args:
-            text: 待改写的文本
-            style_matrix: 目标文风矩阵
-            
-        Returns:
-            str: 改写后的文本
-        """
-        if self.test_mode:
-            return self._transfer_style_mock(text, style_matrix)
-        
-        self._init_llm_client()
-        
-        style_description = self._format_style_matrix_for_prompt(style_matrix)
-        
-        prompt = f"""请将以下文本改写成目标文风。
-
-【待改写文本】
-{text}
-
-【目标文风要求】
-{style_description}
-
-【输出要求】
-直接输出改写后的文本，保持专业度，无需输出任何解释或分析过程。"""
-        
-        return self._call_llm(prompt)
-    
-    def few_shot_style_imitation(self, text: str,
-                                reference_examples: List[Tuple[str, str]],
-                                author_name: Optional[str] = None) -> str:
-        """
-        少样本文风模仿
-        
-        Args:
-            text: 待模仿的文本
-            reference_examples: 参考示例列表 [(原文, 目标风格文)...]
-            author_name: 作者名称
-            
-        Returns:
-            str: 模仿目标文风的文本
-        """
-        if self.test_mode:
-            return self._few_shot_mock(text, reference_examples)
-        
-        self._init_llm_client()
-        
-        examples_text = "\n\n".join([
-            f"【示例 {i+1}】\n原文：{orig}\n目标风格：{target}"
-            for i, (orig, target) in enumerate(reference_examples)
-        ])
-        
-        prompt = f"""请参考以下示例，学习并模仿目标文风来改写文本。
-
-{examples_text}
-
-【待改写文本】
-{text}
-
-请直接输出改写后的文本，保持专业度，无需输出任何解释。"""
-        
-        response = self._call_llm(prompt)
-        
-        if author_name and author_name not in self.analyzed_styles:
-            analysis = self.analyze_style_matrix(
-                '\n'.join([orig for orig, _ in reference_examples]),
-                author_name
-            )
-        
-        return response
-    
-    def batch_style_analysis(self, documents: List[Dict[str, str]]) -> List[Dict[str, Any]]:
-        """
-        批量分析多个文档的文风
-        
-        Args:
-            documents: 文档列表，每项包含text和author
-            
-        Returns:
-            list: 分析结果列表
-        """
-        results = []
-        
-        for doc in documents:
-            text = doc.get('text', '')
-            author = doc.get('author')
-            
-            analysis = self.analyze_style_matrix(text, author)
-            
-            results.append({
-                'author': author,
-                'analysis': analysis,
-                'text_length': len(text)
-            })
-        
-        return results
-    
-    def compare_styles(self, style1: Dict[str, Any], 
-                      style2: Dict[str, Any],
-                      style1_name: str = 'Style 1',
-                      style2_name: str = 'Style 2') -> Dict[str, Any]:
-        """
-        对比两种文风
-        
-        Args:
-            style1: 第一种文风矩阵
-            style2: 第二种文风矩阵
-            style1_name: 第一种文风名称
-            style2_name: 第二种文风名称
-            
-        Returns:
-            dict: 对比分析结果
-        """
-        comparison = {
-            'styles': {
-                style1_name: style1,
-                style2_name: style2
-            },
-            'similarities': [],
-            'differences': []
-        }
-        
-        if style1.get('overall_style_summary') and style2.get('overall_style_summary'):
-            summary1 = style1['overall_style_summary'][:100]
-            summary2 = style2['overall_style_summary'][:100]
-            
-            common_words = set(summary1.split()) & set(summary2.split())
-            if len(common_words) > 5:
-                comparison['similarities'].append(f"都注重学术性论述")
-            
-            if summary1 != summary2:
-                comparison['differences'].append(f"整体风格定位不同")
-        
-        return comparison
-    
-    def _call_llm(self, prompt: str) -> str:
-        """调用LLM API"""
-        try:
-            full_prompt = f"{self.DEFAULT_SYSTEM_PROMPT}\n\n{prompt}"
-            result = self.llm_client._call_llm(full_prompt, temperature=0.3)
-            return result.get('content', '')
-        except Exception as e:
-            raise RuntimeError(f"LLM API调用失败: {str(e)}")
-    
-    def _split_sentences(self, text: str) -> List[str]:
-        """分割句子"""
-        return [s.strip() for s in re.split(r'[。！？；\n]+', text) if s.strip()]
-    
-    def _tokenize(self, text: str) -> List[str]:
-        """简单分词"""
-        return re.findall(r'[\u4e00-\u9fff]+|[a-zA-Z]+', text)
-    
-    def _identify_academic_terms(self, text: str) -> List[str]:
-        """识别学术术语"""
-        academic_suffixes = ['论', '主义', '性', '化', '度', '感']
-        
-        terms = []
-        for suffix in academic_suffixes:
-            pattern = rf'[\u4e00-\u9fff]{{2,}}{suffix}'
-            matches = re.findall(pattern, text)
-            terms.extend(matches[:5])
-        
-        return list(set(terms))[:20]
-    
-    def _format_style_matrix_for_prompt(self, style_matrix: Dict[str, Any]) -> str:
-        """格式化文风矩阵为提示词"""
-        lines = []
-        
-        for dimension, analysis in style_matrix.items():
-            if dimension == 'overall_style_summary':
-                continue
-            
-            lines.append(f"\n【{dimension}】")
-            
-            if isinstance(analysis, dict):
-                for key, value in analysis.items():
-                    if isinstance(value, list):
-                        lines.append(f"- {key}: {', '.join(value[:3])}")
-                    else:
-                        lines.append(f"- {key}: {value}")
-            elif isinstance(analysis, str):
-                lines.append(f"- {analysis}")
-        
-        if 'overall_style_summary' in style_matrix:
-            lines.append(f"\n【整体风格】")
-            lines.append(style_matrix['overall_style_summary'])
-        
-        return '\n'.join(lines)
-    
-    def _parse_style_matrix_from_text(self, text: str) -> Dict[str, Any]:
-        """从文本中解析文风矩阵"""
-        return {
-            'sentence_structure': {'analysis': '基于文本分析得出'},
-            'vocabulary_choices': {'analysis': '基于词汇统计得出'},
-            'tone_narrative': {'analysis': '基于语气标记得出'},
-            'rhetorical_patterns': {'analysis': '基于修辞识别得出'},
-            'overall_style_summary': text[:200]
-        }
-    
-    def _analyze_style_matrix_mock(self, text: str, 
-                                 author_name: Optional[str]) -> Dict[str, Any]:
-        """模拟文风矩阵分析"""
-        mock_analysis = {
-            'sentence_structure': {
-                'rhythm_analysis': '以长句为主，节奏沉稳有力',
-                'voice_frequency': {'active': 0.7, 'passive': 0.3},
-                'sentence_patterns': [
-                    '善用复合从句构建严密论证',
-                    '长短句交替形成节奏感',
-                    '偏好使用书面语句式'
-                ],
-                'examples': [
-                    '在明治维新之后，日本社会经历了深刻的变革。',
-                    '这一现象反映了深层次的文化转型。'
-                ]
-            },
-            'vocabulary_choices': {
-                'term_preferences': [
-                    '文明', '实学', '独立', '开化', '道理', '西洋'
-                ],
-                'etymology_tendency': '倾向于使用和制汉语和明治时期的学术用语',
-                'register': '正式书面语',
-                'examples': [
-                    '文明开化',
-                    '独立自尊',
-                    '实学精神'
-                ]
-            },
-            'tone_narrative': {
-                'narrative_perspective': '研究者视角，客观理性',
-                'emotional_color': '克制冷静，偶有批判锋芒',
-                'critical_stance': '批判性强，尤其对封建残余和虚伪道德',
-                'examples': [
-                    '必须指出，这种观点存在根本性的误解。',
-                    '从历史事实来看，情况恰恰相反。'
-                ]
-            },
-            'rhetorical_patterns': {
-                'rhetorical_preferences': [
-                    '对比论证',
-                    '举例说明',
-                    '因果推演'
-                ],
-                'logical_connectors': [
-                    '然而', '因此', '此外', '综上所述'
-                ],
-                'argumentation_mode': '演绎为主，辅以归纳',
-                'examples': [
-                    '不仅...而且...',
-                    '既...又...'
-                ]
-            },
-            'overall_style_summary': f"""本段文本体现了典型的明治时期学术写作风格：文风严谨而不失锋芒，论述逻辑严密，语言典雅庄重。善用对比手法凸显论点，对封建思想持批判态度，同时积极倡导文明开化之道。整体呈现出启蒙思想家的使命感和社会关怀。"""
-        }
-        
         if author_name:
-            self.analyzed_styles[author_name] = mock_analysis
-        
-        return mock_analysis
-    
-    def _transfer_style_mock(self, text: str, 
-                            style_matrix: Dict[str, Any]) -> str:
-        """模拟文风迁移"""
-        summary = style_matrix.get('overall_style_summary', '')
-        
-        if '明治' in summary or '启蒙' in summary:
-            return f"""明治时代之学术，其要义在于严谨与务实并行。今观此文本，当以实学之精神，重构其论述之框架。
+            self.analyzed_styles[author_name] = analysis
+        return analysis
 
-夫学问之道，贵在切合实际，不尚空谈。文中所论，虽有一定之理，然未免过于直白，缺乏论证之深度。
+    def extract_sentence_patterns(self, text: str) -> Dict[str, Any]:
+        sentences = self._split_sentences(text)
+        lengths = [len(sentence) for sentence in sentences]
+        average_length = round(sum(lengths) / len(lengths), 2) if lengths else 0.0
+        long_ratio = round(sum(1 for length in lengths if length >= 60) / len(lengths), 3) if lengths else 0.0
+        short_ratio = round(sum(1 for length in lengths if length <= 20) / len(lengths), 3) if lengths else 0.0
+        connectors = re.findall(r"(therefore|however|moreover|thus|hence|因此|然而|同时|此外)", text, re.IGNORECASE)
+        return {
+            "average_length": average_length,
+            "long_sentences_ratio": long_ratio,
+            "short_sentences_ratio": short_ratio,
+            "connector_density": round(len(connectors) / max(len(sentences), 1), 2),
+            "sample_sentences": sentences[:3],
+        }
 
-若以此法为之，则当：先述其事，后明其理，终指其用。庶几可以成一家之言，而有益于世道人心也。"""
-        
-        return f"""基于文风分析，对原文进行如下改写：
+    def extract_vocabulary_profile(self, text: str) -> Dict[str, Any]:
+        tokens = self._tokenize(text)
+        frequencies: Dict[str, int] = {}
+        for token in tokens:
+            if len(token) < 2:
+                continue
+            frequencies[token] = frequencies.get(token, 0) + 1
+        top_terms = sorted(frequencies.items(), key=lambda item: item[1], reverse=True)[:10]
+        academic_terms = self._identify_academic_terms(text)
+        return {
+            "top_frequency_words": top_terms,
+            "academic_terms": academic_terms[:10],
+            "estimated_register": "formal" if len(academic_terms) >= 3 else "semi-formal",
+            "token_count": len(tokens),
+        }
 
-{text}
+    def analyze_tone_narrative(self, text: str) -> Dict[str, Any]:
+        subjective_markers = ["I argue", "I suggest", "我认为", "笔者认为", "in my view"]
+        objective_markers = ["research shows", "evidence indicates", "研究表明", "资料显示", "the evidence suggests"]
+        critical_markers = ["however", "problematic", "insufficient", "然而", "不足", "值得商榷"]
 
-（以上为模拟改写结果）"""
-    
-    def _few_shot_mock(self, text: str,
-                      reference_examples: List[Tuple[str, str]]) -> str:
-        """模拟少样本学习"""
-        return f"""参考{len(reference_examples)}个示例，完成文风模仿：
+        subjective_count = sum(text.count(marker) for marker in subjective_markers)
+        objective_count = sum(text.count(marker) for marker in objective_markers)
+        critical_count = sum(text.count(marker) for marker in critical_markers)
 
-【待改写文本】
-{text}
+        if objective_count > subjective_count:
+            perspective = "objective"
+        elif subjective_count > objective_count:
+            perspective = "subjective"
+        else:
+            perspective = "mixed"
 
-【改写结果】
-经分析参考示例的文风特征，现按照目标风格进行改写：
+        return {
+            "narrative_perspective": perspective,
+            "critical_stance": "critical" if critical_count > 1 else "measured",
+            "emotional_color": "restrained",
+            "subjective_markers_count": subjective_count,
+            "objective_markers_count": objective_count,
+        }
 
-近代战争不仅是战场上的厮杀，更是交战各方国力及动员能力的较量。在战争爆发初期，政府就巨额军费的筹措，有捐款说、内债说和外债说等主张。最终内债说上升为国家意志。政府脱离和平时期的财政运作模式，在战争期间超常规地动员财政金融机器为战争筹资。
+    def analyze_rhetorical_patterns(self, text: str) -> Dict[str, Any]:
+        comparison_markers = re.findall(r"(compared with|in contrast|whereas|相比之下|相反|与此同时)", text, re.IGNORECASE)
+        causal_markers = re.findall(r"(because|therefore|thus|hence|因为|因此|由此可见)", text, re.IGNORECASE)
+        listing_markers = re.findall(r"(first,|second,|finally,|首先|其次|最后)", text, re.IGNORECASE)
+        preference = "logical-argumentation"
+        if comparison_markers:
+            preference = "comparison-heavy"
+        elif listing_markers:
+            preference = "enumerative"
+        return {
+            "rhetorical_preference": preference,
+            "logical_connectors": {
+                "comparison": len(comparison_markers),
+                "causal": len(causal_markers),
+                "listing": len(listing_markers),
+            },
+            "argumentation_mode": "deductive" if len(causal_markers) >= len(comparison_markers) else "comparative",
+        }
 
-（有学者认为，因财界及民间无私地支援战争，日本才成功地筹集到战争所需经费；此说过分强调感情因素的作用，忽视了政府的财政金融操作才是顺利实现军费筹措的根本。）"""
+    def transfer_style(
+        self,
+        text: str,
+        style_matrix: Optional[Dict[str, Any]] = None,
+        *,
+        target_style: Optional[str] = None,
+        style_reference: str = "",
+        **kwargs: Any,
+    ) -> str:
+        """Return rewritten text for backward compatibility."""
+
+        result = self.transfer_style_result(
+            text,
+            style_matrix=style_matrix,
+            target_style=target_style,
+            style_reference=style_reference,
+            **kwargs,
+        )
+        return result.get("rewritten_text") or text
+
+    def transfer_style_result(
+        self,
+        text: str,
+        style_matrix: Optional[Dict[str, Any]] = None,
+        *,
+        target_style: Optional[str] = None,
+        style_reference: str = "",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Execute style transfer and return unified metadata."""
+
+        resolved_target_style = target_style or self._resolve_target_style(style_matrix, style_reference)
+        backend = kwargs.get("backend", self.backend)
+        fallback_backends = kwargs.get("fallback_backends")
+        if fallback_backends is None:
+            fallback_backends = ["local_llm", "script"]
+        if self.test_mode and not backend:
+            backend = "script"
+            fallback_backends = []
+
+        response = self._get_task_manager().style_transfer(
+            text=text,
+            target_style=resolved_target_style,
+            provider=kwargs.get("provider", self.api_provider),
+            model=kwargs.get("model", self.model),
+            backend=backend,
+            fallback_backends=list(fallback_backends),
+            temperature=kwargs.get("temperature", 0.2),
+            max_tokens=kwargs.get("max_tokens", 4000),
+        )
+        payload = response.get("data", {}) if response.get("success") else {}
+        rewritten_text = payload.get("rewritten_text") or text
+        return {
+            "rewritten_text": rewritten_text,
+            "style_analysis": payload.get("style_analysis") or style_matrix or {},
+            "target_style": resolved_target_style,
+            "backend": response.get("backend") or response.get("metadata", {}).get("backend"),
+            "provider": response.get("metadata", {}).get("provider", self.api_provider),
+            "model": response.get("metadata", {}).get("model", self.model),
+            "confidence": payload.get("confidence", 0.7 if rewritten_text != text else 0.55),
+            "needs_review": bool(payload.get("needs_review", False)),
+        }
+
+    def transfer_style_package(
+        self,
+        text: str,
+        style_matrix: Optional[Dict[str, Any]] = None,
+        *,
+        target_style: Optional[str] = None,
+        style_reference: str = "",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Transfer style and return a `style_transfer` envelope."""
+
+        result = self.transfer_style_result(
+            text,
+            style_matrix=style_matrix,
+            target_style=target_style,
+            style_reference=style_reference,
+            **kwargs,
+        )
+        flags = self._package_quality_flags(text, result)
+        return {
+            "type": "style_transfer",
+            "schema_version": "2026-04-25",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "source": kwargs.get("source", "polished_draft"),
+            "original_text": text,
+            "rewritten_text": result.get("rewritten_text", text),
+            "style_analysis": result.get("style_analysis", {}),
+            "target_style": result.get("target_style") or target_style or "academic history prose",
+            "backend": result.get("backend") or ("script" if self.test_mode else self.backend),
+            "provider": result.get("provider", self.api_provider),
+            "model": result.get("model", self.model),
+            "confidence": self._package_confidence(result, flags),
+            "needs_review": bool(flags) or bool(result.get("needs_review")),
+            "quality_flags": flags,
+            "statistics": {
+                "original_chars": len(text or ""),
+                "rewritten_chars": len(result.get("rewritten_text", "") or ""),
+                "style_dimension_count": len(result.get("style_analysis", {}) or {}),
+            },
+            "capabilities": self.get_capabilities(),
+        }
+
+    def few_shot_style_imitation(
+        self,
+        text: str,
+        reference_examples: List[Tuple[str, str]],
+        author_name: Optional[str] = None,
+        **kwargs: Any,
+    ) -> str:
+        """Learn a target style from a few examples and rewrite the text."""
+
+        reference_targets = [target for _, target in reference_examples if target.strip()]
+        if reference_targets:
+            style_reference = "\n\n".join(reference_targets[:3])
+        else:
+            style_reference = author_name or "academic history prose"
+        return self.transfer_style(
+            text,
+            target_style=author_name or "few-shot style imitation",
+            style_reference=style_reference,
+            **kwargs,
+        )
+
+    def batch_style_analysis(self, documents: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+        results = []
+        for document in documents:
+            text = document.get("text", "")
+            author = document.get("author")
+            results.append(
+                {
+                    "author": author,
+                    "analysis": self.analyze_style_matrix(text, author),
+                    "text_length": len(text),
+                }
+            )
+        return results
+
+    def compare_styles(
+        self,
+        style1: Dict[str, Any],
+        style2: Dict[str, Any],
+        style1_name: str = "Style 1",
+        style2_name: str = "Style 2",
+    ) -> Dict[str, Any]:
+        similarities: List[str] = []
+        differences: List[str] = []
+
+        register1 = style1.get("vocabulary_choices", {}).get("estimated_register")
+        register2 = style2.get("vocabulary_choices", {}).get("estimated_register")
+        if register1 == register2:
+            similarities.append(f"Both styles use a {register1} register.")
+        else:
+            differences.append(f"Register differs: {style1_name}={register1}, {style2_name}={register2}.")
+
+        perspective1 = style1.get("tone_narrative", {}).get("narrative_perspective")
+        perspective2 = style2.get("tone_narrative", {}).get("narrative_perspective")
+        if perspective1 == perspective2:
+            similarities.append(f"Both styles share a {perspective1} narrative perspective.")
+        else:
+            differences.append(
+                f"Narrative perspective differs: {style1_name}={perspective1}, {style2_name}={perspective2}."
+            )
+
+        rhetoric1 = style1.get("rhetorical_patterns", {}).get("rhetorical_preference")
+        rhetoric2 = style2.get("rhetorical_patterns", {}).get("rhetorical_preference")
+        if rhetoric1 == rhetoric2:
+            similarities.append(f"Both styles prefer {rhetoric1}.")
+        else:
+            differences.append(f"Rhetorical preference differs: {style1_name}={rhetoric1}, {style2_name}={rhetoric2}.")
+
+        return {
+            "styles": {
+                style1_name: style1,
+                style2_name: style2,
+            },
+            "similarities": similarities,
+            "differences": differences,
+        }
+
+    def _resolve_target_style(
+        self,
+        style_matrix: Optional[Dict[str, Any]],
+        style_reference: str,
+    ) -> str:
+        if style_reference.strip():
+            return style_reference.strip()[:500]
+        if style_matrix and style_matrix.get("overall_style_summary"):
+            return str(style_matrix["overall_style_summary"])
+        return "academic history prose"
+
+    def _split_sentences(self, text: str) -> List[str]:
+        return [part.strip() for part in re.split(r"[。！？!?]\s*|\n+", text) if part.strip()]
+
+    def _tokenize(self, text: str) -> List[str]:
+        return re.findall(r"[A-Za-z][A-Za-z\-']+|[\u4e00-\u9fff]{2,}", text)
+
+    def _identify_academic_terms(self, text: str) -> List[str]:
+        candidates = [
+            "historiography",
+            "methodology",
+            "archive",
+            "evidence",
+            "discourse",
+            "史料",
+            "论证",
+            "方法论",
+            "研究史",
+            "档案",
+            "史学",
+        ]
+        return [term for term in candidates if term.lower() in text.lower()]
+
+    def _build_style_summary(
+        self,
+        author_name: Optional[str],
+        sentence_structure: Dict[str, Any],
+        vocabulary_profile: Dict[str, Any],
+        tone_narrative: Dict[str, Any],
+        rhetorical_patterns: Dict[str, Any],
+    ) -> str:
+        author_label = author_name or "The style"
+        return (
+            f"{author_label} favors {vocabulary_profile.get('estimated_register', 'formal')} diction, "
+            f"an {tone_narrative.get('narrative_perspective', 'mixed')} narrative perspective, "
+            f"average sentence length around {sentence_structure.get('average_length', 0)}, and "
+            f"{rhetorical_patterns.get('rhetorical_preference', 'logical-argumentation')} argumentation."
+        )
+
+    def _package_quality_flags(self, original_text: str, result: Dict[str, Any]) -> List[str]:
+        flags = []
+        original = original_text or ""
+        rewritten = result.get("rewritten_text", "") or ""
+        if not original.strip():
+            flags.append("empty_input")
+        if original.strip() and not rewritten.strip():
+            flags.append("empty_output")
+        if result.get("backend") in {"script", "fallback"} and not self.test_mode:
+            flags.append("fallback_backend")
+        if result.get("needs_review"):
+            flags.append("backend_review_requested")
+        confidence = result.get("confidence")
+        if isinstance(confidence, (int, float)) and confidence < 0.6:
+            flags.append("low_confidence")
+        if original.strip() and rewritten.strip():
+            ratio = len(rewritten) / max(len(original), 1)
+            if ratio < 0.4 or ratio > 1.8:
+                flags.append("suspicious_length_change")
+            if ratio > 1.4 and result.get("backend") not in {"script", None}:
+                flags.append("aggressive_rewrite_risk")
+        return sorted(set(flags))
+
+    def _package_confidence(self, result: Dict[str, Any], flags: List[str]) -> float:
+        confidence = result.get("confidence")
+        if not isinstance(confidence, (int, float)):
+            confidence = 0.65
+        if "fallback_backend" in flags:
+            confidence -= 0.1
+        if "empty_output" in flags:
+            confidence -= 0.35
+        if "suspicious_length_change" in flags:
+            confidence -= 0.15
+        if "aggressive_rewrite_risk" in flags:
+            confidence -= 0.1
+        if "low_confidence" in flags:
+            confidence = min(confidence, 0.55)
+        return round(max(0.0, min(1.0, float(confidence))), 3)
 
 
-from modules.llm_client import create_llm_client
+def create_style_transfer(api_provider: str = "qwen", test_mode: bool = True, **kwargs: Any) -> StyleTransfer:
+    """Compatibility factory."""
 
-
-def create_style_transfer(api_provider: str = "qwen",
-                         test_mode: bool = True) -> StyleTransfer:
-    """
-    工厂函数：创建文风分析与迁移模块实例
-    
-    Args:
-        api_provider: API提供商
-        test_mode: 是否使用测试模式
-        
-    Returns:
-        StyleTransfer: 配置好的模块实例
-    """
-    return StyleTransfer(api_provider=api_provider, test_mode=test_mode)
+    return StyleTransfer(api_provider=api_provider, test_mode=test_mode, **kwargs)

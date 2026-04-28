@@ -1,0 +1,3 @@
+display_name: History Research Workspace
+short_description: Optimize this workspace with privacy-safe playbooks, task/artifact snapshots, package protocols, validation checks, and small-model backend discipline.
+default_prompt: "Use the historyresearch-workspace skill. Follow the playbooks, inspect TaskManager and ArtifactManager snapshots when aligning interfaces, keep prompts small-model friendly, validate skill structure when changed, update reports and docs, and preserve privacy rules."

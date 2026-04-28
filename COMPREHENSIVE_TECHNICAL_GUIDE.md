@@ -136,10 +136,10 @@ pip install -r requirements.txt
 # ==================== API密钥配置 ====================
 
 # OpenAI配置（GPT系列）
-OPENAI_API_KEY=sk-your-openai-api-key-here
+OPENAI_API_KEY=OPENAI_API_KEY_PLACEHOLDER
 
 # 阿里云通义千问配置
-DASHSCOPE_API_KEY=sk-your-dashscope-api-key-here
+DASHSCOPE_API_KEY=DASHSCOPE_API_KEY_PLACEHOLDER
 
 # 智谱AI配置（GLM）
 ZHIPU_API_KEY=your-zhipu-api-key-here
@@ -151,7 +151,7 @@ MINIMAX_API_KEY=your-minimax-api-key-here
 VOLCANO_API_KEY=your-volcano-api-key-here
 
 # DeepSeek配置
-DEEPSEEK_API_KEY=sk-your-deepseek-api-key-here
+DEEPSEEK_API_KEY=DEEPSEEK_API_KEY_PLACEHOLDER
 
 # ==================== 本地模型配置 ====================
 
@@ -2745,7 +2745,7 @@ analyzer.export_results(document, "output.json", format='json')
 ```python
 # 提取所有日期区域
 date_regions = analyzer.extract_regions_by_type(
-    document, 
+    document,
     region_type="date"
 )
 
@@ -2795,17 +2795,17 @@ from modules.universal_layout_analyzer import DocumentTypeDetector, DocumentType
 
 class CustomDocumentTypeDetector(DocumentTypeDetector):
     CUSTOM_INDICATORS = ['自定义指标1', '自定义指标2']
-    
+
     @classmethod
     def detect(cls, text_samples):
         all_text = ' '.join(text_samples)
-        
+
         # 自定义检测逻辑
         custom_score = sum(1 for ind in cls.CUSTOM_INDICATORS if ind in all_text)
-        
+
         if custom_score > 2:
             return "custom_type"
-        
+
         return super().detect(text_samples)
 ```
 
@@ -2886,10 +2886,10 @@ API密钥必须存储在`secrets/api_keys.txt`文件中，格式如下：
 # API密钥配置文件
 # 格式: 服务商名称=API密钥
 
-qwen=sk-your-qwen-api-key
-deepseek=sk-your-deepseek-api-key
+qwen=QWEN_API_KEY_PLACEHOLDER
+deepseek=DEEPSEEK_API_KEY_PLACEHOLDER
 zhipu=your-zhipu-api-key
-openai=sk-your-openai-api-key
+openai=OPENAI_API_KEY_PLACEHOLDER
 ```
 
 #### 17.3.2 安全管理器使用
@@ -3394,7 +3394,7 @@ result = manager.execute_with_prompt(
     prompt="""
     请分析以下历史文献的史料价值：
     {text}
-    
+
     评估维度：
     1. 史料来源可靠性
     2. 内容完整程度
@@ -4285,11 +4285,11 @@ class CustomAdapter(DataSourceAdapter):
     def search(self, query: str, limit: int = 10):
         # 实现搜索逻辑
         pass
-    
+
     def get_project_details(self, project_id: str):
         # 实现详情获取
         pass
-    
+
     def download_document(self, url: str, save_path: str):
         # 实现文档下载
         pass
@@ -4355,7 +4355,7 @@ json_data = finder.export_for_other_modules(projects, format='json')
 
 本技术指南涵盖了AItools-for-historyresearch工作区的所有核心功能和使用方法。如有任何疑问，请查阅相关模块的源代码或提交Issue。
 
-**文档版本**：2.5.0  
+**文档版本**：2.5.0
 **更新日期**：2026年4月1日
 
 **本次更新内容**：

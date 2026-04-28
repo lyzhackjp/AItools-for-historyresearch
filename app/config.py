@@ -1,7 +1,51 @@
 import os
 from dotenv import load_dotenv
 
+from modules.secure_api_key_manager import get_secure_key_manager
+
 load_dotenv()
+
+
+_KEY_MANAGER = get_secure_key_manager()
+
+
+def _default_provider() -> str:
+    env_provider = os.getenv('LLM_PROVIDER')
+    if env_provider:
+        return env_provider
+    if _KEY_MANAGER.has_key('qwen'):
+        return 'dashscope'
+    if _KEY_MANAGER.has_key('openai'):
+        return 'openai'
+    if _KEY_MANAGER.has_key('minimax'):
+        return 'minimax'
+    return 'openai'
+
+
+def _default_model(provider: str) -> str:
+    defaults = {
+        'dashscope': 'qwen-turbo',
+        'openai': 'gpt-4',
+        'minimax': 'abab6-chat',
+        'deepseek': 'deepseek-chat',
+        'zhipu': 'glm-4',
+        'volcano': 'doubao-seed-1-8-251228',
+        'ollama': 'llama2',
+    }
+    return os.getenv('LLM_MODEL', defaults.get(provider, 'gpt-4'))
+
+
+def _default_api_key(provider: str):
+    provider_map = {
+        'dashscope': 'qwen',
+        'openai': 'openai',
+        'minimax': 'minimax',
+        'deepseek': 'deepseek',
+        'zhipu': 'zhipu',
+        'volcano': 'volcano',
+    }
+    service = provider_map.get(provider, provider)
+    return _KEY_MANAGER.get_key(service)
 
 
 class Config:
@@ -16,10 +60,11 @@ class Config:
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     os.makedirs(TEMP_DIR, exist_ok=True)
 
+    _provider = _default_provider()
     LLM_CONFIG = {
-        'provider': os.getenv('LLM_PROVIDER', 'openai'),
-        'model': os.getenv('LLM_MODEL', 'gpt-4'),
-        'api_key': os.getenv('OPENAI_API_KEY'),
+        'provider': _provider,
+        'model': _default_model(_provider),
+        'api_key': _default_api_key(_provider),
         'base_url': os.getenv('LLM_BASE_URL'),
         'max_retries': int(os.getenv('LLM_MAX_RETRIES', '3')),
         'retry_delay': float(os.getenv('LLM_RETRY_DELAY', '1'))

@@ -10,6 +10,7 @@ import json
 from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass
 from collections import defaultdict
+from datetime import datetime
 
 
 @dataclass
@@ -96,6 +97,55 @@ class NDLOCRResultProcessor:
                 'visualization_count': len(ocr_result.visualization_paths)
             }
         }
+
+    def process_result_package(self, ocr_result, source_path: Optional[str] = None) -> Dict[str, Any]:
+        """Process an OCR result and return a workflow-ready envelope."""
+        processed = self.process_result(ocr_result)
+        quality_flags = self._package_quality_flags(processed)
+        confidence = self._package_confidence(processed, quality_flags)
+        return {
+            "type": "processed_ocr_result",
+            "source_path": source_path,
+            "success": bool(processed.get("success")),
+            "text": processed.get("processed_text", ""),
+            "structured_data": processed.get("structured_data", {}),
+            "pages": processed.get("pages", []),
+            "statistics": processed.get("statistics", {}),
+            "metadata": processed.get("metadata", {}),
+            "backend": "script",
+            "provider": "ndlocr_result_processor",
+            "model": None,
+            "confidence": confidence,
+            "needs_review": bool(quality_flags),
+            "quality_flags": quality_flags,
+            "error": processed.get("error"),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    def _package_quality_flags(self, processed: Dict[str, Any]) -> List[str]:
+        flags: List[str] = []
+        if not processed.get("success"):
+            flags.append("postprocess_failed")
+        if not (processed.get("processed_text") or "").strip():
+            flags.append("no_processed_text")
+        if not processed.get("pages"):
+            flags.append("no_pages")
+        if processed.get("error"):
+            flags.append("has_error")
+        return flags
+
+    def _package_confidence(self, processed: Dict[str, Any], quality_flags: List[str]) -> float:
+        if not processed.get("success"):
+            return 0.2
+        confidence = 0.76
+        stats = processed.get("statistics", {})
+        if stats.get("total_pages", 0) > 0:
+            confidence += 0.08
+        if stats.get("total_chars", 0) > 0:
+            confidence += 0.06
+        if quality_flags:
+            confidence = min(confidence, 0.64)
+        return round(max(0.1, min(confidence, 0.95)), 2)
 
     def clean_text(self, text: str) -> str:
         """
@@ -404,6 +454,33 @@ class NDLOCRResultProcessor:
             list: 处理结果列表
         """
         return [self.process_result(result) for result in ocr_results]
+
+    def batch_process_package(self, ocr_results: List) -> Dict[str, Any]:
+        """Process many OCR results and return a batch-level envelope."""
+        packages = [self.process_result_package(result) for result in ocr_results]
+        quality_flags = []
+        if not packages:
+            quality_flags.append("no_results")
+        if any(package.get("needs_review") for package in packages):
+            quality_flags.append("result_review_needed")
+        return {
+            "type": "processed_ocr_batch",
+            "result_count": len(packages),
+            "packages": packages,
+            "text": "\n\n".join(package.get("text", "") for package in packages if package.get("text")),
+            "backend": "script",
+            "provider": "ndlocr_result_processor",
+            "model": None,
+            "confidence": round(
+                sum(package.get("confidence", 0.0) for package in packages) / len(packages),
+                2,
+            )
+            if packages
+            else 0.2,
+            "needs_review": bool(quality_flags),
+            "quality_flags": quality_flags,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
 
 
 def create_result_processor(

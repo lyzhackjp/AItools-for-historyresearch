@@ -1,573 +1,479 @@
 """
-逆向大纲审视器模块
+Reverse outline analysis facade.
 
-用于分析论文草稿的逻辑链、各部分比重等，实现逆向审视
-是学术写作辅助的核心工具之一
-
-核心功能：
-- 篇幅分析：各部分字数统计、比例失衡检测
-- 逻辑链分析：论点提取、逻辑关系识别、断层检测
-- 注意力集中度分析：核心论点识别、偏离检测
-- 修订建议生成：综合分析结果生成改进建议
-
-使用方法：
-    from modules.reverse_outline_analyzer import ReverseOutlineAnalyzer
-    
-    analyzer = ReverseOutlineAnalyzer()
-    result = analyzer.analyze(paper_text)
+The analyzer keeps a stable local heuristic fallback while exposing the same
+multi-backend capability surface as the unified task layer.
 """
 
+from __future__ import annotations
+
 import re
-import json
-from typing import Dict, List, Optional, Any, Tuple
-from pathlib import Path
-from collections import Counter
+from datetime import datetime
+from typing import Any, Dict, List, Optional
 
-try:
-    from prompts.prompt_loader import PromptLoader, PromptTemplate
-    PROMPT_LOADER_AVAILABLE = True
-except ImportError:
-    PROMPT_LOADER_AVAILABLE = False
-
-try:
-    from modules.llm_client import create_llm_client
-    LLM_CLIENT_AVAILABLE = True
-except ImportError:
-    LLM_CLIENT_AVAILABLE = False
+from modules.task_manager import TaskManager
 
 
 class ReverseOutlineAnalyzer:
-    """逆向大纲审视器"""
-    
+    """Analyze draft structure, balance, and logic gaps."""
+
     SECTION_PATTERNS = {
-        'abstract': r'(摘要|Abstract)',
-        'introduction': r'(序章|导论|Introduction|前言)',
-        'literature_review': r'(文献综述|研究回顾|Literature Review)',
-        'methodology': r'(研究方法|Methodology|方法)',
-        'analysis': r'(分析|Analysis|正文)',
-        'results': r'(结果|Results|发现)',
-        'discussion': r'(讨论|Discussion)',
-        'conclusion': r'(结论|Conclusion|结语)',
-        'references': r'(参考文献|References)',
-        'acknowledgments': r'(致谢|Acknowledgments)'
+        "abstract": r"^(abstract|摘要)$",
+        "introduction": r"^(introduction|导论|引言|前言|序章)$",
+        "literature_review": r"^(literature review|研究回顾|文献综述)$",
+        "methodology": r"^(methodology|research method|研究方法|方法)$",
+        "analysis": r"^(analysis|正文|分析)$",
+        "discussion": r"^(discussion|讨论)$",
+        "conclusion": r"^(conclusion|结论|结语)$",
+        "references": r"^(references|参考文献)$",
     }
-    
-    def __init__(self, api_provider: str = "qwen", test_mode: bool = True):
-        """
-        初始化逆向大纲审视器
-        
-        Args:
-            api_provider: API提供商
-            test_mode: 测试模式标志
-        """
+
+    def __init__(
+        self,
+        api_provider: str = "qwen",
+        test_mode: bool = True,
+        backend: Optional[str] = None,
+        model: Optional[str] = None,
+    ):
         self.api_provider = api_provider
         self.test_mode = test_mode
-        self._prompt_loader = None
-        self._prompt_template = None
-        self.llm_client = None
-        
-        self.provider_mapping = {
-            'qwen': 'dashscope',
-            'minimax': 'minimax',
-            'gemini': 'custom',
-            'chatgpt': 'openai'
-        }
-    
-    def _get_prompt_loader(self):
-        """获取提示词加载器"""
-        if self._prompt_loader is None and PROMPT_LOADER_AVAILABLE:
-            self._prompt_loader = PromptLoader()
-        return self._prompt_loader
-    
-    def _get_prompt_template(self):
-        """获取提示词模板"""
-        if self._prompt_template is None:
-            loader = self._get_prompt_loader()
-            self._prompt_template = PromptTemplate(loader) if loader else None
-        return self._prompt_template
-    
-    def _load_system_prompt(self) -> str:
-        """加载系统提示词"""
-        loader = self._get_prompt_loader()
-        if loader:
-            try:
-                return loader.load_prompt('reverse_outline_analyzer', 'ROA_G001')
-            except Exception:
-                pass
-        return self.DEFAULT_SYSTEM_PROMPT
-    
-    def DEFAULT_SYSTEM_PROMPT(self):
-        """默认系统提示词"""
-        return """你是一位资深的学术论文审稿专家，擅长分析论文的结构、逻辑和论证质量。
+        self.backend = backend
+        self.model = model
+        self._task_manager: Optional[TaskManager] = None
 
-你的专长包括：
-1. 识别论文的核心论点和支持论点
-2. 分析论文各部分的篇幅分布
-3. 检测逻辑断层和论证漏洞
-4. 评估论述的集中度和连贯性
-5. 提供具体的修订建议
+    def _get_task_manager(self) -> TaskManager:
+        if self._task_manager is None:
+            self._task_manager = TaskManager(mode="api", provider=self.api_provider)
+        return self._task_manager
 
-请严格按照JSON格式输出分析结果。"""
-    
-    def analyze(self, paper_text: str, use_llm: bool = True) -> Dict[str, Any]:
-        """
-        全面分析论文草稿
-        
-        Args:
-            paper_text: 论文文本
-            use_llm: 是否使用LLM进行深度分析
-            
-        Returns:
-            Dict: 包含篇幅分析、逻辑分析、修订建议等
-        """
+    def get_capabilities(self) -> Dict[str, Any]:
+        task_options = self._get_task_manager().get_task_options("reverse_outline")
+        task_options.update(
+            {
+                "module": "ReverseOutlineAnalyzer",
+                "task": "reverse_outline",
+                "output_type": "outline_review",
+                "test_mode": self.test_mode,
+                "legacy_methods": [
+                    "analyze",
+                    "extract_outline",
+                    "detect_imbalance",
+                    "check_logic_gaps",
+                    "suggest_revisions",
+                ],
+                "fallback_order": ["llm_api", "local_llm", "script", "skill", "mcp"],
+                "quality_signals": [
+                    "draft_too_short",
+                    "missing_sections",
+                    "section_imbalance",
+                    "fallback_backend",
+                    "low_confidence",
+                ],
+            }
+        )
+        return task_options
+
+    def analyze(
+        self,
+        paper_text: str,
+        use_llm: bool = True,
+        language: str = "zh",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Analyze a draft and return the normalized outline-review payload."""
+
         if not paper_text or len(paper_text.strip()) < 100:
             return {
-                'success': False,
-                'error': '文本过短，无法分析'
+                "success": False,
+                "error": "draft_too_short",
+                "section_word_counts": {},
+                "section_ratios": {},
+                "logical_gaps": ["draft too short for reverse-outline analysis"],
+                "deviation_flags": [],
+                "suggestions": ["Expand the draft before running reverse-outline review."],
+                "confidence": 0.0,
+                "needs_review": True,
+                "backend": "script",
+                "provider": None,
+                "model": None,
             }
-        
-        outline = self.extract_outline(paper_text)
-        
-        imbalance_issues = self.detect_imbalance(outline)
-        
-        logic_gaps = self.check_logic_gaps(outline, use_llm=use_llm)
-        
-        revision_suggestions = self.suggest_revisions(
-            outline, imbalance_issues, logic_gaps, use_llm=use_llm
+
+        backend = kwargs.get("backend", self.backend)
+        fallback_backends = kwargs.get("fallback_backends")
+        if fallback_backends is None:
+            fallback_backends = ["script"]
+        if self.test_mode and not backend:
+            backend = "script"
+            fallback_backends = []
+        if not use_llm and not backend:
+            backend = "script"
+
+        response = self._get_task_manager().reverse_outline(
+            text=paper_text,
+            language=language,
+            provider=kwargs.get("provider", self.api_provider),
+            model=kwargs.get("model", self.model),
+            backend=backend,
+            fallback_backends=list(fallback_backends),
+            temperature=kwargs.get("temperature", 0.1),
+            max_tokens=kwargs.get("max_tokens", 2000),
         )
-        
+        if response.get("success"):
+            return self._normalize_task_response(response)
+
+        fallback = self._heuristic_outline_review(paper_text)
+        fallback.update(
+            {
+                "success": True,
+                "backend": "script",
+                "provider": None,
+                "model": None,
+                "notes": ["task layer failed, used local heuristic fallback"],
+            }
+        )
+        return fallback
+
+    def analyze_package(
+        self,
+        paper_text: str,
+        use_llm: bool = True,
+        language: str = "zh",
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Analyze a draft and return an `outline_review` package."""
+
+        result = self.analyze(
+            paper_text,
+            use_llm=use_llm,
+            language=language,
+            **kwargs,
+        )
+        flags = self._package_quality_flags(result)
         return {
-            'success': True,
-            'outline': outline,
-            'imbalance_issues': imbalance_issues,
-            'logic_gaps': logic_gaps,
-            'revision_suggestions': revision_suggestions,
-            'summary': self._generate_summary(outline, imbalance_issues, logic_gaps)
+            "type": "outline_review",
+            "schema_version": "2026-04-25",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "source": kwargs.get("source", "paper_draft"),
+            "language": language,
+            "section_word_counts": result.get("section_word_counts", {}),
+            "section_ratios": result.get("section_ratios", {}),
+            "logical_gaps": result.get("logical_gaps", []),
+            "deviation_flags": result.get("deviation_flags", []),
+            "suggestions": result.get("suggestions", []),
+            "outline": result.get("outline", {}),
+            "imbalance_issues": result.get("imbalance_issues", []),
+            "backend": result.get("backend") or "script",
+            "provider": result.get("provider"),
+            "model": result.get("model"),
+            "confidence": self._package_confidence(result, flags),
+            "needs_review": bool(flags) or bool(result.get("needs_review")),
+            "quality_flags": flags,
+            "summary": result.get("summary", ""),
+            "statistics": {
+                "section_count": len(result.get("section_word_counts", {})),
+                "logical_gap_count": len(result.get("logical_gaps", [])),
+                "deviation_flag_count": len(result.get("deviation_flags", [])),
+                "draft_chars": len(paper_text or ""),
+            },
+            "capabilities": self.get_capabilities(),
+            "error": result.get("error"),
         }
-    
+
     def extract_outline(self, paper_text: str) -> Dict[str, Any]:
-        """
-        提取论文大纲
-        
-        Args:
-            paper_text: 论文文本
-            
-        Returns:
-            Dict: 包含各章节信息的大纲
-        """
-        sections = self._identify_sections(paper_text)
-        
-        outline = {
-            'total_length': len(paper_text),
-            'sections': [],
-            'unstructured_content': []
-        }
-        
-        for section_name, content in sections.items():
-            section_info = {
-                'name': section_name,
-                'content': content,
-                'length': len(content),
-                'percentage': 0.0,
-                'paragraphs': self._split_paragraphs(content),
-                'word_count': len(content.replace(' ', ''))
-            }
-            outline['sections'].append(section_info)
-        
-        outline['unstructured_content'] = self._find_unstructured_content(paper_text, sections)
-        
-        total_length = sum(s['length'] for s in outline['sections'])
-        for section in outline['sections']:
-            if total_length > 0:
-                section['percentage'] = round(section['length'] / total_length * 100, 2)
-        
-        return outline
-    
+        """Backward-compatible helper returning the structured outline summary."""
+
+        return self._heuristic_outline_review(paper_text)["outline"]
+
     def detect_imbalance(self, outline: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        检测篇幅失衡问题
-        
-        Args:
-            outline: 论文大纲数据
-            
-        Returns:
-            List[Dict]: 失衡问题列表
-        """
-        issues = []
-        
-        total_length = outline.get('total_length', 0)
-        if total_length < 1000:
-            issues.append({
-                'type': 'length_warning',
-                'severity': 'high',
-                'message': '论文总长度不足，建议至少5000字',
-                'suggestion': '补充研究内容或论证细节'
-            })
-        
-        sections = outline.get('sections', [])
-        if len(sections) == 0:
-            return [{
-                'type': 'structure_error',
-                'severity': 'high',
-                'message': '无法识别论文结构',
-                'suggestion': '检查论文格式是否规范'
-            }]
-        
-        section_lengths = [s['length'] for s in sections]
-        avg_length = sum(section_lengths) / len(section_lengths) if section_lengths else 0
-        
-        for section in sections:
-            section_name = section['name']
-            section_length = section['length']
-            percentage = section['percentage']
-            
-            if percentage < 5:
-                issues.append({
-                    'type': 'section_too_short',
-                    'severity': 'medium',
-                    'section': section_name,
-                    'message': f'章节"{section_name}"篇幅过短（{percentage:.1f}%）',
-                    'suggestion': f'考虑补充{self._estimate_missing_length(percentage, total_length)}字'
-                })
-            
-            elif percentage > 50:
-                issues.append({
-                    'type': 'section_too_long',
-                    'severity': 'medium',
-                    'section': section_name,
-                    'message': f'章节"{section_name}"篇幅过长（{percentage:.1f}%）',
-                    'suggestion': '考虑拆分或精简该章节'
-                })
-            
-            elif section_length > avg_length * 2:
-                issues.append({
-                    'type': 'section_disproportionate',
-                    'severity': 'low',
-                    'section': section_name,
-                    'message': f'章节"{section_name}"与整体不成比例',
-                    'suggestion': '检查该章节内容是否过于冗余'
-                })
-        
-        unstructured_pct = len(outline.get('unstructured_content', '')) / total_length * 100 if total_length > 0 else 0
-        if unstructured_pct > 20:
-            issues.append({
-                'type': 'too_much_unstructured',
-                'severity': 'high',
-                'message': f'未分类内容过多（{unstructured_pct:.1f}%）',
-                'suggestion': '规范论文结构，明确各章节标题'
-            })
-        
-        return issues
-    
-    def check_logic_gaps(self, outline: Dict[str, Any], use_llm: bool = True) -> List[Dict[str, Any]]:
-        """
-        检测逻辑断层
-        
-        Args:
-            outline: 论文大纲数据
-            use_llm: 是否使用LLM分析
-            
-        Returns:
-            List[Dict]: 逻辑问题列表
-        """
-        gaps = []
-        
-        sections = outline.get('sections', [])
-        section_names = [s['name'] for s in sections]
-        
-        has_intro = any('intro' in name.lower() for name in section_names)
-        has_conclusion = any('conclusion' in name.lower() for name in section_names)
-        has_method = any('method' in name.lower() for name in section_names)
-        has_analysis = any('analysis' in name.lower() for name in section_names)
-        
-        if not has_intro:
-            gaps.append({
-                'type': 'missing_section',
-                'severity': 'high',
-                'message': '缺少引言/序章部分',
-                'suggestion': '添加研究背景、问题意识等引入内容'
-            })
-        
-        if not has_conclusion:
-            gaps.append({
-                'type': 'missing_section',
-                'severity': 'medium',
-                'message': '缺少结论部分',
-                'suggestion': '添加研究总结、贡献说明等'
-            })
-        
-        if not has_method and has_analysis:
-            gaps.append({
-                'type': 'logic_disconnect',
-                'severity': 'high',
-                'message': '有分析但缺少方法论部分',
-                'suggestion': '明确研究方法，增加方法论说明'
-            })
-        
-        if use_llm and LLM_CLIENT_AVAILABLE:
-            llm_gaps = self._llm_analyze_logic(outline)
-            gaps.extend(llm_gaps)
-        
-        gaps.extend(self._heuristic_logic_check(outline))
-        
-        return gaps
-    
-    def suggest_revisions(self, outline: Dict, imbalance_issues: List, 
-                        logic_gaps: List, use_llm: bool = True) -> List[str]:
-        """
-        生成修订建议
-        
-        Args:
-            outline: 论文大纲
-            imbalance_issues: 篇幅失衡问题
-            logic_gaps: 逻辑断层
-            use_llm: 是否使用LLM
-            
-        Returns:
-            List[str]: 修订建议列表
-        """
-        suggestions = []
-        
-        for issue in imbalance_issues:
-            if 'suggestion' in issue:
-                suggestions.append(f"【篇幅问题】{issue['suggestion']}")
-        
-        for gap in logic_gaps:
-            if 'suggestion' in gap:
-                suggestions.append(f"【逻辑问题】{gap['suggestion']}")
-        
-        if use_llm and LLM_CLIENT_AVAILABLE:
-            llm_suggestions = self._llm_generate_suggestions(outline)
-            suggestions.extend(llm_suggestions)
-        
-        if len(suggestions) == 0:
-            suggestions.append('论文结构基本合理，无需重大修改')
-        
-        return suggestions
-    
-    def _identify_sections(self, paper_text: str) -> Dict[str, str]:
-        """识别论文各章节"""
-        sections = {}
-        
-        section_positions = []
-        for pattern_name, pattern in self.SECTION_PATTERNS.items():
-            for match in re.finditer(pattern, paper_text, re.IGNORECASE):
-                section_positions.append({
-                    'name': pattern_name,
-                    'position': match.start()
-                })
-        
-        section_positions.sort(key=lambda x: x['position'])
-        
-        for i, section in enumerate(section_positions):
-            start_pos = section['position']
-            end_pos = section_positions[i + 1]['position'] if i + 1 < len(section_positions) else len(paper_text)
-            
-            section_content = paper_text[start_pos:end_pos].strip()
-            sections[section['name']] = section_content
-        
-        return sections
-    
-    def _split_paragraphs(self, text: str) -> List[str]:
-        """将文本分割成段落"""
-        paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text)]
-        return [p for p in paragraphs if len(p) > 50]
-    
-    def _find_unstructured_content(self, paper_text: str, 
-                                  sections: Dict[str, str]) -> str:
-        """查找未分类内容"""
-        total_section_length = sum(len(content) for content in sections.values())
-        
-        if total_section_length < len(paper_text) * 0.8:
-            return paper_text[total_section_length:]
-        
-        return ""
-    
-    def _estimate_missing_length(self, current_percentage: float, 
-                                total_length: int) -> int:
-        """估算建议补充的字数"""
-        target_percentage = 10.0
-        if current_percentage < target_percentage:
-            missing = (target_percentage - current_percentage) / 100 * total_length
-            return max(int(missing), 500)
-        return 0
-    
-    def _heuristic_logic_check(self, outline: Dict) -> List[Dict]:
-        """基于启发式的逻辑检查"""
-        gaps = []
-        
-        sections = outline.get('sections', [])
-        
-        paragraph_counts = [len(s['paragraphs']) for s in sections if s['paragraphs']]
-        if paragraph_counts:
-            avg_paragraphs = sum(paragraph_counts) / len(paragraph_counts)
-            
-            for section in sections:
-                if len(section['paragraphs']) < avg_paragraphs * 0.3 and section['length'] > 500:
-                    gaps.append({
-                        'type': 'paragraph_density_low',
-                        'severity': 'low',
-                        'section': section['name'],
-                        'message': f'章节"{section["name"]}"段落过少',
-                        'suggestion': '该章节可能需要更多论述支撑'
-                    })
-        
-        return gaps
-    
-    def _llm_analyze_logic(self, outline: Dict) -> List[Dict]:
-        """使用LLM分析逻辑问题"""
-        try:
-            self._init_llm_client()
-            
-            system_prompt = self._load_system_prompt()
-            
-            outline_summary = self._format_outline_for_llm(outline)
-            
-            user_prompt = f"""请分析以下论文大纲的逻辑问题：
+        """Backward-compatible imbalance report helper."""
 
-{outline_summary}
-
-请识别：
-1. 论证链是否完整
-2. 各部分衔接是否顺畅
-3. 是否有遗漏的重要论证环节
-
-请以JSON格式输出发现的逻辑问题列表。"""
-            
-            response = self._call_llm(system_prompt, user_prompt)
-            
-            return self._parse_llm_logic_response(response)
-            
-        except Exception as e:
-            print(f"LLM逻辑分析失败: {e}")
-            return []
-    
-    def _llm_generate_suggestions(self, outline: Dict) -> List[str]:
-        """使用LLM生成修订建议"""
-        try:
-            self._init_llm_client()
-            
-            outline_summary = self._format_outline_for_llm(outline)
-            
-            user_prompt = f"""基于以下论文大纲，请提供具体的修订建议：
-
-{outline_summary}
-
-请以JSON数组格式输出修订建议列表，每条建议不超过50字。"""
-            
-            response = self._call_llm("", user_prompt)
-            
-            return self._parse_llm_suggestions(response)
-            
-        except Exception as e:
-            print(f"LLM建议生成失败: {e}")
-            return []
-    
-    def _format_outline_for_llm(self, outline: Dict) -> str:
-        """格式化大纲供LLM分析"""
-        lines = [f"论文总长度: {outline['total_length']}字符"]
-        lines.append("\n章节结构:")
-        
-        for section in outline.get('sections', []):
-            lines.append(f"\n- {section['name']}")
-            lines.append(f"  长度: {section['length']}字符 ({section['percentage']}%)")
-            lines.append(f"  段落数: {len(section['paragraphs'])}")
-        
-        return "\n".join(lines)
-    
-    def _parse_llm_logic_response(self, response: str) -> List[Dict]:
-        """解析LLM逻辑分析响应"""
-        try:
-            if '```json' in response:
-                response = response.split('```json')[1].split('```')[0]
-            
-            data = json.loads(response.strip())
-            
-            if isinstance(data, list):
-                return [{
-                    'type': 'llm_analysis',
-                    'severity': item.get('severity', 'medium'),
-                    'message': item.get('message', ''),
-                    'suggestion': item.get('suggestion', '')
-                } for item in data]
-            
-            return []
-            
-        except Exception:
-            return []
-    
-    def _parse_llm_suggestions(self, response: str) -> List[str]:
-        """解析LLM修订建议"""
-        try:
-            if '```json' in response:
-                response = response.split('```json')[1].split('```')[0]
-            
-            data = json.loads(response.strip())
-            
-            if isinstance(data, list):
-                return [str(item) for item in data]
-            
-            return []
-            
-        except Exception:
-            return []
-    
-    def _init_llm_client(self):
-        """初始化LLM客户端"""
-        if self.llm_client is None and not self.test_mode:
-            provider = self.provider_mapping.get(self.api_provider, 'dashscope')
-            config = {
-                'provider': provider,
-                'model': 'qwen-turbo'
-            }
-            self.llm_client = create_llm_client(config)
-    
-    def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
-        """调用LLM"""
-        if self.test_mode or self.llm_client is None:
-            return self._generate_mock_response(user_prompt)
-        
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": user_prompt})
-        
-        # Use _call_llm instead of .chat() to match our LLMClient interface
-        combined_prompt = (system_prompt + "\n\n" + user_prompt) if system_prompt else user_prompt
-        result = self.llm_client._call_llm(combined_prompt, temperature=0.3)
-        return result.get('content', '') if isinstance(result, dict) else (result or '')
-    
-    def _generate_mock_response(self, prompt: str) -> str:
-        """生成模拟响应（测试模式）"""
-        if '逻辑问题' in prompt:
-            return json.dumps([
+        issues: List[Dict[str, Any]] = []
+        total_length = outline.get("total_length", 0)
+        for section in outline.get("sections", []):
+            ratio = section.get("percentage", 0.0)
+            if ratio < 5:
+                issues.append(
+                    {
+                        "type": "section_too_short",
+                        "severity": "medium",
+                        "section": section.get("name", ""),
+                        "message": f"{section.get('name', 'section')} is too short",
+                    }
+                )
+            elif ratio > 60:
+                issues.append(
+                    {
+                        "type": "section_too_long",
+                        "severity": "medium",
+                        "section": section.get("name", ""),
+                        "message": f"{section.get('name', 'section')} dominates the draft",
+                    }
+                )
+        if total_length < 1200:
+            issues.append(
                 {
-                    'severity': 'medium',
-                    'message': '论证深度有待加强',
-                    'suggestion': '建议补充更多史料支撑'
+                    "type": "length_warning",
+                    "severity": "high",
+                    "message": "draft may be too short for stable argumentative balance",
                 }
-            ])
-        elif '修订建议' in prompt:
-            return json.dumps([
-                '优化章节篇幅分配',
-                '加强论证逻辑连贯性',
-                '补充研究背景说明'
-            ])
-        
-        return '{}'
-    
-    def _generate_summary(self, outline: Dict, imbalance_issues: List, 
-                        logic_gaps: List) -> str:
-        """生成分析总结"""
-        total_issues = len(imbalance_issues) + len(logic_gaps)
-        
-        if total_issues == 0:
-            return "论文结构良好，各部分比例合理，逻辑连贯。"
-        
-        high_severity = sum(1 for issue in imbalance_issues + logic_gaps 
-                          if issue.get('severity') == 'high')
-        
-        if high_severity > 0:
-            return f"发现{total_issues}个问题，其中{high_severity}个高优先级问题需要关注。"
-        
-        return f"发现{total_issues}个问题，建议进行相应修订。"
+            )
+        return issues
+
+    def check_logic_gaps(self, outline: Dict[str, Any], use_llm: bool = True) -> List[Dict[str, Any]]:
+        """Backward-compatible logic-gap helper."""
+
+        del use_llm
+        gaps: List[Dict[str, Any]] = []
+        section_names = {section.get("name") for section in outline.get("sections", [])}
+        for required in ("introduction", "analysis", "conclusion"):
+            if required not in section_names:
+                gaps.append(
+                    {
+                        "type": "missing_section",
+                        "severity": "high",
+                        "message": f"missing {required}",
+                    }
+                )
+        return gaps
+
+    def suggest_revisions(
+        self,
+        outline: Dict[str, Any],
+        imbalance_issues: List[Dict[str, Any]],
+        logic_gaps: List[Dict[str, Any]],
+        use_llm: bool = True,
+    ) -> List[str]:
+        """Backward-compatible revision suggestion helper."""
+
+        del outline, use_llm
+        suggestions: List[str] = []
+        if logic_gaps:
+            suggestions.append("Add the missing structural sections before line editing.")
+        if imbalance_issues:
+            suggestions.append("Rebalance section lengths and compress the most dominant section.")
+        if not suggestions:
+            suggestions.append("The outline is broadly stable; continue with evidence-level revision.")
+        return suggestions
+
+    def _normalize_task_response(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        payload = response.get("data", {})
+        normalized = self._heuristic_outline_review("")
+        normalized.update(
+            {
+                "success": True,
+                "section_word_counts": payload.get("section_word_counts", {}),
+                "section_ratios": payload.get("section_ratios", {}),
+                "logical_gaps": payload.get("logical_gaps", []),
+                "deviation_flags": payload.get("deviation_flags", []),
+                "suggestions": payload.get("suggestions", []),
+                "confidence": payload.get("confidence", 0.65),
+                "needs_review": bool(payload.get("needs_review", False)),
+                "backend": response.get("backend") or response.get("metadata", {}).get("backend"),
+                "provider": response.get("metadata", {}).get("provider"),
+                "model": response.get("metadata", {}).get("model"),
+            }
+        )
+        normalized["outline"] = self._build_outline_from_counts(normalized["section_word_counts"], normalized["section_ratios"])
+        normalized["imbalance_issues"] = self._build_imbalance_issues(normalized["section_ratios"], normalized["outline"]["total_length"])
+        normalized["logic_gaps"] = [
+            {"type": "missing_section", "severity": "high", "message": gap}
+            for gap in normalized["logical_gaps"]
+        ]
+        normalized["revision_suggestions"] = list(normalized["suggestions"])
+        normalized["summary"] = self._generate_summary(
+            normalized["section_word_counts"],
+            normalized["logical_gaps"],
+            normalized["deviation_flags"],
+        )
+        return normalized
+
+    def _heuristic_outline_review(self, paper_text: str) -> Dict[str, Any]:
+        section_word_counts = self._extract_section_counts(paper_text)
+        total_length = sum(section_word_counts.values()) or len(paper_text.replace(" ", ""))
+        section_ratios = {
+            name: round(count / total_length, 3)
+            for name, count in section_word_counts.items()
+            if total_length
+        }
+        logical_gaps = [
+            gap["message"]
+            for gap in self.check_logic_gaps(
+                self._build_outline_from_counts(section_word_counts, section_ratios),
+                use_llm=False,
+            )
+        ]
+        deviation_flags = [
+            issue["message"]
+            for issue in self._build_imbalance_issues(section_ratios, total_length)
+        ]
+        suggestions = self.suggest_revisions({}, self._build_imbalance_issues(section_ratios, total_length), [], use_llm=False)
+        outline = self._build_outline_from_counts(section_word_counts, section_ratios)
+        imbalance_issues = self._build_imbalance_issues(section_ratios, total_length)
+        return {
+            "success": True,
+            "outline": outline,
+            "imbalance_issues": imbalance_issues,
+            "logic_gaps": [
+                {"type": "missing_section", "severity": "high", "message": gap}
+                for gap in logical_gaps
+            ],
+            "revision_suggestions": suggestions,
+            "summary": self._generate_summary(section_word_counts, logical_gaps, deviation_flags),
+            "section_word_counts": section_word_counts,
+            "section_ratios": section_ratios,
+            "logical_gaps": logical_gaps,
+            "deviation_flags": deviation_flags,
+            "suggestions": suggestions,
+            "confidence": self._estimate_confidence(section_word_counts, logical_gaps, deviation_flags),
+            "needs_review": bool(logical_gaps or deviation_flags),
+        }
+
+    def _extract_section_counts(self, paper_text: str) -> Dict[str, int]:
+        if not paper_text:
+            return {}
+        lines = paper_text.splitlines()
+        sections: List[tuple[str, int]] = []
+        for index, raw_line in enumerate(lines):
+            line = raw_line.strip().strip("#").strip()
+            if not line or len(line) > 80:
+                continue
+            normalized = re.sub(r"^[0-9一二三四五六七八九十IVXivx.、\-\s]+", "", line).lower()
+            for section_name, pattern in self.SECTION_PATTERNS.items():
+                if re.match(pattern, normalized, re.IGNORECASE):
+                    sections.append((section_name, index))
+                    break
+
+        counts: Dict[str, int] = {}
+        if sections:
+            for offset, (section_name, start_index) in enumerate(sections):
+                end_index = sections[offset + 1][1] if offset + 1 < len(sections) else len(lines)
+                body = "\n".join(lines[start_index + 1 : end_index]).strip()
+                counts[section_name] = len(body.replace(" ", ""))
+            return counts
+
+        paragraphs = [part.strip() for part in re.split(r"\n\s*\n", paper_text) if part.strip()]
+        if not paragraphs:
+            return {}
+        total = len(paragraphs)
+        counts["introduction"] = len("\n\n".join(paragraphs[: max(1, total // 4)]).replace(" ", ""))
+        counts["analysis"] = len("\n\n".join(paragraphs[max(1, total // 4) : max(2, total - 1)]).replace(" ", ""))
+        counts["conclusion"] = len("\n\n".join(paragraphs[max(1, total - 1) :]).replace(" ", ""))
+        return counts
+
+    def _build_outline_from_counts(
+        self,
+        section_word_counts: Dict[str, int],
+        section_ratios: Dict[str, float],
+    ) -> Dict[str, Any]:
+        sections = []
+        total_length = sum(section_word_counts.values())
+        for name, count in section_word_counts.items():
+            sections.append(
+                {
+                    "name": name,
+                    "length": count,
+                    "percentage": round(section_ratios.get(name, 0.0) * 100, 2),
+                    "word_count": count,
+                    "paragraphs": [],
+                }
+            )
+        return {"total_length": total_length, "sections": sections, "unstructured_content": []}
+
+    def _build_imbalance_issues(self, section_ratios: Dict[str, float], total_length: int) -> List[Dict[str, Any]]:
+        issues: List[Dict[str, Any]] = []
+        if total_length < 1200:
+            issues.append(
+                {
+                    "type": "length_warning",
+                    "severity": "high",
+                    "message": "draft may be too short for stable reverse-outline review",
+                    "suggestion": "expand the draft before relying on section-balance analysis",
+                }
+            )
+        for section, ratio in section_ratios.items():
+            if section == "references":
+                continue
+            if ratio < 0.05:
+                issues.append(
+                    {
+                        "type": "section_too_short",
+                        "severity": "medium",
+                        "section": section,
+                        "message": f"{section} is too short ({ratio:.1%})",
+                        "suggestion": f"expand {section} or merge it into a neighboring section",
+                    }
+                )
+            elif ratio > 0.6:
+                issues.append(
+                    {
+                        "type": "section_too_long",
+                        "severity": "medium",
+                        "section": section,
+                        "message": f"{section} is too long ({ratio:.1%})",
+                        "suggestion": f"split or compress {section}",
+                    }
+                )
+        return issues
+
+    def _estimate_confidence(
+        self,
+        section_word_counts: Dict[str, int],
+        logical_gaps: List[str],
+        deviation_flags: List[str],
+    ) -> float:
+        confidence = 0.5
+        if section_word_counts:
+            confidence += 0.15
+        if "introduction" in section_word_counts and "conclusion" in section_word_counts:
+            confidence += 0.1
+        if not logical_gaps:
+            confidence += 0.1
+        if not deviation_flags:
+            confidence += 0.05
+        return round(min(confidence, 0.9), 2)
+
+    def _generate_summary(
+        self,
+        section_word_counts: Dict[str, int],
+        logical_gaps: List[str],
+        deviation_flags: List[str],
+    ) -> str:
+        parts = [f"{len(section_word_counts)} sections detected"]
+        if logical_gaps:
+            parts.append(f"{len(logical_gaps)} structural gaps")
+        if deviation_flags:
+            parts.append(f"{len(deviation_flags)} balance flags")
+        if len(parts) == 1:
+            parts.append("outline looks broadly stable")
+        return "; ".join(parts)
+
+    def _package_quality_flags(self, result: Dict[str, Any]) -> List[str]:
+        flags = []
+        if result.get("error") == "draft_too_short":
+            flags.append("draft_too_short")
+        if result.get("logical_gaps"):
+            flags.append("missing_sections")
+        if result.get("deviation_flags"):
+            flags.append("section_imbalance")
+        if result.get("backend") in {"script", "fallback"} and not self.test_mode:
+            flags.append("fallback_backend")
+        confidence = result.get("confidence")
+        if isinstance(confidence, (int, float)) and confidence < 0.6:
+            flags.append("low_confidence")
+        if result.get("needs_review"):
+            flags.append("review_requested")
+        return sorted(set(flags))
+
+    def _package_confidence(self, result: Dict[str, Any], flags: List[str]) -> float:
+        confidence = result.get("confidence")
+        if not isinstance(confidence, (int, float)):
+            confidence = 0.6
+        if "draft_too_short" in flags:
+            confidence = min(confidence, 0.2)
+        if "fallback_backend" in flags:
+            confidence -= 0.1
+        if "missing_sections" in flags:
+            confidence -= 0.05
+        if "section_imbalance" in flags:
+            confidence -= 0.05
+        return round(max(0.0, min(1.0, float(confidence))), 3)

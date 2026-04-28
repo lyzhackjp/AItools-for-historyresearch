@@ -1,21 +1,22 @@
 """
-历史研究论文全流程 — 统一数据结构
+Unified workflow data models for the historical research pipeline.
 
-定义 ResearchProject 及其所有子数据类型
-贯穿 Stage 1~7 的完整生命周期数据管理
+This module defines the project-wide data structure shared across stages 1-7.
 """
+
+from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
-from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 
 class StageStatus(Enum):
-    """各阶段执行状态"""
+    """Execution status for each workflow stage."""
+
     PENDING = "pending"
     RUNNING = "running"
     DONE = "done"
@@ -23,18 +24,15 @@ class StageStatus(Enum):
     SKIPPED = "skipped"
 
 
-# ─────────────────────────────────────────────────────────────────
-#  子数据类型
-# ─────────────────────────────────────────────────────────────────
-
 @dataclass
 class PaperRecord:
-    """单条文献记录（Stage 1 产出）"""
-    id: str = ""                     # 内部UUID
+    """Single literature record produced by stage 1."""
+
+    id: str = ""
     title: str = ""
     authors: List[str] = field(default_factory=list)
     year: str = ""
-    source: str = ""                  # crossref / arxiv / ...
+    source: str = ""
     url: str = ""
     doi: str = ""
     abstract: str = ""
@@ -45,13 +43,14 @@ class PaperRecord:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: Dict) -> 'PaperRecord':
-        return cls(**{k: v for k, v in d.items() if k in cls.__annotations__})
+    def from_dict(cls, data: Dict[str, Any]) -> "PaperRecord":
+        return cls(**{key: value for key, value in data.items() if key in cls.__annotations__})
 
 
 @dataclass
 class BookMetadata:
-    """图书元数据（Stage 2 产出）"""
+    """Book metadata produced by stage 2."""
+
     id: str = ""
     title: str = ""
     author: str = ""
@@ -69,11 +68,12 @@ class BookMetadata:
 
 @dataclass
 class HistoricalEntity:
-    """历史实体（Stage 3 产出）"""
+    """Historical entity produced by stage 3."""
+
     id: str = ""
     name: str = ""
-    name_zh: str = ""               # 中文译名（如有）
-    category: str = ""               # person / location / event / concept / literature
+    name_zh: str = ""
+    category: str = ""
     confidence: float = 0.0
     notes: str = ""
     related_entities: List[str] = field(default_factory=list)
@@ -84,10 +84,11 @@ class HistoricalEntity:
 
 @dataclass
 class EntityRelation:
-    """实体关系（Stage 3 产出）"""
+    """Relationship between historical entities."""
+
     from_entity: str = ""
     to_entity: str = ""
-    relation_type: str = ""          # father_of / colleague_of / fought_against / ...
+    relation_type: str = ""
     description: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
@@ -96,11 +97,10 @@ class EntityRelation:
 
 @dataclass
 class CitationNetwork:
-    """引文网络（Stage 4 产出）"""
+    """Citation graph produced by stage 4."""
+
     nodes: List[Dict[str, Any]] = field(default_factory=list)
-    # [{id, title, cited_by_count, is_core}]
     edges: List[Dict[str, str]] = field(default_factory=list)
-    # [{from_id, to_id, type}]
     key_source_ids: List[str] = field(default_factory=list)
     orphan_ids: List[str] = field(default_factory=list)
 
@@ -110,11 +110,10 @@ class CitationNetwork:
 
 @dataclass
 class OutlineReview:
-    """论文逻辑审视报告（Stage 4/6 产出）"""
+    """Structured outline review report."""
+
     section_word_counts: Dict[str, int] = field(default_factory=dict)
-    # {章节名: 字数}
     section_ratios: Dict[str, float] = field(default_factory=dict)
-    # {章节名: 占比}
     logical_gaps: List[str] = field(default_factory=list)
     deviation_flags: List[str] = field(default_factory=list)
     suggestions: List[str] = field(default_factory=list)
@@ -125,7 +124,8 @@ class OutlineReview:
 
 @dataclass
 class StageResult:
-    """单阶段执行结果"""
+    """Recorded execution result for one stage."""
+
     stage: int
     name: str
     status: StageStatus
@@ -136,181 +136,388 @@ class StageResult:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            'stage': self.stage,
-            'name': self.name,
-            'status': self.status.value,
-            'output': self.output,
-            'error': self.error,
-            'started_at': self.started_at,
-            'finished_at': self.finished_at,
+            "stage": self.stage,
+            "name": self.name,
+            "status": self.status.value,
+            "output": self.output,
+            "error": self.error,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
         }
 
-
-# ─────────────────────────────────────────────────────────────────
-#  ResearchProject — 完整研究项目
-# ─────────────────────────────────────────────────────────────────
 
 @dataclass
 class ResearchProject:
     """
-    一个历史研究项目的完整生命周期数据
+    End-to-end project state shared by all workflow stages.
 
-    属性按阶段分组，便于序列化和断点续做
-
-    使用方法：
-        project = ResearchProject(topic="Tudor England", language="en")
-        project.run_stage(1)
-        print(project.literature)
-        project.save("project.json")
+    The shape is intentionally serializable so the workflow can resume safely.
     """
 
-    # ── 基本信息 ──────────────────────────────────────────────
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     topic: str = ""
-    language: str = "en"          # en / ja / zh
+    language: str = "en"
     bilingual: bool = True
-    citation_format: str = "chicago"  # chicago / apa / gb7714 / mla
-    created_at: str = field(
-        default_factory=lambda: datetime.now().isoformat(timespec='seconds')
-    )
+    citation_format: str = "chicago"
+    created_at: str = field(default_factory=lambda: datetime.now().isoformat(timespec="seconds"))
     updated_at: str = ""
 
-    # ── Stage 1: 搜集材料 ──────────────────────────────────────
     stage1_status: StageStatus = StageStatus.PENDING
     literature: List[PaperRecord] = field(default_factory=list)
 
-    # ── Stage 2: 整理史料 ──────────────────────────────────────
     stage2_status: StageStatus = StageStatus.PENDING
     book_metadata: List[BookMetadata] = field(default_factory=list)
     obsidian_notes: List[Dict[str, Any]] = field(default_factory=list)
     formatted_citations: List[str] = field(default_factory=list)
 
-    # ── Stage 3: 提取信息 ──────────────────────────────────────
     stage3_status: StageStatus = StageStatus.PENDING
     entities: List[HistoricalEntity] = field(default_factory=list)
     entity_relations: List[EntityRelation] = field(default_factory=list)
 
-    # ── Stage 4: 史料考察 ─────────────────────────────────────
     stage4_status: StageStatus = StageStatus.PENDING
     citation_network: Optional[CitationNetwork] = None
     key_source_ids: List[str] = field(default_factory=list)
 
-    # ── Stage 5: 撰写论文 ──────────────────────────────────────
     stage5_status: StageStatus = StageStatus.PENDING
     paper_draft: str = ""
 
-    # ── Stage 6: 论文修改润色 ───────────────────────────────────
     stage6_status: StageStatus = StageStatus.PENDING
     polished_draft: str = ""
     style_transferred_draft: str = ""
     outline_review: Optional[OutlineReview] = None
 
-    # ── Stage 7: 注释格式 ──────────────────────────────────────
     stage7_status: StageStatus = StageStatus.PENDING
     final_paper: str = ""
 
-    # ── 内部状态 ───────────────────────────────────────────────
+    artifacts: List[Dict[str, Any]] = field(default_factory=list)
+    quality_flags: List[str] = field(default_factory=list)
+    review_queue: List[Dict[str, Any]] = field(default_factory=list)
+    stage_metadata: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+
     _stage_history: List[StageResult] = field(default_factory=list)
 
-    # ─────────────────────────────────────────────────────────
-    #  工具方法
-    # ─────────────────────────────────────────────────────────
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a JSON-serializable project snapshot."""
 
-    def save(self, path: str) -> None:
-        """保存为 JSON 文件（断点续做）"""
-        data = {
-            'id': self.id,
-            'topic': self.topic,
-            'language': self.language,
-            'bilingual': self.bilingual,
-            'citation_format': self.citation_format,
-            'created_at': self.created_at,
-            'updated_at': datetime.now().isoformat(timespec='seconds'),
-            'literature': [p.to_dict() for p in self.literature],
-            'book_metadata': [b.to_dict() for b in self.book_metadata],
-            'entities': [e.to_dict() for e in self.entities],
-            'citation_network': self.citation_network.to_dict() if self.citation_network else None,
-            'paper_draft': self.paper_draft,
-            'polished_draft': self.polished_draft,
-            'final_paper': self.final_paper,
-            'stage_status': {
-                'stage1': self.stage1_status.value,
-                'stage2': self.stage2_status.value,
-                'stage3': self.stage3_status.value,
-                'stage4': self.stage4_status.value,
-                'stage5': self.stage5_status.value,
-                'stage6': self.stage6_status.value,
-                'stage7': self.stage7_status.value,
+        return {
+            "id": self.id,
+            "topic": self.topic,
+            "language": self.language,
+            "bilingual": self.bilingual,
+            "citation_format": self.citation_format,
+            "created_at": self.created_at,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "literature": [item.to_dict() for item in self.literature],
+            "book_metadata": [item.to_dict() for item in self.book_metadata],
+            "obsidian_notes": self.obsidian_notes,
+            "formatted_citations": self.formatted_citations,
+            "entities": [item.to_dict() for item in self.entities],
+            "entity_relations": [item.to_dict() for item in self.entity_relations],
+            "citation_network": self.citation_network.to_dict() if self.citation_network else None,
+            "key_source_ids": self.key_source_ids,
+            "paper_draft": self.paper_draft,
+            "polished_draft": self.polished_draft,
+            "style_transferred_draft": self.style_transferred_draft,
+            "outline_review": self.outline_review.to_dict() if self.outline_review else None,
+            "final_paper": self.final_paper,
+            "artifacts": self.artifacts,
+            "quality_flags": self.quality_flags,
+            "review_queue": self.review_queue,
+            "stage_metadata": self.stage_metadata,
+            "stage_status": {
+                "stage1": self.stage1_status.value,
+                "stage2": self.stage2_status.value,
+                "stage3": self.stage3_status.value,
+                "stage4": self.stage4_status.value,
+                "stage5": self.stage5_status.value,
+                "stage6": self.stage6_status.value,
+                "stage7": self.stage7_status.value,
             },
         }
-        with open(path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def save(self, path: str) -> None:
+        """Persist the project to JSON for resume/replay."""
+
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(self.to_dict(), handle, ensure_ascii=False, indent=2)
 
     @classmethod
-    def load(cls, path: str) -> 'ResearchProject':
-        """从 JSON 文件恢复"""
-        with open(path, 'r', encoding='utf-8') as f:
-            d = json.load(f)
+    def load(cls, path: str) -> "ResearchProject":
+        """Restore a project from JSON."""
+
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+
         project = cls(
-            id=d.get('id', str(uuid.uuid4())[:8]),
-            topic=d.get('topic', ''),
-            language=d.get('language', 'en'),
-            bilingual=d.get('bilingual', True),
-            citation_format=d.get('citation_format', 'chicago'),
-            created_at=d.get('created_at', ''),
+            id=data.get("id", str(uuid.uuid4())[:8]),
+            topic=data.get("topic", ""),
+            language=data.get("language", "en"),
+            bilingual=data.get("bilingual", True),
+            citation_format=data.get("citation_format", "chicago"),
+            created_at=data.get("created_at", ""),
+            updated_at=data.get("updated_at", ""),
         )
-        project.literature = [PaperRecord.from_dict(p) for p in d.get('literature', [])]
-        project.entities = [HistoricalEntity(**e) for e in d.get('entities', [])]
-        project.paper_draft = d.get('paper_draft', '')
-        project.final_paper = d.get('final_paper', '')
+        project.literature = [PaperRecord.from_dict(item) for item in data.get("literature", [])]
+        project.book_metadata = [BookMetadata(**item) for item in data.get("book_metadata", [])]
+        project.obsidian_notes = list(data.get("obsidian_notes", []))
+        project.formatted_citations = list(data.get("formatted_citations", []))
+        project.entities = [HistoricalEntity(**item) for item in data.get("entities", [])]
+        project.entity_relations = [EntityRelation(**item) for item in data.get("entity_relations", [])]
+
+        citation_network = data.get("citation_network")
+        if citation_network:
+            project.citation_network = CitationNetwork(**citation_network)
+
+        project.key_source_ids = list(data.get("key_source_ids", []))
+        project.paper_draft = data.get("paper_draft", "")
+        project.polished_draft = data.get("polished_draft", "")
+        project.style_transferred_draft = data.get("style_transferred_draft", "")
+
+        outline_review = data.get("outline_review")
+        if outline_review:
+            project.outline_review = OutlineReview(**outline_review)
+
+        project.final_paper = data.get("final_paper", "")
+        project.artifacts = list(data.get("artifacts", []))
+        project.quality_flags = list(data.get("quality_flags", []))
+        project.review_queue = list(data.get("review_queue", []))
+        project.stage_metadata = dict(data.get("stage_metadata", {}))
+
         status_map = {
-            'pending': StageStatus.PENDING,
-            'running': StageStatus.RUNNING,
-            'done': StageStatus.DONE,
-            'failed': StageStatus.FAILED,
-            'skipped': StageStatus.SKIPPED,
+            "pending": StageStatus.PENDING,
+            "running": StageStatus.RUNNING,
+            "done": StageStatus.DONE,
+            "failed": StageStatus.FAILED,
+            "skipped": StageStatus.SKIPPED,
         }
-        for k, v in d.get('stage_status', {}).items():
-            stage_num = int(k.replace('stage', ''))
-            status = status_map.get(v, StageStatus.PENDING)
-            setattr(project, f'stage{stage_num}_status', status)
+        for key, value in data.get("stage_status", {}).items():
+            stage_num = int(key.replace("stage", ""))
+            setattr(project, f"stage{stage_num}_status", status_map.get(value, StageStatus.PENDING))
         return project
 
     def mark_stage_start(self, stage: int) -> None:
-        """标记阶段开始"""
-        attr = f'stage{stage}_status'
-        setattr(self, attr, StageStatus.RUNNING)
-        self.updated_at = datetime.now().isoformat(timespec='seconds')
+        """Mark a stage as running and initialize its metadata."""
+
+        setattr(self, f"stage{stage}_status", StageStatus.RUNNING)
+        self.updated_at = datetime.now().isoformat(timespec="seconds")
+        metadata = self.stage_metadata.setdefault(f"stage{stage}", {})
+        metadata["started_at"] = self.updated_at
+        metadata["status"] = StageStatus.RUNNING.value
 
     def mark_stage_done(self, stage: int) -> None:
-        """标记阶段完成"""
-        attr = f'stage{stage}_status'
-        setattr(self, attr, StageStatus.DONE)
-        self.updated_at = datetime.now().isoformat(timespec='seconds')
+        """Mark a stage as completed."""
+
+        setattr(self, f"stage{stage}_status", StageStatus.DONE)
+        self.updated_at = datetime.now().isoformat(timespec="seconds")
+        metadata = self.stage_metadata.setdefault(f"stage{stage}", {})
+        metadata["finished_at"] = self.updated_at
+        metadata["status"] = StageStatus.DONE.value
 
     def mark_stage_failed(self, stage: int, error: str) -> None:
-        """标记阶段失败"""
-        attr = f'stage{stage}_status'
-        setattr(self, attr, StageStatus.FAILED)
-        self.updated_at = datetime.now().isoformat(timespec='seconds')
+        """Mark a stage as failed and record the error summary."""
+
+        setattr(self, f"stage{stage}_status", StageStatus.FAILED)
+        self.updated_at = datetime.now().isoformat(timespec="seconds")
+        metadata = self.stage_metadata.setdefault(f"stage{stage}", {})
+        metadata["finished_at"] = self.updated_at
+        metadata["status"] = StageStatus.FAILED.value
+        metadata["error"] = error
 
     def mark_stage_skipped(self, stage: int = 6) -> None:
-        """标记阶段跳过"""
-        attr = f'stage{stage}_status'
-        setattr(self, attr, StageStatus.SKIPPED)
-        self.updated_at = datetime.now().isoformat(timespec='seconds')
+        """Mark a stage as skipped."""
+
+        setattr(self, f"stage{stage}_status", StageStatus.SKIPPED)
+        self.updated_at = datetime.now().isoformat(timespec="seconds")
+        metadata = self.stage_metadata.setdefault(f"stage{stage}", {})
+        metadata["finished_at"] = self.updated_at
+        metadata["status"] = StageStatus.SKIPPED.value
+
+    def set_stage_metadata(self, stage: int, **metadata: Any) -> Dict[str, Any]:
+        """Merge structured stage metadata into the project."""
+
+        stage_data = self.stage_metadata.setdefault(f"stage{stage}", {})
+        stage_data.update(metadata)
+        self.updated_at = datetime.now().isoformat(timespec="seconds")
+        return stage_data
+
+    def get_stage_metadata(self, stage: int) -> Dict[str, Any]:
+        """Return stage metadata if present."""
+
+        return self.stage_metadata.get(f"stage{stage}", {})
+
+    def add_artifact(self, artifact: Dict[str, Any]) -> None:
+        """Attach a structured artifact descriptor to the project."""
+
+        payload = dict(artifact)
+        payload.setdefault("id", str(uuid.uuid4())[:8])
+        payload.setdefault("created_at", datetime.now().isoformat(timespec="seconds"))
+        self.artifacts.append(payload)
+        stage = payload.get("stage")
+        if stage is not None:
+            metadata = self.stage_metadata.setdefault(f"stage{stage}", {})
+            metadata.setdefault("artifact_ids", []).append(payload["id"])
+        self.updated_at = datetime.now().isoformat(timespec="seconds")
+
+    def add_quality_flag(self, flag: str) -> None:
+        """Record a project-level quality flag once."""
+
+        if flag and flag not in self.quality_flags:
+            self.quality_flags.append(flag)
+            self.updated_at = datetime.now().isoformat(timespec="seconds")
+
+    def add_quality_flags(self, flags: List[str]) -> None:
+        """Record multiple project-level quality flags."""
+
+        for flag in flags:
+            self.add_quality_flag(flag)
+
+    def add_review_item(self, item: Dict[str, Any]) -> None:
+        """Add a structured manual review item."""
+
+        payload = dict(item)
+        payload.setdefault("id", str(uuid.uuid4())[:8])
+        payload.setdefault("status", "open")
+        payload.setdefault("created_at", datetime.now().isoformat(timespec="seconds"))
+        self.review_queue.append(payload)
+        stage = payload.get("stage")
+        if stage is not None:
+            metadata = self.stage_metadata.setdefault(f"stage{stage}", {})
+            metadata.setdefault("review_item_ids", []).append(payload["id"])
+        self.updated_at = datetime.now().isoformat(timespec="seconds")
+
+    def register_artifact(
+        self,
+        artifact_type: str,
+        *,
+        stage: Optional[int] = None,
+        path: Optional[str] = None,
+        source: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Create and attach a normalized artifact descriptor."""
+
+        artifact = {
+            "type": artifact_type,
+            "stage": stage,
+            "path": path,
+            "source": source,
+            "metadata": metadata or {},
+        }
+        self.add_artifact({key: value for key, value in artifact.items() if value is not None})
+        return self.artifacts[-1]
+
+    def _coerce_artifact_items(self, artifacts: Any) -> List[Dict[str, Any]]:
+        if isinstance(artifacts, list):
+            return [dict(item) for item in artifacts if isinstance(item, dict)]
+        if isinstance(artifacts, dict):
+            items: List[Dict[str, Any]] = []
+            for name, value in artifacts.items():
+                if isinstance(value, dict):
+                    item = dict(value)
+                    item.setdefault("type", name)
+                    items.append(item)
+                else:
+                    items.append({"type": name, "value": value})
+            return items
+        return []
+
+    def register_package(
+        self,
+        package: Dict[str, Any],
+        *,
+        stage: Optional[int] = None,
+        source: str = "",
+    ) -> Dict[str, Any]:
+        """Attach package artifacts, quality flags, and review state to the project."""
+
+        package_type = str(package.get("type", "package"))
+        flags = [str(flag) for flag in package.get("quality_flags", []) if flag]
+        needs_review = bool(package.get("needs_review")) or bool(flags)
+        confidence = package.get("confidence")
+
+        artifact_count = 0
+        for artifact in self._coerce_artifact_items(package.get("artifacts", [])):
+            payload = {
+                **artifact,
+                "stage": artifact.get("stage", stage),
+                "source": artifact.get("source", source or package_type),
+                "package_type": package_type,
+            }
+            self.add_artifact(payload)
+            artifact_count += 1
+
+        self.add_quality_flags(flags)
+        if needs_review:
+            self.add_review_item(
+                {
+                    "stage": stage,
+                    "type": "package_review",
+                    "package_type": package_type,
+                    "source": source,
+                    "confidence": confidence,
+                    "quality_flags": flags,
+                    "summary": package.get("summary") or package.get("error") or "",
+                }
+            )
+
+        summary = {
+            "type": package_type,
+            "stage": stage,
+            "source": source,
+            "success": bool(package.get("success", True)),
+            "confidence": confidence,
+            "needs_review": needs_review,
+            "quality_flags": flags,
+            "artifact_count": artifact_count,
+        }
+        if stage is not None:
+            metadata = self.stage_metadata.setdefault(f"stage{stage}", {})
+            metadata.setdefault("packages", []).append(summary)
+        self.updated_at = datetime.now().isoformat(timespec="seconds")
+        return summary
+
+    def get_artifact_summary(self) -> Dict[str, Any]:
+        """Return artifact counts suitable for reports and checkpoints."""
+
+        by_type: Dict[str, int] = {}
+        by_stage: Dict[str, int] = {}
+        for artifact in self.artifacts:
+            artifact_type = str(artifact.get("type", "unknown"))
+            by_type[artifact_type] = by_type.get(artifact_type, 0) + 1
+            if artifact.get("stage") is not None:
+                stage_key = f"stage{artifact['stage']}"
+                by_stage[stage_key] = by_stage.get(stage_key, 0) + 1
+        return {
+            "total_artifacts": len(self.artifacts),
+            "by_type": by_type,
+            "by_stage": by_stage,
+        }
+
+    def get_quality_summary(self) -> Dict[str, Any]:
+        """Return project quality and review status in one compact shape."""
+
+        open_review_count = sum(1 for item in self.review_queue if item.get("status", "open") == "open")
+        return {
+            "quality_flags": list(self.quality_flags),
+            "quality_flag_count": len(self.quality_flags),
+            "review_queue_count": len(self.review_queue),
+            "open_review_count": open_review_count,
+            "artifact_summary": self.get_artifact_summary(),
+        }
 
     def summary(self) -> str:
-        """返回项目状态摘要"""
+        """Return a compact status summary."""
+
         lines = [
-            f"ResearchProject({self.id}) — {self.topic}",
+            f"ResearchProject({self.id}) - {self.topic}",
             f"  Language: {self.language} | Bilingual: {self.bilingual}",
-            f"  Stage 1 (Collect): {self.stage1_status.value} — {len(self.literature)} papers",
+            f"  Stage 1 (Collect): {self.stage1_status.value} - {len(self.literature)} papers",
             f"  Stage 2 (Organize): {self.stage2_status.value}",
-            f"  Stage 3 (Extract): {self.stage3_status.value} — {len(self.entities)} entities",
+            f"  Stage 3 (Extract): {self.stage3_status.value} - {len(self.entities)} entities",
             f"  Stage 4 (Examine): {self.stage4_status.value}",
-            f"  Stage 5 (Write): {self.stage5_status.value} — {len(self.paper_draft)} chars",
+            f"  Stage 5 (Write): {self.stage5_status.value} - {len(self.paper_draft)} chars",
             f"  Stage 6 (Polish): {self.stage6_status.value}",
             f"  Stage 7 (Format): {self.stage7_status.value}",
+            f"  Review queue: {len(self.review_queue)} | Artifacts: {len(self.artifacts)}",
         ]
         return "\n".join(lines)

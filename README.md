@@ -1,691 +1,184 @@
-# 历史研究AI辅助工具
+# 历史研究 AI 工具箱
 
-## 文档信息
+面向日本史、日文史料处理与学术写作的本地优先型 AI 工作区。
 
-| 属性 | 内容 |
-|------|------|
-| 版本 | 3.0.0 |
-| 更新日期 | 2026年4月1日 |
-| 技术文档 | [COMPREHENSIVE_TECHNICAL_GUIDE.md](COMPREHENSIVE_TECHNICAL_GUIDE.md) |
-| 工作流程图 | [WORKFLOW_DIAGRAM.md](WORKFLOW_DIAGRAM.md) |
+本项目的目标不是做通用聊天应用，而是把 OCR、NER、史料整理、引文管理、学术笔记、论文写作、润色与最终格式化串成一条可复核、可归档、可逐步替换后端的研究流水线。
 
----
+## 当前状态
 
-## 这是什么？
+- 当前优化锚点: [MODULE_OPTIMIZATION_DESIGN_2026-04-21.md](docs/project/MODULE_OPTIMIZATION_DESIGN_2026-04-21.md)
+- AI agent skill 方案: [AI_AGENT_SKILL_DESIGN_2026-04-25.md](docs/project/AI_AGENT_SKILL_DESIGN_2026-04-25.md)
+- 工作区 skill 脚手架: [docs/agent_skills/historyresearch-workspace/SKILL.md](docs/agent_skills/historyresearch-workspace/SKILL.md)
+- 工作流总览: [WORKFLOW_DESIGN.md](WORKFLOW_DESIGN.md)
+- 工作区规范: [GUIDELINES.md](GUIDELINES.md)
+- 详细技术文档: [COMPREHENSIVE_TECHNICAL_GUIDE.md](COMPREHENSIVE_TECHNICAL_GUIDE.md)
+- GitHub 上传排除规范: [docs/GITHUB_UPLOAD_EXCLUSION_POLICY.md](docs/GITHUB_UPLOAD_EXCLUSION_POLICY.md)
 
-一个专为**日本史研究人员**打造的AI工具箱，帮助你处理日文史料、润色学术论文、管理研究文献。
+## 核心能力
 
-### 你是否为这些问题困扰？
+| 方向 | 当前主入口 | 说明 |
+| --- | --- | --- |
+| 统一任务执行 | `modules/task_manager.py`, `modules/unified_task_executor.py` | 管理脚本、本地模型、远程 API、可扩展后端与统一结果元数据 |
+| OCR 与摄入 | `modules/unified_ocr_processor.py` | 多 OCR 后端统一入口，面向 PDF、图像、页面级文本与复核标记 |
+| NER 与实体处理 | `modules/ner_processor.py`, `modules/ner_disambiguation.py` | 支持规则、LLM、本地模型、skill/MCP 扩展方向与实体消歧 |
+| 笔记与知识库 | `modules/academic_note_generator.py`, `modules/obsidian_integration.py` | 生成学术笔记、frontmatter、双链与 vault 输出 |
+| 引文与史料考察 | `modules/citation_normalizer.py`, `modules/citation_formats.py`, `modules/citation_network_analyzer.py` | 统一 citation record、格式渲染、引文网络与可信度摘要 |
+| 写作与润色 | `modules/paper_polisher.py`, `modules/reverse_outline_analyzer.py`, `modules/style_transfer.py` | 草稿、反向大纲、保守文风迁移、引用格式化与最终输出 |
+| 七阶段工作流 | `tools/workflow/` | 从材料搜集到最终论文格式化的阶段化编排 |
+| Web/API | `app/app.py` | Flask API，重模块采用 lazy service，避免导入阶段触发重依赖 |
 
-- 日文PDF文献识别困难？
-- 学术论文润色耗时费力？
-- 历史人名、地名难以整理？
-- 参考文献格式不统一？
+## 七阶段工作流
 
-**这款工具正是为你设计的！**
+1. `collect`: 搜集材料
+2. `organize`: 整理史料、笔记与引文
+3. `extract`: OCR/NER/实体关系抽取
+4. `examine`: 引文网络、史料考察与逻辑审视
+5. `write`: 论文草稿生成
+6. `polish`: 学术润色、文风迁移与反向大纲检查
+7. `format`: 引文规范化、最终稿与 Word 输出
 
----
+详细拆分见 [docs/workflow/README.md](docs/workflow/README.md)。
 
-## 适用人群
+## 安装与启动
 
-| 群体 | 使用场景 |
-|------|----------|
-| 日本史研究生 | 撰写课程论文、毕业论文 |
-| 专职研究员 | 处理大量日文史料 |
-| 学术编辑 | 润色审阅学术稿件 |
-| 档案管理人员 | 数字化历史文档 |
-
----
-
-## 核心功能
-
-### 1. 学术论文润色
-自动修正语法错误，提升学术表达规范度，保留历史专有名词。支持多种润色策略（段落/逐句/修订模式），采用Word原生修订追踪技术。
-
-### 2. PDF文献OCR识别
-将扫描版日文PDF转换为可编辑文本，支持JSON/CSV/TXT导出。支持多种OCR引擎：
-- **Tesseract OCR**：本地运行，支持中/日/英/韩多语言
-- **NDL OCR-Lite**：近代现代日本印刷体文献（需单独下载模型）
-- **NDL古典籍OCR-Lite**：古典草书字文献（需单独下载模型）
-- **通义千问VL OCR**：高精度文档识别，支持水印去除、页码识别
-
-### 3. 历史实体识别
-自动识别人名、地名、事件、机构等历史专有名词，支持同形异义词消歧（如"江戸"、"薩摩"等）。
-
-### 4. 学术笔记生成
-生成符合Obsidian格式的阅读笔记，自动构建知识图谱，支持双向链接。
-
-### 5. 引用格式规范化
-统一参考文献格式（支持Chicago、APA、GB/T 7714、MLA、IEEE、Harvard等）。
-
-### 6. 文风分析与迁移
-四维度文风矩阵分析（句法结构、词汇深度、语气叙事、学术修辞），支持少样本文风模仿。
-
-### 7. 虚拟人格对话系统
-预设历史人物人格（福泽谕吉、丸山真男、涩泽荣一），支持学术咨询和历史事件评论。
-
-### 8. 引文网络分析
-构建引文网络图谱，分析理论演进脉络，识别学术流派及其分支。
-
-### 9. 史料发言识别与年代提取
-从OCR处理后的史料文本中识别发言内容、提取年代信息，支持年号转换和出版年代推断。
-
-### 10. NDL文献检索与下载
-日本国立国会图书馆（NDL）文献搜索与PDF下载，支持SRU API和Selenium浏览器两种方式。
-
-### 11. 智能研究助手（IntelligentResearchAssistant）
-**新增统一模块**，整合了原 `open_source_finder` 和 `learning_module` 的全部功能，提供一站式研究辅助服务：
-- **多平台搜索**：GitHub、arXiv、Papers With Code等平台的开源项目和学术论文搜索
-- **深度分析**：项目质量评估、论文内容分析、文献综述生成
-- **智能报告**：自动生成结构化研究报告和改进建议
-- **缓存优化**：智能缓存机制，减少API调用，提升性能
-- **统一接口**：简化的API设计，易于使用和扩展
-
-### 12. RAG检索增强生成
-完整的检索增强生成功能，支持文档加载、文本分块、向量检索和生成式问答。支持多种向量数据库（ChromaDB、FAISS），专为历史研究场景优化。
-
----
-
-## 重要说明：NDL OCR模型
-
-### 模型获取方式
-
-本工作区中的NDL OCR相关模块（`ndlocr_lite.py`、`ndlkotenocr_lite.py`、`unified_ocr_processor.py`）**仅提供接口脚本**，实际使用需要单独下载对应的模型文件：
-
-| 模型 | 用途 | 下载地址 |
-|------|------|----------|
-| NDL OCR-Lite | 近代现代文献 | https://github.com/ndl-lab/ndlocr-lite |
-| NDL古典籍OCR-Lite | 古典籍文献 | https://github.com/ndl-lab/ndlkotenocr-lite |
-
-### 安装步骤
-
-```bash
-# 1. 创建外部目录
-mkdir external
-cd external
-
-# 2. 克隆NDL OCR仓库
-git clone https://github.com/ndl-lab/ndlocr-lite.git
-git clone https://github.com/ndl-lab/ndlkotenocr-lite.git
-
-# 3. 下载模型文件（从GitHub Release页面下载）
-# 放置到对应目录：
-# external/ndlocr-lite/src/model/
-# external/ndlkotenocr-lite/src/model/
-
-# 4. 安装依赖
-cd ndlocr-lite && pip install -r requirements.txt
-cd ../ndlkotenocr-lite && pip install -r requirements.txt
-```
-
-### 验证安装
-
-```python
-from modules.ndlocr_lite import NDLOCRInterface
-
-interface = NDLOCRInterface()
-validation = interface.validate_setup()
-print(f"NDL OCR可用: {validation['all_valid']}")
-```
-
-详细配置请参考 [NDLoCR接入指南](docs/ndlocr_integration_guide.md)。
-
----
-
-## 快速开始
-
-### 第一步：安装依赖
-
-```bash
-# 克隆项目
-git clone <repository-url>
-cd AItools-for-historyresearch
-
-# 创建虚拟环境（推荐）
-python -m venv venv
-venv\Scripts\activate  # Windows
-# source venv/bin/activate  # Linux/macOS
-
-# 安装Python依赖
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-### 第二步：配置API密钥
+后端服务:
 
-创建 `.env` 文件，添加你的API密钥：
-
-```env
-# 至少配置一个LLM服务商即可！
-
-# 方案A：阿里云通义千问（推荐，国内直连）
-DASHSCOPE_API_KEY=sk-your-key-here
-
-# 方案B：OpenAI（需要代理）
-OPENAI_API_KEY=sk-your-key-here
-
-# 方案C：智谱AI
-ZHIPU_API_KEY=your-key-here
+```powershell
+python app\app.py
 ```
 
-### 第三步：安装Tesseract OCR（可选）
+工作流示例:
 
-如需本地OCR识别，下载并安装 [Tesseract OCR](https://github.com/UB-Mannheim/tesseract/wiki)，安装时勾选中文、日文语言包。
-
-### 第四步：下载NDL OCR模型（可选）
-
-如需使用NDL OCR功能，请按照上方"重要说明：NDL OCR模型"章节的步骤操作。
-
-### 第五步：启动后端服务
-
-```bash
-python app.py
+```powershell
+python run_workflow.py
 ```
 
-后端API服务将运行在 http://localhost:5000
+运行测试时优先使用:
 
-### 第六步：启动前端应用（可选）
-
-本项目提供完整的Web前端界面，支持可视化操作：
-
-```bash
-cd frontend
-python server.py
+```powershell
+python -m unittest discover tests
 ```
 
-前端应用将运行在 http://localhost:3001
+如需固定 Python 3.11:
 
-**前端功能特性：**
-- 🎨 简约现代的UI设计，支持深色/浅色主题
-- 🌐 国际化支持（中文/日文/英文）
-- 📱 响应式布局，适配桌面和移动设备
-- 🔐 安全的API密钥本地存储
-- 📊 实时任务进度和历史记录
-
-**前端页面说明：**
-
-| 页面 | 功能 |
-|------|------|
-| 首页 | 仪表盘，显示统计数据和快捷入口 |
-| 论文润色 | 上传Word文档或输入文本进行润色 |
-| OCR识别 | 多引擎OCR，支持批量处理 |
-| 实体识别 | 自动识别人名、地名等历史实体 |
-| 笔记生成 | 生成Obsidian格式的学术笔记 |
-| 引用规范化 | 统一参考文献格式 |
-| 文风迁移 | 分析和迁移文本写作风格 |
-| 虚拟人格 | 与历史人物角色扮演对话 |
-| AI研究助手 | 智能对话解答研究问题 |
-| 设置 | 配置API密钥和偏好设置 |
-
----
-
-## 快速示例
-
-### 示例1：一键润色论文
-
-```python
-from modules.llm_client import LLMClient
-
-client = LLMClient({'provider': 'dashscope', 'api_key': 'your-key'})
-
-result = client.academic_polish(
-    "伊藤博文氏ハ明治維新ノ前後ニ於テ...", 
-    language='ja'
-)
-print(result['content'])
+```powershell
+py -3.11 -m unittest discover tests
 ```
 
-### 示例2：OCR识别日文PDF（通义千问VL）
+## 密钥与隐私
 
-```python
-from modules.llm_ocr_processor import QwenVLOCRProcessor
+本工作区遵循本地优先和最小泄露原则。
 
-processor = QwenVLOCRProcessor(api_key='your-dashscope-key')
+- API key、token、账号凭据只允许放入 `secrets/` 或受控的本地密钥管理入口。
+- 不在 README、示例、日志、测试报告中写入真实密钥、cookie、原始私密史料全文或可复原的敏感材料。
+- 日志只记录路径、统计、摘要、错误类别、后端元数据与复核标记。
+- 临时脚本和中间文件完成报告后应归档或删除，不让根目录继续堆积。
 
-results = processor.process_pdf(
-    pdf_path='input.pdf',
-    start_page=1,
-    end_page=20,
-    language='ja'
-)
+完整规范见 [GUIDELINES.md](GUIDELINES.md)。
 
-print(f"处理页数: {len(results)}")
-```
+## 后端扩展原则
 
-### 示例3：使用NDL OCR（需先下载模型）
+后续模块优化允许使用多种后端，但必须回收为统一协议:
 
-```python
-from modules.unified_ocr_processor import UnifiedOCRProcessor
+- `script`: 纯规则或本地脚本
+- `llm_api`: 远程大模型 API
+- `local_llm`: 本地部署模型
+- `skill`: Codex skill 或同类工作流能力
+- `mcp`: MCP 工具或连接器
+- `hybrid`: 多后端组合
 
-processor = UnifiedOCRProcessor()
+无论采用哪类后端，结果都应尽量包含:
 
-# 检查模型可用性
-models = processor.get_available_models()
-for model in models:
-    print(f"{model['type']}: 可用={model['available']}")
-
-# 使用NDL古典籍OCR
-result = processor.process_image('koten.png', model_type='ndlkotenocr_lite')
-```
-
-### 示例4：识别历史实体
-
-```python
-from modules.ner_processor import NERProcessor
-
-processor = NERProcessor(api_provider='qwen')
-entities = processor.recognize_historical_entities(
-    "1868年，伊藤博文在东京建立了新政府。",
-    categories=['person', 'event', 'date']
-)
-print(entities)
-```
-
-### 示例5：史料发言识别与年代提取
-
-```python
-from modules.historical_speech_extractor import create_speech_extractor
-
-extractor = create_speech_extractor(api_provider='qwen')
-
-# 加载OCR结果
-ocr_data = extractor.load_ocr_result("ocr_result.json")
-
-# 处理数据
-records = extractor.process_ocr_result(ocr_data)
-
-# 导出结果
-extractor.export_results(records, "output.json", format='json')
-```
-
-### 示例6：NDL文献检索
-
-```python
-from ndl_search.core import NDLSearcher
-
-searcher = NDLSearcher(output_dir='./downloads')
-
-result = searcher.search_and_download(
-    keyword='井上哲次郎 倫理新説',
-    max_attempts=5
-)
-
-if result.status == 'success':
-    print(f'下载成功: {result.file_path}')
-```
-
-### 示例7：智能研究助手（推荐）
-
-```python
-from intelligent_research_assistant import IntelligentResearchAssistant
-
-assistant = IntelligentResearchAssistant(api_provider='qwen')
-
-projects = assistant.search_projects("machine learning", limit=10)
-papers = assistant.search_papers("deep learning", limit=10)
-
-for project in projects[:5]:
-    print(f"{project.title} - {project.url}")
-
-report = assistant.generate_report(projects, papers)
-print(report.summary)
-```
-
-### 示例8：RAG检索增强生成
-
-```python
-from rag_module.core import RAGEngine, RAGConfig
-
-config = RAGConfig(
-    chunk_size=500,
-    chunk_overlap=50,
-    store_type='chroma'
-)
-engine = RAGEngine(config)
-
-engine.load_document('史料.pdf')
-
-results = engine.retrieve('明治维新的影响', top_k=5)
-for result in results:
-    print(f"相关度: {result.score:.2f}")
-    print(f"内容: {result.content[:100]}...")
-
-answer = engine.query('明治维新对日本社会产生了哪些影响？')
-print(answer)
-```
-
-### 示例9：RAG后端切换（Dify/Ragflow）
-
-```python
-from rag_module.adapters import RAGFactory, RAGBackend
-
-available = RAGFactory.get_available_backends()
-for backend, info in available.items():
-    print(f"{backend.value}: {info['message']}")
-
-adapter = RAGFactory.switch_backend(
-    RAGBackend.RAGFLOW,
-    config={
-        'api_key': 'your-api-key',
-        'base_url': 'http://localhost',
-        'dataset_name': 'history-research'
-    }
-)
-
-response = adapter.query('明治维新的历史意义是什么？')
-print(response.answer)
-```
-
----
+- `backend`
+- `provider`
+- `model`
+- `confidence`
+- `needs_review`
+- `capabilities`
+- `artifacts`
 
 ## 项目结构
 
-```
-AItools-for-historyresearch/
-├── app/                          # Flask应用
-│   ├── app.py                    # Flask应用入口
-│   └── config.py                 # 应用配置
-├── modules/                      # 核心功能模块
-│   ├── llm_client.py            # LLM客户端（多服务商支持）
-│   ├── doc_processor.py         # Word文档处理
-│   ├── pdf_processor.py         # PDF处理
-│   ├── ocr_processor.py         # OCR识别（Tesseract）
-│   ├── llm_ocr_processor.py     # LLM OCR处理器（通义千问VL）
-│   ├── unified_ocr_processor.py # 统一OCR处理器（NDL系列）
-│   ├── ndl_ocr_batch_processor.py   # NDL OCR批量处理
-│   ├── ndl_ocr_monitor.py       # NDL OCR心跳监控
-│   ├── ndlocr_lite.py           # NDL OCR-Lite接口
-│   ├── ndlkotenocr_lite.py      # NDL古典籍OCR-Lite接口
-│   ├── ner_processor.py         # 命名实体识别
-│   ├── ner_disambiguation.py    # 实体消歧
-│   ├── historical_speech_extractor.py  # 史料发言识别
-│   ├── academic_note_generator.py   # 学术笔记生成
-│   ├── academic_summarizer.py   # 学术摘要生成
-│   ├── paper_polisher.py        # 论文润色
-│   ├── paper_polisher_enhanced.py   # 论文润色增强版
-│   ├── reverse_outline_analyzer.py  # 逆向大纲分析
-│   ├── citation_normalizer.py   # 引用规范化
-│   ├── citation_network_analyzer.py # 引文网络分析
-│   ├── style_transfer.py        # 文风分析与迁移
-│   ├── virtual_persona_chatbot.py   # 虚拟人格对话
-│   ├── embedding_manager.py     # 嵌入模型管理
-│   ├── obsidian_integration.py  # Obsidian集成
-│   ├── data_structurer.py       # 数据结构化
-│   ├── environment_checker.py   # 环境检查
-│   ├── setup_assistant.py       # 环境配置助手
-│   └── prompts/                 # 提示词目录
-├── intelligent_research_assistant/  # 智能研究助手模块（新增）
-│   ├── core/                    # 核心组件
-│   │   ├── llm_manager.py      # LLM管理器
-│   │   ├── cache_manager.py    # 缓存管理器
-│   │   ├── config_manager.py   # 配置管理器
-│   │   └── data_models.py      # 数据模型
-│   ├── search/                  # 搜索层
-│   │   ├── project_finder.py   # 项目搜索
-│   │   ├── paper_finder.py     # 论文搜索
-│   │   └── document_fetcher.py # 文档获取
-│   ├── analysis/                # 分析层
-│   │   ├── project_analyzer.py # 项目分析
-│   │   ├── paper_analyzer.py   # 论文分析
-│   │   └── literature_analyzer.py # 文献分析
-│   ├── generation/              # 生成层
-│   │   ├── report_generator.py # 报告生成
-│   │   └── improvement_generator.py # 改进建议生成
-│   ├── docs/                    # 文档
-│   │   ├── API_DOCUMENTATION.md
-│   │   ├── USER_GUIDE.md
-│   │   ├── MIGRATION_GUIDE.md
-│   │   └── INTEGRATION_CHECK_REPORT.md
-│   ├── tests/                   # 测试
-│   └── intelligent_assistant.py # 主入口
-├── rag_module/                    # RAG检索增强生成模块
-│   ├── core/                      # 核心组件
-│   │   ├── rag_engine.py         # RAG主引擎
-│   │   ├── config.py             # 配置管理
-│   │   └── types.py              # 类型定义
-│   ├── loaders/                   # 文档加载器
-│   ├── splitters/                 # 文本分块器
-│   ├── stores/                    # 向量存储
-│   ├── retrievers/                # 检索器
-│   ├── tests/                     # 测试
-│   └── docs/                      # 文档
-├── ndl-search/                   # NDL搜索模块
-│   ├── core/
-│   │   └── dl_searcher.py       # NDL搜索器核心
-│   ├── config/
-│   │   └── settings.py          # NDL配置管理
-│   └── docs/
-│       └── README.md
-├── archive/                      # 归档目录
-│   ├── archived_modules/        # 已归档模块
-│   │   ├── open_source_finder/  # 开源搜索器（已归档）
-│   │   └── learning_module/     # 学习模块（已归档）
-│   └── ARCHIVE_README.md        # 归档说明
-├── config/                       # 配置目录
-│   ├── api_config.json          # API配置
-│   ├── api_config_loader.py     # 配置加载器
-│   ├── api_key_manager.py       # API密钥管理
-│   └── ndlocr_interface_config.json  # NDLoCR接口配置
-├── data/                         # 数据目录
-│   └── dictionaries/
-│       ├── historical_entities.json  # 历史实体词典
-│       └── historical_entities_manager.py
-├── external/                     # 外部工具（不纳入Git，需单独下载）
-│   ├── dify/                     # Dify LLM应用平台（可选）
-│   ├── ragflow/                  # Ragflow RAG引擎（可选）
-│   ├── ndlocr-lite/             # NDL OCR-Lite模型
-│   └── ndlkotenocr-lite/        # NDL古典籍OCR-Lite模型
-├── frontend/                     # 前端应用（Web界面）
-│   ├── index.html               # 主页面
-│   ├── app.js                   # 应用逻辑
-│   ├── i18n.js                  # 国际化支持
-│   ├── test.html                # 测试页面
-│   ├── server.py                # 本地服务器
-│   └── src/                     # TypeScript源码（可选）
-├── docs/                         # 文档目录
-│   ├── guides/                  # 使用指南
-│   ├── integration/             # 集成文档
-│   └── ndlocr_integration_guide.md  # NDLoCR接入指南
-├── log/                          # 日志目录
-├── tests/                        # 测试目录
-├── tools/                        # 工具脚本
-│   ├── batch_processing/        # 批量处理工具
-│   ├── debug/                   # 调试工具
-│   └── ndl_downloader/          # NDL下载工具
-├── COMPREHENSIVE_TECHNICAL_GUIDE.md  # 详尽技术指南
-├── WORKFLOW_DIAGRAM.md           # 工作流程图
-└── requirements.txt              # Python依赖
+```text
+app/                  Flask API 与配置层
+modules/              OCR、NER、引用、写作、知识库等模块
+tools/workflow/        七阶段研究工作流
+docs/                 设计文档、指南与案例
+docs/workflow/         拆分后的工作流说明
+log/feature_development/ 优化报告与阶段日志
+tests/                单元测试与集成测试
+secrets/              本地密钥与敏感配置，禁止公开
+output/               正式输出产物
+temp/ tmp/ cache/      临时与缓存目录，使用后应清理
 ```
 
----
+## 当前优化方式
 
-## 模块架构关系图
+所有后续优化都以 `docs/project/MODULE_OPTIMIZATION_DESIGN_2026-04-21.md` 为锚点推进。若工作中发现新的优化方向，先补写到该文件，再进入实现；每完成一个优化步骤，写入 `log/feature_development/` 下的正式报告，并继续下一步。
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     用户交互层                                   │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │ Web前端     │  │ Flask API   │  │ Python脚本调用          │  │
-│  │ (前端界面)  │  │ (后端接口)  │  │ (命令行)                │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                     核心功能层                                   │
-│  ┌───────────────┐  ┌───────────────┐  ┌───────────────────┐    │
-│  │ LLM客户端     │  │ OCR处理器     │  │ 文档处理器        │    │
-│  │ (多服务商)    │  │ (多引擎)      │  │ (Word/PDF)        │    │
-│  └───────────────┘  └───────────────┘  └───────────────────┘    │
-│  ┌───────────────┐  ┌───────────────┐  ┌───────────────────┐    │
-│  │ NER处理器     │  │ 引用规范化    │  │ 文风分析          │    │
-│  └───────────────┘  └───────────────┘  └───────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                   智能研究助手模块                               │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │                    IntelligentResearchAssistant            │  │
-│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────────┐   │  │
-│  │  │搜索层   │  │分析层   │  │生成层   │  │核心管理层   │   │  │
-│  │  │- 项目   │  │- 项目   │  │- 报告   │  │- LLM管理    │   │  │
-│  │  │- 论文   │  │- 论文   │  │- 建议   │  │- 缓存管理   │   │  │
-│  │  │- 文档   │  │- 文献   │  │         │  │- 配置管理   │   │  │
-│  │  └─────────┘  └─────────┘  └─────────┘  └─────────────┘   │  │
-│  └───────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                     扩展功能层                                   │
-│  ┌───────────────┐  ┌───────────────┐  ┌───────────────────┐    │
-│  │ RAG模块       │  │ NDL搜索模块   │  │ 虚拟人格对话      │    │
-│  └───────────────┘  └───────────────┘  └───────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                     外部服务层                                   │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐            │
-│  │通义千问 │  │ OpenAI  │  │ 智谱AI  │  │ GitHub  │            │
-│  └─────────┘  └─────────┘  └─────────┘  └─────────┘            │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐            │
-│  │ arXiv   │  │ NDL API │  │ Dify    │  │ Ragflow │            │
-│  └─────────┘  └─────────┘  └─────────┘  └─────────┘            │
-└─────────────────────────────────────────────────────────────────┘
-```
+## 2026-04-25 Package/Envelope 进展
 
----
+- `TaskManager.get_task_registry()` / `get_capabilities()` / `execute_task_package()`: 统一任务层现在可输出任务注册表、preset/backend 能力快照与 `task_execution` envelope，供 API、skill、MCP、小模型 agent 以同一协议调用。
+- `UnifiedTaskExecutor.execute_package()` / `TaskResult.to_package()` / `write_execution_artifact()`: 底层执行器现在会记录 validation 元数据，并在显式给出路径时写出 `task_execution` JSON artifact；默认不落盘，且拒绝写入 `secrets/`。
+- `module_adapters.get_adapter_registry()` / `get_adapter_spec()` / `BaseAdapter.execute_package()`: adapter 层现在公开 alias、主方法、输入契约和 package 入口，减少 API/workflow/agent 对内部方法名的硬编码。
+- `ResearchProject.register_package()` / `register_artifact()` / `get_quality_summary()`: 项目状态层现在可统一挂载 package artifacts、quality flags、review queue 与 stage metadata。
+- `WorkflowOrchestrator`: 成功 checkpoint 继续登记 artifact；失败阶段现在通过 `workflow_stage_failure` package 统一写入 checkpoint artifact、quality flag、review queue 与 stage metadata。
+- `Stage3Extract`: NER 阶段现在保存 `task_layer_snapshot`，并优先通过 `TaskManager.execute_task_package()` 获取 `task_execution` 摘要，旧 `execute_task()` 仍保留兼容 fallback。
+- `SecureAPIKeyManager.get_status_report()` / `APIKeyManager.get_status_report()`: 默认输出脱敏状态快照，不暴露真实 key、key hash 或 secrets 绝对路径；内部诊断需显式开启。
+- `app.create_app()` / `/api/system/status`: API 层现在提供 app factory 和 lazy service 状态端点，可查看服务初始化状态而不触发 OCR/LLM 等重对象加载。
+- `ArtifactManager` / `EnvironmentChecker.build_environment_package()`: 新增托管 root 内 JSON artifact 写入与环境 package 快照；默认不写文件，拒绝 `secrets/` 和 root 外路径。
+- `docs/project/OPTIMIZATION_BRANCH_ARCHIVE_2026-04-25.md`: 优化分支归档已完成 manifest 化；仍被测试或动态导入引用的分支文件暂不物理移动。
+- `Stage2Organize`: academic note、Obsidian note export 和 graph package 现在会通过 `ResearchProject.register_package()` 登记，vault artifact 走 `register_artifact()`。
+- `Stage4Examine`: citation network 与 outline review 结果现在通过 `ResearchProject.register_package()` 登记，review queue 可追踪 package 级复核项。
+- `Stage5Write`: field draft package 和统一 `paper_draft` package 会登记到项目状态，source snapshot 与草稿质量标记可被后续 Stage 6/7 消费。
+- `Stage6Polish`: `paper_polish`、`style_transfer`、`outline_review` package 现在会通过 `ResearchProject.register_package()` 登记到项目状态，并在 `package_protocol` 中保留注册摘要，便于 API、agent skill 与 Stage 7 继续消费。
+- `Stage7Format`: `citation_formatting` package 和 Word 导出 artifact 现在分别通过 `ResearchProject.register_package()` / `register_artifact()` 登记，并在 `package_protocol`、`artifact_protocol` 中保留交接摘要。
+- `WorkflowOrchestrator`: checkpoint JSON 现在通过 `ArtifactManager.write_json_artifact()` 写入托管输出根目录，项目层继续登记 `workflow_checkpoint` artifact，便于恢复、审计与 agent 调用。
+- `/api/tasks/execute`: API 任务入口现在返回 `TaskManager.execute_task_package()` 生成的 `task_execution` envelope，供前端、MCP、skill 和小模型 agent 使用同一响应结构。
+- `optimized/enhanced/integrated` 分支归档：已完成退出准备清单；因仍有测试和动态导入引用，暂不物理移动，详见 `docs/project/OPTIMIZATION_BRANCH_EXIT_PREP_2026-04-25.md`。
+- `historyresearch-workspace` skill: 新增 TaskManager/ArtifactManager 只读契约快照脚本，帮助小模型 agent 先读取任务/产物能力摘要，再调用统一 package 接口。
 
-## 支持的LLM服务商
+当前新增或贯通的结构化接口包括:
 
-| 服务商 | 特点 | 推荐场景 |
-|--------|------|----------|
-| 阿里云通义千问 | 国内直连，速度快 | **首选** |
-| OpenAI GPT-4 | 效果最好 | 有代理环境 |
-| 智谱AI | 国内可用 | 备选方案 |
-| DeepSeek | 性价比高 | 成本敏感 |
-| Ollama | 本地部署 | 离线使用 |
+- `PDFImageConverter.convert_range_package()` / `convert_pdf_to_images_package()`: 输出页级图片 artifact、DPI、尺寸、源页映射和复核标记。
+- `CitationNetworkAnalyzer.analyze_documents_package()`: 输出引用网络 `records/nodes/edges/summary` 与后端执行元数据。
+- `Stage4Examine`: 已优先消费引用网络 package，并回写 `confidence/needs_review/quality_flags`。
+- `AcademicSummarizer.generate_full_analysis_package()`: 输出 `academic_analysis` envelope，供摘要、问题、概念和方法抽取链路复用。
+- `UnifiedOCRProcessor.process_image_package()`: 输出 `ocr_result` envelope，承接 PDF 图片 artifact。
+- `UniversalLayoutAnalyzer.analyze_page_package()` / `analyze_document_package()`: 输出 `layout_page/layout_document`，支持 metadata-only 轻量路径，模型和 PDF 依赖只在显式分析时加载。
+- `PDFDateMatcher.parse_annotation_dates_package()` / `match_dates_package()` / `generate_training_data_package()`: 输出 `date_extraction/date_match_pairs/training_samples`，默认离线且不读取配置密钥文件。
+- `ClassicalOCRTrainingWorkflow.build_summary_package()` / `build_training_samples_package()`: 古典籍 OCR 训练总线输出 `training_workflow_summary/training_samples`，负责协调版面、日期匹配和样本导出状态。
+- `BiographyExtractor.extract_entities_package()` / `process_ocr_results_package()`: 人物传记结构化输出 `biography_entities/biography_batch`，默认离线且不读取 `secrets/`。
+- `BiographicalNER.process_text_blocks_package()`: 人物传记专属规则库输出 `biography_entities`，修复导入问题并作为主提取器的轻量规则后端。
+- `BiographyPipeline.process_ocr_results_package()` / `build_summary_package()`: 人物传记流程包装层输出 `biography_batch/biography_pipeline_summary`，定位为薄工作流封装。
+- `OCRProcessor.extract_text_from_image_package()` / `batch_ocr_package()`: 底层 Tesseract/LLM OCR 兼容入口也输出 OCR envelope。
+- `LLMOCRProcessor.build_pages_package()` / `run_package()`: 远程 Qwen-VL OCR 分支回收为 OCR envelope。
+- `NDLOCRLiteProcessor.process_image_package()` / `process_directory_package()`: 本地 NDL OCR-Lite 分支回收为 OCR envelope。
+- `NDLKotenOCRLiteProcessor.process_image_package()` / `process_directory_package()`: 古典 OCR-Lite 分支回收为 OCR envelope。
+- `NDLOCRResultProcessor.process_result_package()` / `batch_process_package()`: OCR 后处理结果回收为 `processed_ocr_result` envelope。
+- `NDLOCRBatchProcessor.process_batch_package()`: 批量 NDL OCR 入口输出 `ocr_batch`，并在引擎不可用时结构化降级。
+- `LLMClient(provider="ollama")`: 本地 Ollama 接入已支持 `/v1` URL 归一、短 smoke、空输出质量标记和 `local_llm` 元数据。
+- `TaskManager` 的 `summary_local_small` preset: 用于小参数 Ollama 模型的低 token 摘要 smoke，并支持 `local_llm -> script` 降级。
+- `AcademicNoteGenerator.generate_reading_note_package()` / `batch_process_package()`: 学术笔记输出 `academic_note/academic_note_batch`，Stage 2 已记录 note package 摘要。
+- `ObsidianIntegration.create_note_package()` / `build_knowledge_graph_package()`: vault 输出收口为本地文件系统安全写入、frontmatter、双链与 graph scan，Stage 2 已记录 vault package 摘要。
+- `HistoricalSpeechExtractor.process_ocr_result_package()` / `analyze_text_package()`: 历史发言、日期与实体附着输出 `historical_speech_analysis`，便于 OCR/NER 后续闭环消费。
+- `EmbeddingManager.create_vector_index_package()` / `semantic_search_package()`: 嵌入检索默认走轻量 mock fallback，避免小模型/agent 调用时触发重依赖或外网模型加载。
+- `HistoryFieldExplorer.explore_package()` / `draft_paper_package()`: 研究入门与草稿生成输出 `field_research/field_draft`，Stage 5 已记录 field draft package 摘要。
+- `CitationFormatter.format_record_package()` / `format_batch_package()`: 引用格式层输出 `citation_formatting`，Stage 7 已记录 citation format package 摘要。
+- `HistoricalCitationVerifier.parse_docx_package()` / `verify_docx_package()`: 历史引文核验输出 `historical_citation_parse/historical_citation_verification`，默认解析离线，外部检索和下载需显式开启。
+- `HistoricalCitationWorkspaceInterface` / `HistoricalCitationAdapter`: 在不修改原历史引文模块的前提下，新增工作区安全外壳与统一任务入口 `historical_citation`；默认只做离线 DOCX 解析，`search_ndl/download_source/restricted_download` 必须显式开启，返回路径已脱敏的 `historical_citation_workspace_package`。
+- `/api/doc/historical-citation-package`: 面向前端、MCP、skill 和小模型 agent 的历史引文统一 package 端点；旧 `/api/doc/verify-historical-citations` 保留兼容，不改变原返回结构。
+- `PaperPolisher.polish_text_package()` / `polish_paragraph_package()`: 写作润色输出 `paper_polish`，Stage 6 已记录 package 类型与质量标记。
+- `ReverseOutlineAnalyzer.analyze_package()`: 反向大纲审校输出 `outline_review`，Stage 6 已记录 package 类型与质量标记。
+- `StyleTransfer.transfer_style_package()`: 保守文风迁移输出 `style_transfer`，Stage 6 已记录 package 类型与质量标记。
+- `NERProcessor.recognize_historical_entities_package()`: 输出 `ner_extraction` envelope，支持后续 script/LLM/local/skill/MCP 统一回收。
+- `NERDisambiguation.disambiguate_package()` / `EntityDisambiguator.batch_disambiguate_package()`: NER 后处理输出 `entity_disambiguation`，Stage 3 已记录规范名、类型变化、低置信和未知规则摘要。
+- `Stage3Extract` 与 `Stage5Write`: 已把 NER package 写入阶段摘要，并由写作阶段 source snapshot 消费。
 
----
-
-## 局限性与已知问题
-
-### 重要限制
-
-#### 1. NDL OCR模型不包含在工作区内
-
-本工作区中与NDL OCR相关的模块（`ndlocr_lite.py`、`ndlkotenocr_lite.py`、`unified_ocr_processor.py`）**仅提供接口脚本和调用逻辑**，实际的OCR模型文件需要用户自行从官方仓库下载：
-
-- **NDL OCR-Lite**: https://github.com/ndl-lab/ndlocr-lite
-- **NDL古典籍OCR-Lite**: https://github.com/ndl-lab/ndlkotenocr-lite
-
-模型文件较大（约数百MB），且可能涉及许可限制，因此未包含在本工作区中。
-
-#### 2. API密钥需自行申请
-
-本工具依赖大语言模型API，用户需要自行申请API密钥：
-- 阿里云通义千问：https://dashscope.console.aliyun.com/
-- OpenAI：https://platform.openai.com/
-- 智谱AI：https://open.bigmodel.cn/
-
-#### 3. 网络环境要求
-
-- 使用OpenAI API需要稳定的国际网络连接
-- 使用通义千问等国内API需要国内网络环境
-- NDL文献下载需要能够访问日本国立国会图书馆网站
-
-### 已知问题
-
-#### 1. OCR识别精度
-
-- **Tesseract OCR**：对日文古籍、手写体识别效果有限
-- **NDL OCR-Lite**：仅适用于近代现代印刷体，对古典籍效果不佳
-- **NDL古典籍OCR-Lite**：比NDL古典籍OCR ver.3精度稍低约2%
-- **通义千问VL OCR**：对复杂版面、多栏排版可能识别不准确
-
-#### 2. 历史实体识别
-
-- 实体词典覆盖范围有限，可能遗漏部分历史人物和地名
-- 同形异义词消歧依赖上下文关键词匹配，可能存在误判
-- 年号转换仅支持主要日本年号，部分冷门年号可能无法识别
-
-#### 3. 论文润色
-
-- 润色结果依赖LLM输出质量，可能存在过度修改或遗漏问题
-- 脚注引用保护机制在复杂文档结构中可能失效
-- 修订追踪功能仅在Microsoft Word中完全支持
-
-#### 4. NDL文献下载
-
-- 部分文献可能因版权限制无法下载
-- Selenium下载方式依赖浏览器环境，可能因网站更新而失效
-- 下载速度受网络环境影响较大
-
-#### 5. 虚拟人格对话
-
-- 人格设定基于历史文献和研究成果，可能存在主观解读
-- 对话内容仅供参考，不构成学术结论
-
-### 性能限制
-
-| 功能 | 限制说明 |
-|------|----------|
-| PDF OCR处理 | 大文件（>100页）处理时间较长，建议分批处理 |
-| LLM API调用 | 受API速率限制，批量处理时需注意配额 |
-| NDL文献下载 | 单次下载建议不超过10个文件，避免触发反爬机制 |
-| 嵌入向量构建 | 大规模文档集合（>10000篇）需要较长索引时间 |
-
-### 兼容性说明
-
-| 环境 | 支持情况 |
-|------|----------|
-| Windows 10+ | 完全支持（主要开发环境） |
-| macOS | 基本支持，部分路径配置需调整 |
-| Linux | 基本支持，需安装系统依赖 |
-| Python 3.8 | 最低版本 |
-| Python 3.11+ | 推荐版本 |
-
----
-
-## 常见问题
-
-### Q: API调用失败怎么办？
-**A:** 检查API密钥是否正确配置，确认网络连接，或查看详细错误日志。
-
-### Q: 日文OCR识别不准？
-**A:** 
-- 近代现代文献：推荐使用NDL OCR-Lite或通义千问VL OCR
-- 古典籍文献：推荐使用NDL古典籍OCR-Lite
-- 通用场景：可尝试LLM辅助OCR校正
-
-### Q: NDL OCR模型如何下载？
-**A:** 请参考上方"重要说明：NDL OCR模型"章节，从GitHub Release页面下载模型文件。
-
-### Q: 如何切换LLM服务商？
-**A:** 修改 `.env` 中的 `LLM_PROVIDER` 或在代码中指定 `provider` 参数。
-
-### Q: 脚注引用在润色后丢失？
-**A:** 确保使用 `paper_polisher_enhanced.py` 或启用修订追踪模式，该版本包含脚注引用保护机制。
-
-### Q: 如何使用智能研究助手？
-**A:** 参考 [智能研究助手用户指南](intelligent_research_assistant/docs/USER_GUIDE.md) 和 [API文档](intelligent_research_assistant/docs/API_DOCUMENTATION.md)。
-
-### Q: 原来的open_source_finder和learning_module去哪了？
-**A:** 这两个模块已整合到 `IntelligentResearchAssistant` 模块中，原模块已归档到 `archive/archived_modules/` 目录。迁移指南请参考 [迁移指南](intelligent_research_assistant/docs/MIGRATION_GUIDE.md)。
-
----
-
-## 更多资源
-
-- **详尽技术指南**：[COMPREHENSIVE_TECHNICAL_GUIDE.md](COMPREHENSIVE_TECHNICAL_GUIDE.md)
-- **工作流程图**：[WORKFLOW_DIAGRAM.md](WORKFLOW_DIAGRAM.md)
-- **前端开发报告**：[FRONTEND_DEVELOPMENT_COMPLETION_REPORT.md](FRONTEND_DEVELOPMENT_COMPLETION_REPORT.md)
-- **NDLoCR接入指南**：[docs/ndlocr_integration_guide.md](docs/ndlocr_integration_guide.md)
-- **智能研究助手文档**：[intelligent_research_assistant/README.md](intelligent_research_assistant/README.md)
-- **智能研究助手API文档**：[intelligent_research_assistant/docs/API_DOCUMENTATION.md](intelligent_research_assistant/docs/API_DOCUMENTATION.md)
-- **智能研究助手用户指南**：[intelligent_research_assistant/docs/USER_GUIDE.md](intelligent_research_assistant/docs/USER_GUIDE.md)
-- **迁移指南**：[intelligent_research_assistant/docs/MIGRATION_GUIDE.md](intelligent_research_assistant/docs/MIGRATION_GUIDE.md)
-- **NDL搜索模块文档**：[ndl-search/docs/README.md](ndl-search/docs/README.md)
-- **RAG模块文档**：[rag_module/docs/RAG_MODULE_GUIDE.md](rag_module/docs/RAG_MODULE_GUIDE.md)
-- **归档说明**：[archive/ARCHIVE_README.md](archive/ARCHIVE_README.md)
+这些接口均保留旧 API 兼容层；新 workflow 实现应优先消费 package/envelope，并把质量标记写入 `stage_metadata`、`quality_flags` 或 `review_queue`。

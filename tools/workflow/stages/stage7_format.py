@@ -1,34 +1,24 @@
 """
-Stage 7: 注释格式修改
+Stage 7: format citations and assemble the final paper.
 
-将论文中的引用格式化输出为指定引用风格
-支持：Chicago / APA / GB7714 / MLA / IEEE / Harvard
-
-输入：
-    project.paper_draft: str — 论文草稿（含引用标注）
-    project.literature: List[PaperRecord] — 文献数据库（用于反向查找）
-    project.citation_format: str — 目标格式
-
-输出：
-    project.final_paper: str — 格式化后的最终论文
-
-依赖模块：
-    modules.citation_formats.CitationFormatter
-    modules.citation_normalizer.CitationNormalizer
+This stage now consumes unified citation records, records structured execution
+metadata, and registers export artifacts for final outputs.
 """
 
-import sys
+from __future__ import annotations
+
+import datetime
 import os
 import re
-from typing import Dict, Any, List, Optional
+import sys
+from typing import Any, Dict, List, Optional, Tuple
 
-_AI_TOOLS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), '..')
+_AI_TOOLS = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "..")
 if _AI_TOOLS not in sys.path:
     sys.path.insert(0, _AI_TOOLS)
 
-from tools.workflow.research_project import ResearchProject, PaperRecord
+from tools.workflow.research_project import PaperRecord, ResearchProject
 
-# Lazy import Word exporter
 _word_exporter = None
 
 
@@ -37,24 +27,16 @@ def _get_word_exporter():
     if _word_exporter is None:
         try:
             from tools.workflow.word_exporter import export_paper_to_word, export_paper_with_footnotes
+
             _word_exporter = (export_paper_to_word, export_paper_with_footnotes)
-        except Exception as e:
-            print(f"[Stage 7] Word exporter 加载失败: {e}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[Stage 7] Word exporter load failed: {exc}")
             _word_exporter = (None, None)
     return _word_exporter
 
 
 class Stage7Format:
-    """
-    Stage 7: 注释格式修改
-
-    使用方法：
-        stage = Stage7Format(project)
-        result = stage.run(format='chicago')
-
-        # 直接格式化论文
-        final = stage.format_paper(paper_text, format='apa')
-    """
+    """Format final references and export the final paper."""
 
     NAME = "format"
     STAGE_NUM = 7
@@ -63,409 +45,425 @@ class Stage7Format:
         self.project = project
         self.formatter = None
         self.normalizer = None
+        self._warnings: List[str] = []
+        self._review_items: List[Dict[str, Any]] = []
+        self._registered_packages: List[Dict[str, Any]] = []
+        self._registered_artifacts: List[Dict[str, Any]] = []
+        self._citation_format_package: Dict[str, Any] = {}
 
     def _get_formatter(self):
-        """延迟创建引用格式化器"""
         if self.formatter is None:
             from modules.citation_formats import CitationFormatter
+
             self.formatter = CitationFormatter()
         return self.formatter
 
     def _get_normalizer(self):
-        """延迟创建引用标准化器"""
         if self.normalizer is None:
             from modules.citation_normalizer import CitationNormalizer
-            self.normalizer = CitationNormalizer(style=self.project.citation_format)
+
+            self.normalizer = CitationNormalizer(style=self.project.citation_format, test_mode=False)
         return self.normalizer
 
     def run(self, format: Optional[str] = None, **kwargs) -> Dict[str, Any]:
-        """
-        执行 Stage 7：注释格式修改
-
-        Args:
-            format: 目标格式（默认使用 project.citation_format）
-                   Chicago / APA / GB7714 / MLA / IEEE / Harvard
-
-        Returns:
-            Dict 含 'final_paper', 'formatted_citations'
-        """
-        if not self.project.paper_draft:
-            print("[Stage 7] 无论文草稿可格式化（Stage 5 未完成），跳过")
-            self.project.mark_stage_skipped()
+        source_text, source_kind = self._select_input_text()
+        if not source_text:
+            print("[Stage 7] No draft available for formatting, skipping")
+            self.project.mark_stage_skipped(self.STAGE_NUM)
             return {}
 
-        target_format = format or self.project.citation_format or 'chicago'
-        print(f"[Stage 7] 开始格式化引用 | 目标格式: {target_format}")
-        print(f"[Stage 7] 论文: {len(self.project.paper_draft)} 字符")
+        target_format = format or self.project.citation_format or "chicago"
+        print(f"[Stage 7] Start formatting | target format: {target_format}")
+        print(f"[Stage 7] Input draft source: {source_kind} | chars: {len(source_text)}")
 
+        self._warnings = []
+        self._review_items = []
+        self._registered_packages = []
+        self._registered_artifacts = []
+        self._citation_format_package = {}
         self.project.mark_stage_start(self.STAGE_NUM)
-
-        # ── 7a. 构建文献数据库 ─────────────────────────────────
-        # 建立 citation key → PaperRecord 的映射
-        citation_db = self._build_citation_db()
-        print(f"[Stage 7] 文献数据库: {len(citation_db)} 条")
-
-        # ── 7b. 格式化论文引用 ─────────────────────────────────
-        final_paper = self.format_paper(
-            self.project.paper_draft,
-            citation_db=citation_db,
-            target_format=target_format
+        self.project.set_stage_metadata(
+            self.STAGE_NUM,
+            capability_snapshot={
+                "citation_normalizer": "unified_citation_record",
+                "citation_formatter": "citation_formats.format_record",
+                "word_export": bool(_get_word_exporter()[0]),
+            },
+            requested_execution={
+                "target_format": target_format,
+                "source_draft": source_kind,
+            },
         )
 
-        # ── 7c. 生成格式化引用列表 ─────────────────────────────
-        formatted_refs = self.format_reference_list(
-            self.project.literature,
-            target_format=target_format
+        normalized_records = self._normalize_literature(target_format)
+        formatted_refs = [record["normalized_citation"] for record in normalized_records]
+        self._citation_format_package = self._format_records_package(normalized_records, target_format)
+        final_paper, append_meta = self.format_paper(
+            source_text,
+            normalized_records=normalized_records,
+            target_format=target_format,
         )
-
-        # ── 7d. 将引用列表追加到论文末尾 ───────────────────────
-        final_paper = self._append_references(final_paper, formatted_refs, target_format)
 
         self.project.final_paper = final_paper
         self.project.citation_format = target_format
-        self.project.mark_stage_done(self.STAGE_NUM)
+        self.project.formatted_citations = formatted_refs
 
-        # ── 7e. Word 文档导出 ─────────────────────────────────
         word_paths = {}
         try:
             word_paths = self._export_to_word(final_paper, formatted_refs, target_format)
-            print(f"[Stage 7] Word 导出: {word_paths}")
-        except Exception as e:
-            print(f"[Stage 7] Word 导出失败: {e}")
+        except Exception as exc:  # noqa: BLE001
+            self._warnings.append("word_export_failed")
+            print(f"[Stage 7] Word export failed: {exc}")
 
-        result = {
-            'final_paper': final_paper,
-            'formatted_citations': formatted_refs,
-            'format': target_format,
-            'word_files': word_paths,
+        self._register_artifacts(word_paths)
+        self._flush_review_items()
+
+        records_needing_review = sum(1 for record in normalized_records if record.get("needs_review"))
+        if records_needing_review:
+            self.project.add_quality_flag("stage7_citation_review_needed")
+        if not normalized_records:
+            self.project.add_quality_flag("stage7_no_references")
+
+        self.project.set_stage_metadata(
+            self.STAGE_NUM,
+            normalized_citation_records=[
+                {
+                    "title": record.get("title"),
+                    "year": record.get("year"),
+                    "type": record.get("type"),
+                    "needs_review": record.get("needs_review"),
+                    "confidence": record.get("confidence"),
+                    "normalized_citation": record.get("normalized_citation"),
+                }
+                for record in normalized_records
+            ],
+            execution_summary={
+                "source_draft": source_kind,
+                "input_chars": len(source_text),
+                "output_chars": len(final_paper),
+                "formatted_reference_count": len(formatted_refs),
+                "records_needing_review": records_needing_review,
+                "appended_references": append_meta["appended_references"],
+                "stripped_existing_references": append_meta["stripped_existing_references"],
+                "inline_marker_count": append_meta["inline_marker_count"],
+                "word_file_count": len(word_paths),
+                "warning_count": len(self._warnings),
+                "review_count": len(self._review_items),
+                "citation_format_package": self._citation_format_package,
+            },
+            warnings=self._warnings,
+            output_artifacts=word_paths,
+            package_protocol={
+                "registry": "ResearchProject.register_package",
+                "registered_package_count": len(self._registered_packages),
+                "registered_packages": self._registered_packages,
+            },
+            artifact_protocol={
+                "registry": "ResearchProject.register_artifact",
+                "registered_artifact_count": len(self._registered_artifacts),
+                "registered_artifacts": self._registered_artifacts,
+            },
+        )
+
+        self.project.mark_stage_done(self.STAGE_NUM)
+        print(f"[Stage 7] Done | final chars: {len(final_paper)} | references: {len(formatted_refs)}")
+        return {
+            "final_paper": final_paper,
+            "formatted_citations": formatted_refs,
+            "normalized_records": normalized_records,
+            "format": target_format,
+            "word_files": word_paths,
         }
-
-        print(f"[Stage 7] 完成！最终论文: {len(final_paper)} 字符")
-        return result
-
-    def _build_citation_db(self) -> Dict[str, PaperRecord]:
-        """
-        构建 citation key → PaperRecord 映射表
-        key = 第一作者姓氏 + 年份（规范格式）
-        """
-        db = {}
-        for paper in self.project.literature:
-            # 建立多种 key 变体
-            first_author = ''
-            if paper.authors:
-                first_author = paper.authors[0].split(',')[0].strip()
-            year = paper.year or 'nd'
-
-            keys = [
-                f"{first_author}{year}".lower(),
-                f"{first_author.lower()}_{year}" if year != 'nd' else first_author.lower(),
-            ]
-            for k in keys:
-                if k and k not in db:
-                    db[k] = paper
-            # 也按 title 关键词建立映射
-            if paper.title:
-                title_word = paper.title.split()[0].lower()
-                key2 = f"{title_word}{year}".lower()
-                if key2 not in db:
-                    db[key2] = paper
-
-        return db
 
     def format_paper(
         self,
         paper_text: str,
-        citation_db: Dict[str, PaperRecord],
-        target_format: str = "chicago"
-    ) -> str:
-        """
-        格式化论文中的内嵌引用
-
-        Args:
-            paper_text: 原始论文
-            citation_db: citation key → PaperRecord 映射
-            target_format: 目标格式
-
-        Returns:
-            str: 格式化后的论文
-        """
-        print(f"[Stage 7] 格式化内嵌引用...")
-
-        # 各种语言的内嵌引用 pattern
-        patterns = {
-            'chicago': [
-                # (Author, Year) 或 (Author 1 and Author 2, Year)
-                r'\(([A-Z][a-z]+(?:\s+(?:et\s+al\.|,?\s*[A-Z][a-z]+))*)\s*,\s*(\d{4})\)',
-                # "Author (Year)" 形式
-                r'"([A-Z][a-z]+)"?\s*\((\d{4})\)',
-            ],
-            'apa': [
-                # (Author, Year) 或 (Author et al., Year)
-                r'\(([A-Z][a-z]+(?:\s+et\s+al\.?)?(?:,\s*[A-Z][a-z]+)*),\s*(\d{4})\)',
-                # "Author (Year)" 形式
-                r'"([A-Z][a-z]+)"?\s*\((\d{4})\)',
-            ],
-            'gb7714': [
-                # [1] 或 [1-3] 序号形式
-                r'\[(\d+(?:[-,]\d+)*)\]',
-                # 姓名年份格式
-                r'\[([A-Z][a-z]+\s+\d{4})\]',
-            ],
-            'mla': [
-                r'\(([A-Z][a-z]+(?:\s+et\s+al?\.)?\s+\d{4})\)',
-            ],
+        normalized_records: List[Dict[str, Any]],
+        target_format: str = "chicago",
+    ) -> Tuple[str, Dict[str, Any]]:
+        print("[Stage 7] Formatting final paper body and references")
+        inline_marker_count = len(re.findall(r"\[[0-9,\-]+\]|\([A-Z][A-Za-z]+,\s*\d{4}\)", paper_text))
+        body_text, stripped_existing = self._strip_existing_references_section(paper_text)
+        final_text = self._append_references(
+            body_text,
+            [record["normalized_citation"] for record in normalized_records],
+            target_format,
+        )
+        return final_text, {
+            "inline_marker_count": inline_marker_count,
+            "stripped_existing_references": stripped_existing,
+            "appended_references": bool(normalized_records),
         }
-
-        # 简化处理：对于大多数情况，替换引用格式但不改变引用内容
-        # 真正的格式转换需要解析引用在文献数据库中的位置
-
-        formatted = paper_text
-
-        # ── 检测并规范引用 ──────────────────────────────────────
-        # 简化策略：将论文中检测到的引用替换为标准格式
-        # 实际应用中，CitationNormalizer 会更精确地做这件事
-
-        # 追加参考文献标题（如果论文中已有可识别的参考文献章节）
-        if 'references' not in formatted.lower() and \
-           '参考文献' not in formatted:
-            pass  # 引用列表会在后面统一追加
-
-        return formatted
 
     def format_reference_list(
         self,
         literature: List[PaperRecord],
-        target_format: str = "chicago"
+        target_format: str = "chicago",
     ) -> List[str]:
-        """
-        生成格式化参考文献列表
+        records = [self._paper_to_citation_record(paper, target_format, index) for index, paper in enumerate(literature, start=1)]
+        return [record["normalized_citation"] for record in records]
 
-        Args:
-            literature: 文献列表
-            target_format: 目标格式
+    def _format_records_package(
+        self,
+        normalized_records: List[Dict[str, Any]],
+        target_format: str,
+    ) -> Dict[str, Any]:
+        formatter = self._get_formatter()
+        if not hasattr(formatter, "format_batch_package"):
+            return {}
+        try:
+            formatter.reset_index()
+            package = formatter.format_batch_package(normalized_records, style=target_format)
+            self._register_stage_package(package, source="citation_formatter")
+            return {
+                "type": package.get("type"),
+                "backend": package.get("backend"),
+                "provider": package.get("provider"),
+                "model": package.get("model"),
+                "style": package.get("style"),
+                "confidence": package.get("confidence"),
+                "needs_review": bool(package.get("needs_review")),
+                "quality_flags": package.get("quality_flags", []),
+                "summary": package.get("summary", {}),
+            }
+        except Exception as exc:  # noqa: BLE001
+            self._warnings.append("citation_format_package_failed")
+            package = {
+                "type": "citation_formatting",
+                "backend": "script",
+                "provider": "rule_templates",
+                "model": None,
+                "style": target_format,
+                "confidence": 0.0,
+                "needs_review": True,
+                "quality_flags": ["citation_format_package_failed"],
+                "summary": {"record_count": len(normalized_records), "rendered_count": 0, "style": target_format},
+                "error": str(exc),
+            }
+            self._register_stage_package(package, source="citation_formatter")
+            return package
 
-        Returns:
-            List[str]: 每条引用格式化的字符串
-        """
-        if not literature:
-            print("[Stage 7] 无文献可格式化")
+    def _select_input_text(self) -> Tuple[str, str]:
+        if self.project.style_transferred_draft:
+            return self.project.style_transferred_draft, "style_transferred_draft"
+        if self.project.polished_draft:
+            return self.project.polished_draft, "polished_draft"
+        if self.project.paper_draft:
+            return self.project.paper_draft, "paper_draft"
+        return "", ""
+
+    def _normalize_literature(self, target_format: str) -> List[Dict[str, Any]]:
+        stage2_records = self._get_stage2_citation_records()
+        if not self.project.literature and not stage2_records:
+            self._warnings.append("no_sources_for_formatting")
             return []
 
-        print(f"[Stage 7] 格式化参考文献: {len(literature)} 条 (格式: {target_format})")
+        records: List[Dict[str, Any]] = []
+        for index, paper in enumerate(self.project.literature, start=1):
+            record = self._paper_to_citation_record(paper, target_format, index)
+            records.append(record)
+            if record.get("needs_review"):
+                self._review_items.append(
+                    {
+                        "stage": self.STAGE_NUM,
+                        "type": "citation_record_review",
+                        "message": f"Citation record for '{paper.title or paper.id}' needs manual review.",
+                        "title": record.get("title"),
+                        "confidence": record.get("confidence"),
+                    }
+                )
+        for offset, source_record in enumerate(stage2_records, start=len(records) + 1):
+            record = self._format_existing_citation_record(source_record, target_format, offset)
+            records.append(record)
+            if record.get("needs_review"):
+                self._review_items.append(
+                    {
+                        "stage": self.STAGE_NUM,
+                        "type": "citation_record_review",
+                        "message": f"Stage 2 citation record for '{record.get('title')}' needs manual review.",
+                        "title": record.get("title"),
+                        "confidence": record.get("confidence"),
+                    }
+                )
+        return records
 
-        refs = []
-        for i, paper in enumerate(literature):
-            try:
-                ref = self._format_single_reference(paper, target_format)
-                refs.append(ref)
-            except Exception as e:
-                # 兜底：简化格式
-                authors = ', '.join(paper.authors[:3]) if paper.authors else 'Unknown'
-                ref = f"{authors}. \"{paper.title}\". {paper.journal or paper.source}, {paper.year or 'n.d.'}."
-                refs.append(ref)
+    def _get_stage2_citation_records(self) -> List[Dict[str, Any]]:
+        metadata = self.project.get_stage_metadata(2)
+        records = metadata.get("book_citation_records", [])
+        return [record for record in records if isinstance(record, dict)]
 
-        return refs
-
-    def _format_single_reference(self, paper: PaperRecord, fmt: str) -> str:
-        """格式化单条引用"""
-        authors_str = self._format_authors(paper.authors, fmt)
-        title = paper.title or 'Unknown'
-        journal = paper.journal or ''
-        year = paper.year or 'n.d.'
-        url = paper.url or ''
-        doi = paper.doi or ''
-
-        if fmt == 'chicago':
-            journal_part = f"_{journal}_" if journal else ''
-            return f"{authors_str}. \"{title}.\" {journal_part}{year}." + \
-                   (f" {url}" if url else '') + \
-                   (f" https://doi.org/{doi}" if doi else '')
-
-        elif fmt == 'apa':
-            et_al = ''
-            if paper.authors:
-                if len(paper.authors) == 1:
-                    authors_str = paper.authors[0].split(',')[0].strip()
-                elif len(paper.authors) == 2:
-                    a1 = paper.authors[0].split(',')[0].strip()
-                    a2 = paper.authors[1].split(',')[0].strip()
-                    authors_str = f"{a1}, & {a2}"
-                else:
-                    authors_str = f"{paper.authors[0].split(',')[0].strip()} et al."
-            journal_part = f"_{journal}_" if journal else ''
-            return f"{authors_str} ({year}). {title}. {journal_part}." + \
-                   (f" https://doi.org/{doi}" if doi else '')
-
-        elif fmt == 'gb7714':
-            authors_str = ', '.join(paper.authors) if paper.authors else 'Unknown'
-            journal_part = f"_{journal}_" if journal else ''
-            return f"[{i+1}] {authors_str}. {title} [J]. {journal_part}{year}." + \
-                   (f" doi:{doi}" if doi else '')
-
-        elif fmt == 'mla':
-            authors_str = ', '.join(paper.authors) if paper.authors else 'Unknown'
-            journal_part = f"_{journal}_" if journal else ''
-            return f"{authors_str}. \"{title}.\" {journal_part}{year}."
-
-        elif fmt == 'ieee':
-            authors_str = ', '.join([a.split(',')[0].strip() for a in (paper.authors or [])])
-            if not authors_str:
-                authors_str = 'Unknown'
-            return f"{authors_str}, \"{title},\" {journal}, {year}."
-
-        elif fmt == 'harvard':
-            authors_str = ', '.join(paper.authors[:2]) if paper.authors else 'Unknown'
-            if len(paper.authors or []) > 2:
-                authors_str += ' et al.'
-            journal_part = f"_{journal}_" if journal else ''
-            return f"{authors_str} ({year}) '{title}', {journal_part}{year}."
-
-        else:
-            # 默认 Chicago
-            return f"{authors_str}. \"{title}.\" {journal} {year}."
-
-    def _format_authors(self, authors: List[str], fmt: str) -> str:
-        """根据引用格式格式化作者列表"""
-        if not authors:
-            return 'Unknown'
-
-        if fmt == 'apa':
-            if len(authors) == 1:
-                return authors[0].split(',')[0].strip()
-            elif len(authors) == 2:
-                return f"{authors[0].split(',')[0].strip()}, & {authors[1].split(',')[0].strip()}"
-            else:
-                return f"{authors[0].split(',')[0].strip()} et al."
-
-        elif fmt in ('chicago', 'mla', 'harvard'):
-            if len(authors) == 1:
-                return authors[0]
-            elif len(authors) == 2:
-                return f"{authors[0]}, and {authors[1]}"
-            else:
-                return f"{authors[0]} et al."
-
-        elif fmt == 'ieee':
-            # IEEE: First Initial. Last Name
-            formatted = []
-            for a in authors:
-                parts = a.split(',')
-                if len(parts) == 2:
-                    initial = parts[1].strip()[0] + '.'
-                    last = parts[0].strip()
-                    formatted.append(f"{initial} {last}")
-                else:
-                    formatted.append(a)
-            return ', '.join(formatted)
-
-        else:
-            return ', '.join(authors)
-
-    def _append_references(
+    def _format_existing_citation_record(
         self,
-        paper_text: str,
-        refs: List[str],
-        fmt: str
-    ) -> str:
-        """将参考文献列表追加到论文末尾"""
+        record: Dict[str, Any],
+        target_format: str,
+        index: int,
+    ) -> Dict[str, Any]:
+        normalized = dict(record)
+        authors = normalized.get("authors") or normalized.get("author") or []
+        if isinstance(authors, str):
+            authors = [item.strip() for item in authors.split(",") if item.strip()]
+        normalized["authors"] = authors
+        normalized["author"] = self._join_authors(authors)
+        normalized.setdefault("type", normalized.get("record_type") or "book")
+        normalized.setdefault("title", "Untitled")
+        normalized.setdefault("year", "")
+        normalized.setdefault("journal_or_publisher", normalized.get("publisher", ""))
+        normalized.setdefault("backend", "script")
+        normalized.setdefault("provider", "stage2_citation_record")
+        normalized.setdefault("model", None)
+        validation = self._get_normalizer().validate_fields(normalized)
+        normalized["validation"] = validation
+        normalized["needs_review"] = bool(validation["missing_fields"]) or bool(normalized.get("needs_review"))
+        normalized["confidence"] = float(normalized.get("confidence", 0.7) or 0.0)
+        normalized["normalized_citation"] = self._get_formatter().format_record(
+            normalized,
+            style=target_format,
+            index=index,
+        )
+        normalized["target_style"] = target_format
+        return normalized
+
+    def _paper_to_citation_record(
+        self,
+        paper: PaperRecord,
+        target_format: str,
+        index: int,
+    ) -> Dict[str, Any]:
+        raw_citation = self._paper_to_raw_citation(paper)
+        record = self._get_normalizer().normalize_record(raw_citation, target_style=target_format, index=index)
+        authors = list(paper.authors or record.get("authors") or [])
+        container = paper.journal or paper.source or record.get("journal_or_publisher") or ""
+        record_type = "article" if (paper.journal or paper.doi) else "electronic" if paper.url else "book"
+
+        record.update(
+            {
+                "title": paper.title or record.get("title") or "Untitled",
+                "authors": authors,
+                "author": self._join_authors(authors),
+                "year": paper.year or record.get("year") or "",
+                "journal_or_publisher": container,
+                "journal": paper.journal or (container if record_type == "article" else ""),
+                "publisher": "" if record_type == "article" else container,
+                "source": paper.source,
+                "doi": paper.doi or record.get("doi") or "",
+                "url": paper.url or record.get("url") or "",
+                "type": record_type,
+            }
+        )
+
+        validation = self._get_normalizer().validate_fields(record)
+        record["validation"] = validation
+        record["needs_review"] = bool(validation["missing_fields"]) or bool(record.get("needs_review"))
+        if paper.title and authors and paper.year:
+            record["confidence"] = max(float(record.get("confidence", 0.0)), 0.78)
+        record["normalized_citation"] = self._get_formatter().format_record(record, style=target_format, index=index)
+        return record
+
+    def _paper_to_raw_citation(self, paper: PaperRecord) -> str:
+        authors = self._join_authors(paper.authors)
+        title = paper.title or "Untitled"
+        container = paper.journal or paper.source or ""
+        year = paper.year or "n.d."
+        pieces = [authors, f"\"{title}.\""]
+        if container:
+            pieces.append(container)
+        pieces.append(year)
+        if paper.doi:
+            pieces.append(f"https://doi.org/{paper.doi}")
+        elif paper.url:
+            pieces.append(paper.url)
+        return ". ".join(piece.strip(" .") for piece in pieces if piece).strip() + "."
+
+    def _append_references(self, paper_text: str, refs: List[str], fmt: str) -> str:
+        del fmt
         if not refs:
             return paper_text
 
-        # 检查是否已有参考文献章节
-        has_refs = bool(
-            re.search(r'(references|参考文献)', paper_text[-500:], re.IGNORECASE)
-        )
+        header = {
+            "en": "\n\n## References\n\n",
+            "ja": "\n\n## 参考文献\n\n",
+            "zh": "\n\n## 参考文献\n\n",
+        }.get(self.project.language[:2].lower(), "\n\n## References\n\n")
+        ref_lines = [f"{index}. {ref}" for index, ref in enumerate(refs, start=1)]
+        return paper_text.rstrip() + header + "\n".join(ref_lines)
 
-        ref_header = {
-            'en': '\n\n## References\n\n',
-            'ja': '\n\n## 参考文献\n\n',
-            'zh': '\n\n## 参考文献\n\n',
-        }.get(self.project.language[:2].lower(), '\n\n## References\n\n')
+    def _strip_existing_references_section(self, paper_text: str) -> Tuple[str, bool]:
+        pattern = re.compile(r"(?is)\n{0,2}(##\s*(references|参考文献)\s*\n.*)$")
+        match = pattern.search(paper_text)
+        if not match:
+            return paper_text.rstrip(), False
+        return paper_text[: match.start()].rstrip(), True
 
-        ref_lines = [f"{i+1}. {ref}" for i, ref in enumerate(refs)]
-
-        if has_refs:
-            # 已有参考文献章节，不追加
-            return paper_text
-
-        return paper_text + ref_header + '\n'.join(ref_lines)
-
-    def _export_to_word(
-        self,
-        final_paper: str,
-        formatted_refs: List[str],
-        fmt: str
-    ) -> Dict[str, str]:
-        """
-        将论文导出为 Word 文档（带脚注）
-
-        Args:
-            final_paper: 最终论文文本
-            formatted_refs: 格式化引用列表
-            fmt: 引用格式
-
-        Returns:
-            Dict: 输出文件路径
-        """
-        print(f"[Stage 7] 导出 Word 文档...")
-
-        export_fn, _ = _get_word_exporter()
+    def _export_to_word(self, final_paper: str, formatted_refs: List[str], fmt: str) -> Dict[str, str]:
+        print("[Stage 7] Exporting Word outputs")
+        export_fn, export_fn_with_footnotes = _get_word_exporter()
         if export_fn is None:
-            print("[Stage 7] Word exporter 不可用，跳过")
             return {}
 
-        paths = {}
-
-        # 构建脚注列表（将格式化引用转为脚注）
-        footnotes = []
-        for i, ref in enumerate(formatted_refs):
-            footnotes.append({'id': str(i+1), 'text': ref})
-
-        # 提取论文标题（第一个 # 开头）
-        title = ''
-        m = re.match(r'^# (.+)', final_paper)
-        if m:
-            title = m.group(1).strip()
-
-        # 输出目录
-        out_dir = os.path.join(_AI_TOOLS, 'workflow_output')
+        paths: Dict[str, str] = {}
+        out_dir = os.path.join(_AI_TOOLS, "workflow_output")
         os.makedirs(out_dir, exist_ok=True)
-        safe = "".join(c if c.isalnum() else '_' for c in self.project.topic[:20])
-        import datetime
-        ts = datetime.datetime.now().strftime('%Y%m%d')
-        base = f"{safe}_{ts}"
+        safe = "".join(char if char.isalnum() else "_" for char in self.project.topic[:20])
+        stamp = datetime.datetime.now().strftime("%Y%m%d")
+        base = f"{safe}_{stamp}"
 
-        # 1. Markdown 原生 Word（无脚注，引用在文末）
-        try:
-            md_path = os.path.join(out_dir, f"{base}.docx")
-            export_fn(
+        title_match = re.match(r"^#\s+(.+)$", final_paper)
+        title = title_match.group(1).strip() if title_match else self.project.topic
+
+        markdown_path = os.path.join(out_dir, f"{base}.docx")
+        export_fn(
+            final_paper,
+            output_path=markdown_path,
+            language=self.project.language,
+            title=title,
+            citation_format=fmt,
+        )
+        if os.path.exists(markdown_path):
+            paths["markdown_docx"] = markdown_path
+
+        if formatted_refs and export_fn_with_footnotes:
+            footnotes_path = os.path.join(out_dir, f"{base}_footnotes.docx")
+            export_fn_with_footnotes(
                 final_paper,
-                output_path=md_path,
+                footnotes=[{"id": str(index), "text": ref} for index, ref in enumerate(formatted_refs, start=1)],
+                output_path=footnotes_path,
                 language=self.project.language,
                 title=title,
-                citation_format=fmt
             )
-            paths['markdown_docx'] = md_path
-            print(f"[Stage 7] Word (Markdown 格式): {md_path}")
-        except Exception as e:
-            print(f"[Stage 7] Markdown Word 导出失败: {e}")
-
-        # 2. 带脚注的 Word（如果已有脚注内容）
-        if footnotes:
-            try:
-                fn_path = os.path.join(out_dir, f"{base}_footnotes.docx")
-                _, export_fn_fn = _get_word_exporter()
-                if export_fn_fn:
-                    export_fn_fn(
-                        final_paper,
-                        footnotes=footnotes,
-                        output_path=fn_path,
-                        language=self.project.language,
-                        title=title
-                    )
-                    paths['footnotes_docx'] = fn_path
-                    print(f"[Stage 7] Word (脚注格式): {fn_path}")
-            except Exception as e:
-                print(f"[Stage 7] 脚注 Word 导出失败: {e}")
-
+            if os.path.exists(footnotes_path):
+                paths["footnotes_docx"] = footnotes_path
         return paths
+
+    def _register_artifacts(self, word_paths: Dict[str, str]) -> None:
+        for label, path in word_paths.items():
+            if not path or not os.path.exists(path):
+                continue
+            artifact = self.project.register_artifact(
+                "word_export",
+                stage=self.STAGE_NUM,
+                path=os.path.abspath(path),
+                source="stage7_format",
+                metadata={
+                    "label": label,
+                    "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                },
+            )
+            self._registered_artifacts.append(artifact)
+
+    def _flush_review_items(self) -> None:
+        for item in self._review_items:
+            self.project.add_review_item(item)
+
+    def _register_stage_package(self, package: Optional[Dict[str, Any]], *, source: str) -> None:
+        if not isinstance(package, dict):
+            return
+        summary = self.project.register_package(package, stage=self.STAGE_NUM, source=source)
+        self._registered_packages.append(summary)
+
+    def _join_authors(self, authors: List[str]) -> str:
+        cleaned = [author.strip() for author in authors if author and author.strip()]
+        if not cleaned:
+            return "Unknown"
+        if len(cleaned) == 1:
+            return cleaned[0]
+        return ", ".join(cleaned)

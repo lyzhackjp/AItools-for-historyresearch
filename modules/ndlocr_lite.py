@@ -16,6 +16,7 @@ from typing import Dict, Any, List, Optional, Union
 from dataclasses import dataclass
 import tempfile
 import json
+from datetime import datetime
 
 
 @dataclass
@@ -59,6 +60,45 @@ class NDLOCRLiteResult:
     def merge_all_text(self) -> str:
         """合并所有页面的文本"""
         return '\n\n'.join([page['text'] for page in self.pages if page.get('text')])
+
+    def to_package(self, source_path: Optional[str] = None) -> Dict[str, Any]:
+        """Return a workflow-ready OCR package."""
+        text = self.merge_all_text() or self.text
+        quality_flags: List[str] = []
+        if not self.success:
+            quality_flags.append("ocr_failed")
+        if not text.strip():
+            quality_flags.append("no_text")
+        if not self.pages:
+            quality_flags.append("no_pages")
+        if self.error:
+            quality_flags.append("has_error")
+        confidence = 0.74 if self.success and text.strip() else 0.2
+        if quality_flags:
+            confidence = min(confidence, 0.64)
+        return {
+            "type": "ocr_result",
+            "source_path": source_path,
+            "success": self.success,
+            "text": text,
+            "xml_content": self.xml_content,
+            "pages": self.pages,
+            "structures": self.structures,
+            "artifacts": [
+                {"type": "visualization", "path": path}
+                for path in self.visualization_paths
+            ],
+            "output_dir": self.output_dir,
+            "backend": "local_engine",
+            "provider": "ndlocr_lite",
+            "model": "ndlocr-lite",
+            "processing_time": self.processing_time,
+            "confidence": round(confidence, 2),
+            "needs_review": bool(quality_flags),
+            "quality_flags": quality_flags,
+            "error": self.error,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
 
 
 class NDLOCRLiteProcessor:
@@ -121,6 +161,25 @@ class NDLOCRLiteProcessor:
         """检查是否已安装ndlocr-lite"""
         return self._ndlocr_executable is not None
 
+    def get_capabilities(self) -> Dict[str, Any]:
+        """Return local NDL OCR capability metadata."""
+        return {
+            "module": "ndlocr_lite",
+            "backend": "local_engine",
+            "provider": "ndlocr_lite",
+            "model": "ndlocr-lite",
+            "available": self.is_installed(),
+            "capabilities": [
+                "image_ocr",
+                "directory_ocr",
+                "xml_output",
+                "visualization_output",
+                "japanese_print_ocr",
+            ],
+            "supported_formats": list(self.config.supported_formats),
+            "fallback_order": ["local_engine:ndlocr_lite", "ocr_processor:tesseract", "llm_ocr"],
+        }
+
     def get_installation_guide(self) -> str:
         """获取安装指南"""
         return """
@@ -169,17 +228,19 @@ NDL OCR-Lite 安装指南
             list: 命令列表
         """
         import sys
-        
+
         python_cmd = sys.executable
-        
-        is_dir = os.path.isdir(source)
+
+        source_path = os.path.abspath(source)
+        output_path = os.path.abspath(output_dir)
+        is_dir = os.path.isdir(source_path)
 
         if is_dir:
-            cmd = [python_cmd, self._ndlocr_executable, '--sourcedir', source]
+            cmd = [python_cmd, self._ndlocr_executable, '--sourcedir', source_path]
         else:
-            cmd = [python_cmd, self._ndlocr_executable, '--sourceimg', source]
+            cmd = [python_cmd, self._ndlocr_executable, '--sourceimg', source_path]
 
-        cmd.extend(['--output', output_dir])
+        cmd.extend(['--output', output_path])
 
         if self.config.enable_visualization:
             cmd.append('--viz')
@@ -217,6 +278,7 @@ NDL OCR-Lite 安装指南
         if output_dir is None:
             output_dir = tempfile.mkdtemp(prefix='ndlocr_')
 
+        output_dir = os.path.abspath(output_dir)
         os.makedirs(output_dir, exist_ok=True)
         result.output_dir = output_dir
 
@@ -247,6 +309,13 @@ NDL OCR-Lite 安装指南
 
         return result
 
+    def process_image_package(self, image_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
+        """Process one image and return a workflow package."""
+        result = self.process_image(image_path, output_dir=output_dir)
+        package = result.to_package(source_path=image_path)
+        package["capabilities"] = self.get_capabilities()
+        return package
+
     def process_directory(self, directory_path: str, output_dir: Optional[str] = None) -> NDLOCRLiteResult:
         """
         批量处理目录中的所有图片
@@ -274,6 +343,7 @@ NDL OCR-Lite 安装指南
         if output_dir is None:
             output_dir = tempfile.mkdtemp(prefix='ndlocr_batch_')
 
+        output_dir = os.path.abspath(output_dir)
         os.makedirs(output_dir, exist_ok=True)
         result.output_dir = output_dir
 
@@ -303,6 +373,15 @@ NDL OCR-Lite 安装指南
             result.error = f"处理异常: {str(e)}"
 
         return result
+
+    def process_directory_package(self, directory_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
+        """Process a directory and return a workflow package."""
+        result = self.process_directory(directory_path, output_dir=output_dir)
+        package = result.to_package(source_path=directory_path)
+        package["type"] = "ocr_batch"
+        package["capabilities"] = self.get_capabilities()
+        package["page_count"] = len(result.pages)
+        return package
 
     def _parse_output(self, output_dir: str, result: NDLOCRLiteResult) -> NDLOCRLiteResult:
         """

@@ -93,6 +93,7 @@ class FieldReport:
     search_results_count: int = 0
     processing_time: float = 0.0
     warnings: List[str] = field(default_factory=list)
+    execution_metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -118,7 +119,8 @@ class FieldReport:
             'metadata': {
                 'search_results_count': self.search_results_count,
                 'processing_time': self.processing_time,
-                'warnings': self.warnings
+                'warnings': self.warnings,
+                'execution': self.execution_metadata
             }
         }
 
@@ -360,6 +362,7 @@ class HistoryFieldExplorer:
         test_mode: bool = False
     ):
         self.language = language
+        self.llm_provider = llm_provider
         self.test_mode = test_mode
         self.report: Optional[FieldReport] = None
 
@@ -408,6 +411,37 @@ class HistoryFieldExplorer:
         else:
             self.ner = None
 
+    def get_capabilities(self) -> Dict[str, Any]:
+        """Return a lightweight capability snapshot for workflow auditing."""
+        return {
+            "module": "history_field_explorer",
+            "layer": "analysis_field_research",
+            "backend": "hybrid" if self.llm or self.assistant else "script",
+            "provider": self.llm_provider if (self.llm or self.assistant) else "local_rules",
+            "model": getattr(self.llm, "model", None) if self.llm else None,
+            "test_mode": self.test_mode,
+            "tasks": ["field_search", "field_synthesis", "field_drafting"],
+            "output_types": ["field_research", "field_draft"],
+            "capabilities": {
+                "field_search": bool(self.assistant) or self.test_mode,
+                "field_synthesis": True,
+                "field_drafting": True,
+                "llm_enhancement": bool(self.llm),
+                "ner": bool(self.ner),
+            },
+            "fallback_order": ["intelligent_assistant", "local_mock" if self.test_mode else "local_rules"],
+            "supports": {
+                "package_output": True,
+                "local_fallback": True,
+                "external_ai_backend": bool(self.llm or self.assistant),
+            },
+            "privacy": {
+                "local_first": True,
+                "secrets_required": bool(self.llm or self.assistant),
+                "logs_raw_text": False,
+            },
+        }
+
     # ─────────────────────────────────────────────────────────
     #  主入口
     # ─────────────────────────────────────────────────────────
@@ -435,8 +469,58 @@ class HistoryFieldExplorer:
 
         self.report.search_results_count = len(papers) + len(projects)
         self.report.processing_time = time.time() - start_time
+        self._apply_report_execution_metadata(papers, projects, analysis)
 
         return self.report
+
+    def explore_package(
+        self,
+        topic: str,
+        search_limit: int = 30,
+        include_ocr: bool = False,
+    ) -> Dict[str, Any]:
+        """Explore a field and return a workflow-friendly package envelope."""
+
+        try:
+            report = self.explore(topic, search_limit=search_limit, include_ocr=include_ocr)
+            report_payload = report.to_dict()
+            success = True
+            error = ""
+        except Exception as exc:  # noqa: BLE001
+            report = None
+            report_payload = {}
+            success = False
+            error = f"{type(exc).__name__}: {exc}"
+
+        quality = self._field_report_quality(report)
+        if not success:
+            quality["quality_flags"].append("field_exploration_failed")
+            quality["needs_review"] = True
+            quality["confidence"] = 0.0
+
+        return {
+            "type": "field_research",
+            "schema_version": "1.0",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "topic": topic,
+            "language": self.language,
+            "backend": self.get_capabilities().get("backend"),
+            "provider": self.get_capabilities().get("provider"),
+            "model": self.get_capabilities().get("model"),
+            "confidence": quality["confidence"],
+            "needs_review": quality["needs_review"],
+            "quality_flags": quality["quality_flags"],
+            "report": report_payload,
+            "export_summary": {
+                "paper_count": quality["paper_count"],
+                "project_count": quality["project_count"],
+                "core_question_count": quality["core_question_count"],
+                "source_count": quality["source_count"],
+                "warning_count": quality["warning_count"],
+            },
+            "capabilities": self.get_capabilities(),
+            "error": error,
+        }
 
     # ─────────────────────────────────────────────────────────
     #  Step 1: 搜索
@@ -1258,12 +1342,18 @@ Recommended approach: Start with core questions and classic studies.'''
         }
         s_names = i18n.get(lang, i18n["en"])
 
+        drafting_backend = "script"
+        drafting_provider = "fallback"
+        drafting_model = None
         if self.llm:
             prompt = self._build_paper_prompt(topic, r, lang, s_names, style)
             try:
                 resp = self.llm._call_llm(prompt, max_tokens=6000)
                 paper_text = (resp.get("content", str(resp))
                               if isinstance(resp, dict) else str(resp))
+                drafting_backend = "llm_api"
+                drafting_provider = getattr(self.llm, "provider", self.llm_provider)
+                drafting_model = getattr(self.llm, "model", None)
                 print(f"[OK] Paper drafted with LLM ({len(paper_text)} chars)")
             except Exception as e:
                 self.report.warnings.append(f"Paper drafting failed: {e}")
@@ -1276,6 +1366,7 @@ Recommended approach: Start with core questions and classic studies.'''
             paper_text = self._bilinguify_paper(paper_text, s_names)
             print(f"[OK] Bilingual paper: {len(paper_text)} chars")
 
+        quality = self._paper_quality_summary(paper_text, s_names)
         return {
             "topic": topic,
             "language": lang,
@@ -1283,6 +1374,11 @@ Recommended approach: Start with core questions and classic studies.'''
             "style": style,
             "sections": self._parse_paper_sections(paper_text, s_names),
             "full_text": paper_text,
+            "backend": drafting_backend,
+            "provider": drafting_provider,
+            "model": drafting_model,
+            "confidence": quality["confidence"],
+            "needs_review": quality["needs_review"],
             "metadata": {
                 "classic_titles": classic_titles,
                 "frontier_titles": frontier_titles,
@@ -1291,7 +1387,169 @@ Recommended approach: Start with core questions and classic studies.'''
                 "important_sources": sources_list,
                 "core_questions": questions,
                 "research_methods": methods_list,
+                "backend": drafting_backend,
+                "provider": drafting_provider,
+                "model": drafting_model,
+                "quality": quality,
             },
+        }
+
+    def draft_paper_package(
+        self,
+        topic: Optional[str] = None,
+        language: Optional[str] = None,
+        style: str = "academic_history",
+        bilingual: bool = True,
+    ) -> Dict[str, Any]:
+        """Draft a paper and return a workflow-friendly package envelope."""
+
+        result = self.draft_paper(
+            topic=topic,
+            language=language,
+            style=style,
+            bilingual=bilingual,
+        )
+        if result.get("error"):
+            return {
+                "type": "field_draft",
+                "schema_version": "1.0",
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "topic": topic or "",
+                "language": language or self.language,
+                "backend": "script",
+                "provider": "fallback",
+                "model": None,
+                "confidence": 0.0,
+                "needs_review": True,
+                "quality_flags": ["field_report_missing"],
+                "draft": {},
+                "export_summary": {"char_count": 0, "section_count": 0, "warning_count": 1},
+                "capabilities": self.get_capabilities(),
+                "error": result["error"],
+            }
+
+        quality = result.get("metadata", {}).get("quality", {})
+        quality_flags = list(quality.get("quality_flags", []))
+        return {
+            "type": "field_draft",
+            "schema_version": "1.0",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "topic": result.get("topic", topic or ""),
+            "language": result.get("language", language or self.language),
+            "bilingual": result.get("bilingual", bilingual),
+            "style": result.get("style", style),
+            "backend": result.get("backend", "script"),
+            "provider": result.get("provider", "fallback"),
+            "model": result.get("model"),
+            "confidence": result.get("confidence", quality.get("confidence", 0.0)),
+            "needs_review": bool(result.get("needs_review") or quality_flags),
+            "quality_flags": quality_flags,
+            "draft": result,
+            "export_summary": {
+                "char_count": quality.get("char_count", len(result.get("full_text", ""))),
+                "section_count": quality.get("section_count", len(result.get("sections", {}))),
+                "citation_marker_count": quality.get("citation_marker_count", 0),
+                "warning_count": len(getattr(self.report, "warnings", []) if self.report else []),
+            },
+            "capabilities": self.get_capabilities(),
+            "error": "",
+        }
+
+    def _apply_report_execution_metadata(self, papers: List[Dict], projects: List[Dict], analysis: Dict[str, Any]) -> None:
+        if not self.report:
+            return
+        warning_count = len(self.report.warnings)
+        entity_count = len(analysis.get("entities", [])) if isinstance(analysis, dict) else 0
+        source_hints = analysis.get("source_hints", []) if isinstance(analysis, dict) else []
+        confidence = 0.35
+        if papers:
+            confidence += 0.25
+        if self.report.classic_studies or self.report.frontier_research:
+            confidence += 0.15
+        if self.report.core_questions:
+            confidence += 0.10
+        if self.report.important_sources:
+            confidence += 0.10
+        if warning_count == 0:
+            confidence += 0.05
+        self.report.execution_metadata = {
+            **self.get_capabilities(),
+            "paper_count": len(papers),
+            "project_count": len(projects),
+            "entity_count": entity_count,
+            "source_hint_count": len(source_hints),
+            "warning_count": warning_count,
+            "confidence": round(min(confidence, 0.98), 2),
+            "needs_review": bool(warning_count or not papers),
+        }
+
+    def _field_report_quality(self, report: Optional[FieldReport]) -> Dict[str, Any]:
+        if report is None:
+            return {
+                "paper_count": 0,
+                "project_count": 0,
+                "core_question_count": 0,
+                "source_count": 0,
+                "warning_count": 0,
+                "quality_flags": ["field_report_missing"],
+                "confidence": 0.0,
+                "needs_review": True,
+            }
+
+        execution = report.execution_metadata or {}
+        paper_count = int(execution.get("paper_count", report.search_results_count))
+        project_count = int(execution.get("project_count", 0))
+        warning_count = len(report.warnings)
+        quality_flags = []
+        if paper_count == 0:
+            quality_flags.append("no_literature_found")
+        if not report.core_questions:
+            quality_flags.append("no_core_questions")
+        if not report.important_sources:
+            quality_flags.append("no_primary_sources")
+        if warning_count:
+            quality_flags.append("field_exploration_warnings")
+
+        confidence = float(execution.get("confidence", 0.35))
+        if quality_flags:
+            confidence = max(0.0, confidence - min(0.25, 0.05 * len(quality_flags)))
+        return {
+            "paper_count": paper_count,
+            "project_count": project_count,
+            "core_question_count": len(report.core_questions),
+            "source_count": len(report.important_sources),
+            "warning_count": warning_count,
+            "quality_flags": quality_flags,
+            "confidence": round(min(confidence, 0.98), 2),
+            "needs_review": bool(quality_flags),
+        }
+
+    def _paper_quality_summary(self, paper_text: str, section_names: List[str]) -> Dict[str, Any]:
+        sections = self._parse_paper_sections(paper_text, section_names)
+        citation_marker_count = len(re.findall(r"\[[0-9,\-]+\]|\([A-Z][A-Za-z]+,\s*\d{4}\)", paper_text or ""))
+        quality_flags = []
+        if len(paper_text or "") < 2000:
+            quality_flags.append("draft_short")
+        if len(sections) < max(2, min(len(section_names), 3)):
+            quality_flags.append("section_structure_weak")
+        if citation_marker_count == 0:
+            quality_flags.append("no_citation_markers")
+        confidence = 0.45
+        if len(paper_text or "") >= 2000:
+            confidence += 0.20
+        if len(sections) >= 3:
+            confidence += 0.20
+        if citation_marker_count:
+            confidence += 0.10
+        if not quality_flags:
+            confidence += 0.05
+        return {
+            "section_count": len(sections),
+            "char_count": len(paper_text or ""),
+            "citation_marker_count": citation_marker_count,
+            "quality_flags": quality_flags,
+            "confidence": round(min(confidence, 0.98), 2),
+            "needs_review": bool(quality_flags),
         }
 
     def _build_paper_prompt(

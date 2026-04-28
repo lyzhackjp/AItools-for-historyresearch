@@ -1,26 +1,37 @@
 {
-  "project_root": "C:\\Users\\lyzha\\Desktop\\AItools-for-historyresearch",
+  "_comment": "Tracked environment template only. Local absolute paths and hardware snapshots must not be committed.",
+  "_version": "1.0.1",
+  "_updated": "2026-04-28",
+  "project_root": ".",
   "environment_info": {
-    "python_version": "3.11.9",
-    "platform_system": "Windows",
-    "platform_machine": "AMD64",
+    "python_version": "use-runtime-detection",
+    "platform_system": "local",
+    "platform_machine": "local",
     "has_cuda": false,
     "cuda_version": null,
     "gpu_count": 0,
-    "memory_total_gb": 11.704944610595703
+    "memory_total_gb": null
   },
   "paths": {
-    "output": "C:\\Users\\lyzha\\Desktop\\AItools-for-historyresearch\\output",
-    "temp": "C:\\Users\\lyzha\\Desktop\\AItools-for-historyresearch\\temp",
-    "cache": "C:\\Users\\lyzha\\Desktop\\AItools-for-historyresearch\\cache",
-    "log": "C:\\Users\\lyzha\\Desktop\\AItools-for-historyresearch\\logs",
-    "data": "C:\\Users\\lyzha\\Desktop\\AItools-for-historyresearch\\data",
-    "models": "C:\\Users\\lyzha\\Desktop\\AItools-for-historyresearch\\models",
-    "ndlocr": "C:\\Users\\lyzha\\Desktop\\AItools-for-historyresearch\\external\\ndlkotenocr-lite"
+    "output": "output",
+    "temp": "temp",
+    "cache": "cache",
+    "log": "logs",
+    "data": "data",
+    "models": "models",
+    "ndlocr": "external/ndlkotenocr-lite"
   },
   "ndlocr_models": {
-    "available": true,
-    "detection_model": "C:\\Users\\lyzha\\Desktop\\AItools-for-historyresearch\\external\\ndlkotenocr-lite\\src\\model\\rtmdet-s-1280x1280.onnx",
-    "recognition_model": "C:\\Users\\lyzha\\Desktop\\AItools-for-historyresearch\\external\\ndlkotenocr-lite\\src\\model\\parseq-ndl-32x384-tiny-10.onnx"
+    "available": false,
+    "detection_model": "external/ndlkotenocr-lite/models/rtmdet-s-1280x1280.onnx",
+    "recognition_model": "external/ndlkotenocr-lite/models/parseq-ndl-32x384-tiny-10.onnx"
+  },
+  "privacy": {
+    "contains_local_absolute_paths": false,
+    "contains_credentials": false,
+    "credential_sources": [
+      "environment variables",
+      "secrets/"
+    ]
   }
 }

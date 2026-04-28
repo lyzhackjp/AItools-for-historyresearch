@@ -1,663 +1,598 @@
 """
-学术笔记智能生成模块
+Academic note generation facade.
 
-基于大语言模型，从学术文献中自动生成符合Obsidian格式的结构化阅读笔记
-支持双向链接、知识图谱构建等高级功能
-
-核心功能：
-- 生成带双向链接的学术笔记
-- 提取五类核心实体（人名、地名、事件、概念、文献）
-- 构建知识图谱节点数据
-- 支持多种API提供商（通义千问、MiniMax等）
-
-API优先级：
-1. 阿里通义千问 (dashscope)
-2. MiniMax
-3. Gemini/ChatGPT（备选）
-
-测试模式：使用模拟数据，不调用真实API
-
-提示词管理：
-- 系统提示词: AN_G001
-- 笔记模板: AN_T001
-- 用户提示词: AN_U001, AN_U002
+This module keeps the legacy public API while routing note generation and
+entity extraction through the unified task layer.
 """
 
-import re
-import json
-import os
-from typing import Dict, List, Optional, Any, Tuple
-from pathlib import Path
-from datetime import datetime
-import hashlib
+from __future__ import annotations
 
-from modules.llm_client import create_llm_client
+import hashlib
+import re
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from modules.task_manager import TaskManager
 
 try:
     from prompts.prompt_loader import PromptLoader, PromptTemplate
+
     PROMPT_LOADER_AVAILABLE = True
 except ImportError:
     PROMPT_LOADER_AVAILABLE = False
 
 
 class AcademicNoteGenerator:
-    """学术笔记智能生成器"""
-    
+    """Generate Obsidian-friendly academic notes from source text."""
+
     ENTITY_TYPES = {
-        'person': '人名 (Person)',
-        'location': '地名 (Location)', 
-        'event': '事件 (Event)',
-        'concept': '概念/术语 (Concept)',
-        'literature': '引用文献 (Literature)'
+        "person": "Person",
+        "location": "Location",
+        "event": "Event",
+        "concept": "Concept",
+        "literature": "Literature",
     }
-    
-    DEFAULT_SYSTEM_PROMPT = """你是一位专业的学术研究助理和知识管理专家，精通复杂文本分析与Obsidian知识图谱（Knowledge Graph）的构建。
 
-请分析以下学术文章，严格按照要求输出Markdown格式的阅读笔记。
-
-【核心任务】
-1. 提取五类核心实体并使用Obsidian双向链接语法 [[实体名称]] 包裹
-2. 生成结构化的章节脉络
-3. 构建知识图谱节点数据
-
-【实体类型定义】
-- 人名 (Person)：历史人物、学者等
-- 地名 (Location)：国家、城市、地区等
-- 事件 (Event)：历史事件、会议、运动等
-- 概念/术语 (Concept)：学术术语、理论、主义等
-- 引用文献 (Literature)：著作、论文、史料等
-
-【输出格式要求】
-1. 在"总体摘要"和"章节脉络"的正文中，只要实体出现，就必须加上 [[ ]] 
-2. 绝对不要使用普通的Markdown超链接格式 [文本](链接)
-3. 只能使用 [[文本]] 格式
-"""
-    
     DEFAULT_NOTE_TEMPLATE = """---
 type: reading_note
 tags:
-  - #文献笔记
-  - #{subject_tag}
+  - "#literature_note"
+  - "#{subject_tag}"
 created: {created_date}
 source: {source_title}
 ---
 
 # {title}
 
-## 📋 总体摘要
+## Summary
 
 {summary}
 
-## 📑 章节核心论点
+## Chapter Outline
 
 {chapter_outline}
 
-## 🔗 核心图谱节点提取
+## Knowledge Graph Highlights
 
 {knowledge_graph}
 
 ---
 
-**元数据**
-- 作者：{authors}
-- 发表年份：{year}
-- 关键词：{keywords}
+**Metadata**
+- Authors: {authors}
+- Year: {year}
+- Keywords: {keywords}
 """
 
     def __init__(self, api_provider: str = "qwen", test_mode: bool = True):
-        """
-        初始化学术笔记生成器
-        
-        Args:
-            api_provider: API提供商 ('qwen', 'minimax', 'gemini', 'chatgpt')
-            test_mode: 测试模式标志，True时使用模拟数据
-        """
         self.api_provider = api_provider
         self.test_mode = test_mode
-        self.llm_client = None
+        self.task_manager = TaskManager(mode="api", provider=api_provider or "qwen")
         self._prompt_loader = None
         self._prompt_template = None
-        
-        self.provider_mapping = {
-            'qwen': 'dashscope',
-            'minimax': 'minimax',
-            'gemini': 'custom',
-            'chatgpt': 'openai'
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        """Return a workflow/agent friendly capability snapshot."""
+
+        return {
+            "module": "AcademicNoteGenerator",
+            "task": "academic_note",
+            "available": True,
+            "test_mode": self.test_mode,
+            "backend_options": [
+                {
+                    "backend": "script",
+                    "provider": "academic_note_generator",
+                    "model": "mock-note-generator" if self.test_mode else "template-fallback",
+                    "available": True,
+                    "description": "Deterministic template and entity fallback.",
+                },
+                {
+                    "backend": "llm_api",
+                    "provider": self.api_provider,
+                    "model": None,
+                    "available": not self.test_mode,
+                    "description": "Remote LLM note generation through TaskManager.",
+                },
+                {
+                    "backend": "local_llm",
+                    "provider": "ollama",
+                    "model": "configured local model",
+                    "available": not self.test_mode,
+                    "description": "Small/local model path with script fallback.",
+                },
+                {
+                    "backend": "skill",
+                    "provider": "historyresearch-workspace",
+                    "model": "workspace-skill",
+                    "available": True,
+                    "description": "Future AI-agent skill backend for note protocol alignment.",
+                },
+                {
+                    "backend": "mcp",
+                    "provider": "external_tool",
+                    "model": "configured",
+                    "available": False,
+                    "description": "Reserved MCP note generation backend.",
+                },
+            ],
+            "fallback_order": ["llm_api", "local_llm", "script", "skill", "mcp"],
+            "output_type": "academic_note",
+            "quality_signals": [
+                "empty_markdown",
+                "no_entities",
+                "note_generation_fallback_used",
+                "fallback_backend",
+                "short_summary",
+            ],
         }
-    
+
     def _get_prompt_loader(self):
-        """获取提示词加载器实例"""
         if self._prompt_loader is None and PROMPT_LOADER_AVAILABLE:
             self._prompt_loader = PromptLoader()
         return self._prompt_loader
-    
+
     def _get_prompt_template(self):
-        """获取提示词模板管理器"""
         if self._prompt_template is None:
             loader = self._get_prompt_loader()
             self._prompt_template = PromptTemplate(loader) if loader else None
         return self._prompt_template
-    
-    def _load_system_prompt(self) -> str:
-        """加载系统提示词"""
-        loader = self._get_prompt_loader()
-        if loader:
-            try:
-                return loader.load_prompt('academic_note_generator', 'AN_G001')
-            except Exception:
-                pass
-        return self.DEFAULT_SYSTEM_PROMPT
-    
-    def _load_note_template(self) -> str:
-        """加载笔记模板"""
-        loader = self._get_prompt_loader()
-        if loader:
-            try:
-                return loader.load_prompt('academic_note_generator', 'AN_T001')
-            except Exception:
-                pass
-        return self.DEFAULT_NOTE_TEMPLATE
-    
-    def _load_generation_prompt(self, **kwargs) -> str:
-        """加载并渲染笔记生成提示词"""
-        template = self._get_prompt_template()
-        if template:
-            try:
-                return template.load_template('academic_note_generator', 'AN_U001', **kwargs)
-            except Exception:
-                pass
-        return None
-    
-    def _init_llm_client(self):
-        """初始化LLM客户端"""
-        if self.test_mode:
-            return None
-            
-        if self.llm_client is None:
-            provider = self.provider_mapping.get(self.api_provider, 'dashscope')
-            
-            config = self._create_provider_config(provider)
-            self.llm_client = create_llm_client(config)
-    
-    def _create_provider_config(self, provider: str) -> Dict[str, Any]:
-        """创建provider配置字典"""
-        configs = {
-            'dashscope': {
-                'provider': 'dashscope',
-                'model': 'qwen-turbo',
-                'api_key': os.getenv('DASHSCOPE_API_KEY'),
-                'base_url': 'https://dashscope.aliyuncs.com/api/v1'
-            },
-            'minimax': {
-                'provider': 'minimax',
-                'model': 'abab6-chat',
-                'api_key': os.getenv('MINIMAX_API_KEY'),
-                'base_url': 'https://api.minimax.chat/v1'
-            },
-            'openai': {
-                'provider': 'openai',
-                'model': 'gpt-4',
-                'api_key': os.getenv('OPENAI_API_KEY'),
-                'base_url': None
-            }
-        }
-        
-        return configs.get(provider, configs['dashscope'])
 
-    def generate_reading_note(self, text: str, metadata: Optional[Dict[str, Any]] = None,
-                              custom_prompt: Optional[str] = None) -> Dict[str, Any]:
-        """
-        生成学术阅读笔记
-        
-        Args:
-            text: 学术文献文本内容
-            metadata: 文献元数据（标题、作者、年份等）
-            custom_prompt: 自定义提示词
-            
-        Returns:
-            dict: 包含笔记内容和实体信息的字典
-        """
+    def generate_reading_note(
+        self,
+        text: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        custom_prompt: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Generate a structured reading note with normalized execution metadata."""
+
         metadata = metadata or {}
-        
         if self.test_mode:
             return self._generate_mock_note(text, metadata)
-        
-        self._init_llm_client()
-        
-        system_prompt = custom_prompt or self._load_system_prompt()
-        
-        prompt = self._build_generation_prompt(text, metadata)
-        
-        response = self._call_llm(system_prompt, prompt)
-        
-        return self._parse_llm_response(response, metadata)
 
-    def extract_entities(self, text: str, entity_types: Optional[List[str]] = None) -> Dict[str, List[str]]:
-        """
-        从文本中提取指定类型的实体
-        
-        Args:
-            text: 待分析的文本
-            entity_types: 要提取的实体类型列表
-            
-        Returns:
-            dict: 按类型分类的实体字典
-        """
-        if self.test_mode:
-            return self._extract_mock_entities(text, entity_types)
-        
-        self._init_llm_client()
-        
-        entity_types = entity_types or list(self.ENTITY_TYPES.keys())
-        
-        prompt = f"""请从以下文本中提取指定的实体类型。
+        source_title = metadata.get("title", "Unknown Source")
+        backend = metadata.get("backend") or "llm_api"
+        fallback_backends = list(metadata.get("fallback_backends") or ["local_llm", "script"])
 
-实体类型说明：
-- person: 历史人物、学者、思想家等
-- location: 国家、城市、地区、机构所在地等
-- event: 历史事件、会议、运动、战争等
-- concept: 学术术语、理论、主义、思想等
-- literature: 著作、论文、史料、档案等
-
-待分析文本：
-{text}
-
-请以JSON格式输出，格式如下：
-{{
-    "person": ["人物1", "人物2"],
-    "location": ["地名1", "地名2"],
-    "event": ["事件1", "事件2"],
-    "concept": ["概念1", "概念2"],
-    "literature": ["文献1", "文献2"]
-}}
-"""
-        
-        system_prompt = self._load_system_prompt()
-        response = self._call_llm(system_prompt, prompt)
-        
         try:
-            return json.loads(response)
-        except json.JSONDecodeError:
-            return self._parse_entities_from_text(response)
+            result = self.task_manager.execute_task(
+                "academic_note",
+                text=text,
+                source=source_title,
+                backend=backend,
+                provider=metadata.get("provider", self.api_provider),
+                model=metadata.get("model"),
+                custom_prompt=custom_prompt,
+                fallback_backends=fallback_backends,
+                temperature=metadata.get("temperature", 0.3),
+                max_tokens=metadata.get("max_tokens", 3000),
+            )
+        except Exception as exc:  # noqa: BLE001
+            result = {"success": False, "error": str(exc), "metadata": {}}
 
-    def build_knowledge_graph(self, entities: Dict[str, List[str]], 
-                             relationships: Optional[List[Dict]] = None) -> Dict[str, Any]:
-        """
-        构建知识图谱节点数据
-        
-        Args:
-            entities: 提取的实体字典
-            relationships: 实体间关系列表
-            
-        Returns:
-            dict: 知识图谱数据
-        """
+        note_payload = self._normalize_note_result(result, text, metadata)
+        note_payload["markdown"] = self.apply_note_template(note_payload)
+        return note_payload
+
+    def generate_reading_note_package(
+        self,
+        text: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        custom_prompt: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Generate a reading note and wrap it as an `academic_note` envelope."""
+
+        metadata = metadata or {}
+        try:
+            note = self.generate_reading_note(text, metadata, custom_prompt=custom_prompt)
+            error = None
+        except Exception as exc:  # noqa: BLE001
+            note = self._generate_mock_note(text, metadata)
+            note["needs_review"] = True
+            note["review_reason"] = str(exc)
+            error = str(exc)
+
+        flags = self._package_quality_flags(note)
+        return {
+            "type": "academic_note",
+            "schema_version": "2026-04-25",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "source_id": metadata.get("id") or metadata.get("source_id"),
+            "source_title": metadata.get("title", "Unknown Title"),
+            "markdown": note.get("markdown", ""),
+            "summary": note.get("summary", ""),
+            "entities": note.get("entities", {}),
+            "keywords": note.get("keywords", []),
+            "export_summary": self._build_export_summary(note),
+            "backend": note.get("backend") or "script",
+            "provider": note.get("provider", self.api_provider),
+            "model": note.get("model"),
+            "confidence": self._package_confidence(note, flags),
+            "needs_review": bool(flags) or bool(note.get("needs_review")),
+            "quality_flags": flags,
+            "capabilities": self.get_capabilities(),
+            "metadata": {
+                "authors": metadata.get("authors", ""),
+                "year": metadata.get("year", ""),
+                "source": metadata.get("source", ""),
+                "subject_tag": metadata.get("subject_tag", "history"),
+            },
+            "error": error,
+        }
+
+    def extract_entities(
+        self,
+        text: str,
+        entity_types: Optional[List[str]] = None,
+    ) -> Dict[str, List[str]]:
+        """Extract entities grouped by type through the unified task layer."""
+
+        categories = entity_types or list(self.ENTITY_TYPES.keys())
+        if self.test_mode:
+            return self._extract_mock_entities(text, categories)
+
+        try:
+            result = self.task_manager.execute_task(
+                "ner",
+                text=text,
+                categories=categories,
+                backend="script" if self.test_mode else None,
+                provider=self.api_provider,
+                fallback_backends=["local_llm", "script"],
+                temperature=0.1,
+                max_tokens=1500,
+            )
+        except Exception:  # noqa: BLE001
+            return self._extract_mock_entities(text, categories)
+
+        grouped = {category: [] for category in categories}
+        if not result.get("success"):
+            return grouped
+
+        for item in (result.get("data") or {}).get("entities", []):
+            name = item.get("entity") or item.get("text") or item.get("name")
+            category = item.get("category", "concept")
+            if name and category in grouped and name not in grouped[category]:
+                grouped[category].append(name)
+        return grouped
+
+    def build_knowledge_graph(
+        self,
+        entities: Dict[str, List[str]],
+        relationships: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Build lightweight graph data from extracted entities."""
+
         nodes = []
         links = []
         node_id_map = {}
-        
+
         for entity_type, entity_list in entities.items():
             for entity in entity_list:
                 entity_id = self._generate_entity_id(entity)
                 node_id_map[entity] = entity_id
-                
-                nodes.append({
-                    'id': entity_id,
-                    'label': entity,
-                    'type': entity_type,
-                    'category': self.ENTITY_TYPES.get(entity_type, entity_type)
-                })
-        
-        if relationships:
-            for rel in relationships:
-                source = rel.get('source')
-                target = rel.get('target')
-                relation_type = rel.get('type', 'related_to')
-                
-                if source in node_id_map and target in node_id_map:
-                    links.append({
-                        'source': node_id_map[source],
-                        'target': node_id_map[target],
-                        'type': relation_type,
-                        'label': rel.get('label', relation_type)
-                    })
-        
+                nodes.append(
+                    {
+                        "id": entity_id,
+                        "label": entity,
+                        "type": entity_type,
+                        "category": self.ENTITY_TYPES.get(entity_type, entity_type),
+                    }
+                )
+
+        for rel in relationships or []:
+            source = rel.get("source")
+            target = rel.get("target")
+            if source in node_id_map and target in node_id_map:
+                links.append(
+                    {
+                        "source": node_id_map[source],
+                        "target": node_id_map[target],
+                        "type": rel.get("type", "related_to"),
+                        "label": rel.get("label", rel.get("type", "related_to")),
+                    }
+                )
+
         return {
-            'nodes': nodes,
-            'links': links,
-            'stats': {
-                'total_nodes': len(nodes),
-                'total_links': len(links),
-                'entity_types': {k: len(v) for k, v in entities.items()}
-            }
+            "nodes": nodes,
+            "links": links,
+            "stats": {
+                "total_nodes": len(nodes),
+                "total_links": len(links),
+                "entity_types": {key: len(value) for key, value in entities.items()},
+            },
         }
 
-    def apply_note_template(self, content: Dict[str, Any], 
-                           template: Optional[str] = None) -> str:
-        """
-        应用笔记模板生成最终Markdown
-        
-        Args:
-            content: 笔记内容字典
-            template: 自定义模板
-            
-        Returns:
-            str: 格式化的Markdown文本
-        """
+    def apply_note_template(self, content: Dict[str, Any], template: Optional[str] = None) -> str:
+        """Render note content to Markdown."""
+
         template = template or self.DEFAULT_NOTE_TEMPLATE
-        
-        subject_tag = content.get('subject_tag', '日本史')
-        created_date = content.get('created_date', datetime.now().strftime('%Y-%m-%d'))
-        source_title = content.get('source_title', 'Unknown')
-        
-        chapter_outline = self._format_chapter_outline(content.get('chapters', []))
-        
-        knowledge_graph = self._format_knowledge_graph(content.get('entities', {}))
-        
-        note_content = template.format(
-            title=content.get('title', 'Untitled'),
-            summary=content.get('summary', ''),
-            chapter_outline=chapter_outline,
-            knowledge_graph=knowledge_graph,
-            created_date=created_date,
-            source_title=source_title,
-            subject_tag=subject_tag,
-            authors=content.get('authors', 'Unknown'),
-            year=content.get('year', 'Unknown'),
-            keywords=', '.join(content.get('keywords', []))
+        rendered = template.format(
+            title=content.get("title", "Untitled"),
+            summary=content.get("summary", ""),
+            chapter_outline=self._format_chapter_outline(content.get("chapters", [])),
+            knowledge_graph=self._format_knowledge_graph(content.get("entities", {})),
+            created_date=content.get("created_date", datetime.now().strftime("%Y-%m-%d")),
+            source_title=content.get("source_title", "Unknown"),
+            subject_tag=content.get("subject_tag", "history"),
+            authors=content.get("authors", "Unknown"),
+            year=content.get("year", "Unknown"),
+            keywords=", ".join(content.get("keywords", [])),
         )
-        
-        return note_content
+        return rendered
 
     def create_bidirectional_links(self, text: str, entities: Dict[str, List[str]]) -> str:
-        """
-        在文本中创建双向链接
-        
-        Args:
-            text: 原始文本
-            entities: 实体字典
-            
-        Returns:
-            str: 添加了双向链接的文本
-        """
+        """Wrap known entities with Obsidian wiki links."""
+
         linked_text = text
-        
-        all_entities = []
+        all_entities: List[str] = []
         for entity_list in entities.values():
             all_entities.extend(entity_list)
-        
-        all_entities.sort(key=len, reverse=True)
-        
+        all_entities = sorted(set(all_entities), key=len, reverse=True)
+
         for entity in all_entities:
-            if entity in linked_text:
-                linked_text = linked_text.replace(
-                    entity, 
-                    f'[[{entity}]]'
-                )
-        
+            if not entity or f"[[{entity}]]" in linked_text:
+                continue
+            linked_text = re.sub(rf"(?<!\[\[){re.escape(entity)}(?!\]\])", f"[[{entity}]]", linked_text)
         return linked_text
 
     def batch_process(self, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        批量处理多个文档
-        
-        Args:
-            documents: 文档列表，每个文档包含text和metadata
-            
-        Returns:
-            list: 处理结果列表
-        """
+        """Generate notes for multiple source documents."""
+
         results = []
-        
-        for doc in documents:
-            text = doc.get('text', '')
-            metadata = doc.get('metadata', {})
-            
-            result = self.generate_reading_note(text, metadata)
-            results.append(result)
-        
+        for document in documents:
+            results.append(
+                self.generate_reading_note(
+                    document.get("text", ""),
+                    document.get("metadata", {}),
+                )
+            )
         return results
 
-    def _build_generation_prompt(self, text: str, metadata: Dict[str, Any]) -> str:
-        """构建生成提示词"""
-        title = metadata.get('title', '未知标题')
-        authors = metadata.get('authors', '未知作者')
-        year = metadata.get('year', '未知年份')
-        
-        prompt = f"""请为以下学术文献生成结构化的Obsidian阅读笔记。
+    def batch_process_package(self, documents: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Generate notes for multiple documents as an `academic_note_batch`."""
 
-【文献信息】
-- 标题：{title}
-- 作者：{authors}
-- 年份：{year}
-
-【文献内容】
-{text[:8000]}
-
-【输出要求】
-请严格按照以下JSON格式输出：
-{{
-    "summary": "总体摘要（300字左右，包含双向链接）",
-    "chapters": [
-        {{
-            "title": "章节标题",
-            "main_points": ["核心论点1（含双向链接）", "核心论点2"]
-        }}
-    ],
-    "entities": {{
-        "person": ["人物1", "人物2"],
-        "location": ["地名1", "地名2"],
-        "event": ["事件1", "事件2"],
-        "concept": ["概念1", "概念2"],
-        "literature": ["文献1", "文献2"]
-    }},
-    "keywords": ["关键词1", "关键词2", "关键词3"]
-}}
-"""
-        return prompt
-
-    def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
-        """调用LLM API"""
-        try:
-            full_prompt = f"{system_prompt}\n\n{user_prompt}"
-            result = self.llm_client._call_llm(full_prompt, temperature=0.3)
-            return result.get('content', '')
-        except Exception as e:
-            raise RuntimeError(f"LLM API调用失败: {str(e)}")
-
-    def _parse_llm_response(self, response: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
-        """解析LLM响应"""
-        try:
-            data = json.loads(response)
-        except json.JSONDecodeError:
-            data = self._parse_json_from_text(response)
-        
-        content = {
-            'title': metadata.get('title', '未知标题'),
-            'summary': data.get('summary', ''),
-            'chapters': data.get('chapters', []),
-            'entities': data.get('entities', {}),
-            'keywords': data.get('keywords', []),
-            'authors': metadata.get('authors', ''),
-            'year': metadata.get('year', ''),
-            'created_date': datetime.now().strftime('%Y-%m-%d'),
-            'source_title': metadata.get('title', '')
+        notes = [
+            self.generate_reading_note_package(
+                document.get("text", ""),
+                document.get("metadata", {}),
+            )
+            for document in documents
+        ]
+        quality_flags = sorted(
+            {
+                flag
+                for note in notes
+                for flag in note.get("quality_flags", [])
+            }
+        )
+        return {
+            "type": "academic_note_batch",
+            "schema_version": "2026-04-25",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "notes": notes,
+            "statistics": {
+                "total": len(notes),
+                "needs_review": sum(1 for note in notes if note.get("needs_review")),
+                "with_entities": sum(1 for note in notes if any(note.get("entities", {}).values())),
+                "with_markdown": sum(1 for note in notes if note.get("markdown")),
+            },
+            "backend": "hybrid" if len({note.get("backend") for note in notes}) > 1 else (notes[0].get("backend") if notes else "script"),
+            "provider": self.api_provider,
+            "model": None,
+            "confidence": round(
+                sum(note.get("confidence", 0.0) for note in notes) / len(notes),
+                3,
+            ) if notes else 0.0,
+            "needs_review": any(note.get("needs_review") for note in notes),
+            "quality_flags": quality_flags,
+            "capabilities": self.get_capabilities(),
         }
-        
-        content['markdown'] = self.apply_note_template(content)
-        
+
+    def _normalize_note_result(
+        self,
+        result: Dict[str, Any],
+        text: str,
+        metadata: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Normalize task-layer output into the module's stable note schema."""
+
+        payload = (result.get("data") or {}) if result.get("success") else {}
+        note_markdown = payload.get("note_content") or payload.get("content") or payload.get("raw_response") or ""
+        entities = self._normalize_entities(
+            payload.get("entities")
+            or self.extract_entities(text, list(self.ENTITY_TYPES.keys()))
+        )
+
+        summary = self._derive_summary(note_markdown or text)
+        chapters = self._derive_chapters(note_markdown or text)
+        keywords = self._derive_keywords(entities)
+        needs_review = not result.get("success") or not note_markdown.strip()
+
+        content = {
+            "title": metadata.get("title", "Unknown Title"),
+            "summary": self.create_bidirectional_links(summary, entities),
+            "chapters": chapters,
+            "entities": entities,
+            "keywords": keywords,
+            "authors": metadata.get("authors", ""),
+            "year": metadata.get("year", ""),
+            "created_date": datetime.now().strftime("%Y-%m-%d"),
+            "source_title": metadata.get("title", "Unknown Title"),
+            "subject_tag": metadata.get("subject_tag", "history"),
+            "backend": "script" if not result.get("success") else (result.get("backend") or result.get("metadata", {}).get("backend")),
+            "provider": "fallback" if not result.get("success") else result.get("metadata", {}).get("provider", self.api_provider),
+            "model": "fallback-note" if not result.get("success") else result.get("metadata", {}).get("model"),
+            "needs_review": needs_review,
+            "raw_note_content": note_markdown,
+        }
+        if needs_review:
+            content["review_reason"] = result.get("error") or "note_generation_fallback_used"
         return content
 
-    def _parse_json_from_text(self, text: str) -> Dict[str, Any]:
-        """从文本中提取JSON"""
-        json_pattern = r'\{[^{}]*(?:\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}[^{}]*)*\}'
-        matches = re.findall(json_pattern, text, re.DOTALL)
-        
-        for match in matches:
-            try:
-                return json.loads(match)
-            except json.JSONDecodeError:
-                continue
-        
-        return {}
-
-    def _parse_entities_from_text(self, text: str) -> Dict[str, List[str]]:
-        """从文本中解析实体"""
-        entities = {
-            'person': [],
-            'location': [],
-            'event': [],
-            'concept': [],
-            'literature': []
+    def _build_export_summary(self, note: Dict[str, Any]) -> Dict[str, Any]:
+        markdown = note.get("markdown", "") or ""
+        entities = note.get("entities", {}) or {}
+        return {
+            "markdown_chars": len(markdown),
+            "entity_count": sum(len(values) for values in entities.values()),
+            "keyword_count": len(note.get("keywords", []) or []),
+            "has_bidirectional_links": "[[" in markdown and "]]" in markdown,
+            "needs_review": bool(note.get("needs_review")),
         }
-        
-        current_type = None
-        for line in text.split('\n'):
-            line = line.strip()
-            
-            if 'person' in line.lower() or '人名' in line or '人物' in line:
-                current_type = 'person'
-            elif 'location' in line.lower() or '地名' in line or '地点' in line:
-                current_type = 'location'
-            elif 'event' in line.lower() or '事件' in line:
-                current_type = 'event'
-            elif 'concept' in line.lower() or '概念' in line or '术语' in line:
-                current_type = 'concept'
-            elif 'literature' in line.lower() or '文献' in line or '著作' in line:
-                current_type = 'literature'
-            elif line.startswith('-') or line.startswith('*'):
-                entity = line.lstrip('-* ').strip()
-                if current_type and entity:
-                    entities[current_type].append(entity)
-        
-        return entities
 
-    def _format_chapter_outline(self, chapters: List[Dict]) -> str:
-        """格式化章节脉络"""
+    def _package_quality_flags(self, note: Dict[str, Any]) -> List[str]:
+        flags = []
+        markdown = note.get("markdown", "") or ""
+        entities = note.get("entities", {}) or {}
+        if not markdown.strip():
+            flags.append("empty_markdown")
+        if not any(entities.values()):
+            flags.append("no_entities")
+        if note.get("needs_review"):
+            flags.append("note_generation_fallback_used")
+        if note.get("backend") in {"script", "fallback"} and not self.test_mode:
+            flags.append("fallback_backend")
+        if len(note.get("summary", "") or "") < 20:
+            flags.append("short_summary")
+        return sorted(set(flags))
+
+    def _package_confidence(self, note: Dict[str, Any], flags: List[str]) -> float:
+        confidence = 0.85
+        if note.get("backend") in {"script", "fallback"}:
+            confidence -= 0.15
+        if "empty_markdown" in flags:
+            confidence -= 0.35
+        if "no_entities" in flags:
+            confidence -= 0.1
+        if note.get("needs_review"):
+            confidence -= 0.15
+        return round(max(0.0, min(1.0, confidence)), 3)
+
+    def _normalize_entities(self, data: Any) -> Dict[str, List[str]]:
+        """Normalize various entity payload shapes into grouped lists."""
+
+        grouped = {category: [] for category in self.ENTITY_TYPES}
+        if isinstance(data, dict):
+            for category, values in data.items():
+                if category not in grouped:
+                    continue
+                for value in values or []:
+                    if value and value not in grouped[category]:
+                        grouped[category].append(value)
+            return grouped
+
+        if isinstance(data, list):
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("entity") or item.get("text") or item.get("name")
+                category = item.get("category", "concept")
+                if name and category in grouped and name not in grouped[category]:
+                    grouped[category].append(name)
+        return grouped
+
+    def _derive_summary(self, text: str) -> str:
+        sentences = [part.strip() for part in re.split(r"[。！？!?]\s*|\n+", text) if part.strip()]
+        return " ".join(sentences[:2])[:400] if sentences else text[:400]
+
+    def _derive_chapters(self, text: str) -> List[Dict[str, Any]]:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        bullet_candidates = [line.lstrip("-* ").strip() for line in lines if line.startswith(("-", "*"))]
+        if bullet_candidates:
+            return [{"title": "Key Arguments", "main_points": bullet_candidates[:6]}]
+
+        sentences = [part.strip() for part in re.split(r"[。！？!?]\s*|\n+", text) if part.strip()]
+        return [{"title": "Key Arguments", "main_points": sentences[:5]}] if sentences else []
+
+    def _derive_keywords(self, entities: Dict[str, List[str]]) -> List[str]:
+        keywords = []
+        for category in ("concept", "event", "person", "location", "literature"):
+            for item in entities.get(category, []):
+                if item not in keywords:
+                    keywords.append(item)
+                if len(keywords) >= 8:
+                    return keywords
+        return keywords
+
+    def _format_chapter_outline(self, chapters: List[Dict[str, Any]]) -> str:
         if not chapters:
-            return "无章节信息"
-        
-        outline = []
-        for i, chapter in enumerate(chapters, 1):
-            title = chapter.get('title', f'章节{i}')
-            points = chapter.get('main_points', [])
-            
-            outline.append(f"### {title}")
-            for point in points:
-                outline.append(f"- {point}")
-            outline.append("")
-        
-        return "\n".join(outline)
+            return "No chapter structure available."
+        lines = []
+        for chapter in chapters:
+            title = chapter.get("title", "Untitled Section")
+            lines.append(f"### {title}")
+            for point in chapter.get("main_points", []):
+                lines.append(f"- {point}")
+            lines.append("")
+        return "\n".join(lines).strip()
 
     def _format_knowledge_graph(self, entities: Dict[str, List[str]]) -> str:
-        """格式化知识图谱"""
         if not entities:
-            return "无实体信息"
-        
-        graph = []
-        
-        type_labels = {
-            'person': '👤 关键人物',
-            'location': '🌍 重要地名',
-            'event': '⏳ 历史事件',
-            'concept': '💡 核心概念',
-            'literature': '📚 核心文献'
-        }
-        
-        for entity_type, entity_list in entities.items():
-            if entity_list:
-                label = type_labels.get(entity_type, entity_type)
-                entities_str = ', '.join([f'[[{e}]]' for e in entity_list[:10]])
-                if len(entity_list) > 10:
-                    entities_str += f' ... (共{len(entity_list)}个)'
-                graph.append(f"- **{label}**：{entities_str}")
-        
-        return "\n".join(graph) if graph else "无实体信息"
+            return "No entity information available."
+        lines = []
+        for category, values in entities.items():
+            if not values:
+                continue
+            rendered = ", ".join(f"[[{value}]]" for value in values[:10])
+            lines.append(f"- **{category}**: {rendered}")
+        return "\n".join(lines) if lines else "No entity information available."
 
     def _generate_entity_id(self, entity: str) -> str:
-        """生成实体唯一ID"""
-        hash_obj = hashlib.md5(entity.encode('utf-8'))
-        return f"node_{hash_obj.hexdigest()[:8]}"
+        return "node_" + hashlib.md5(entity.encode("utf-8")).hexdigest()[:8]
 
     def _generate_mock_note(self, text: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
-        """生成模拟笔记数据（测试模式）"""
-        title = metadata.get('title', '测试文献标题')
-        authors = metadata.get('authors', '测试作者')
-        year = metadata.get('year', '2024')
-        
-        mock_entities = {
-            'person': ['丸山真男', '福泽谕吉', '霍布斯'],
-            'location': ['东京', '京都', '明治日本'],
-            'event': ['明治维新', '甲午战争', '大正民主'],
-            'concept': ['国体论', '超国家主义', '文明开化'],
-            'literature': ['《日本政治思想史研究》', '《文明论概略》']
-        }
-        
-        mock_chapters = [
-            {
-                'title': '第一章 近代日本政治思想的形成',
-                'main_points': [
-                    '探讨了[[丸山真男]]对[[明治日本]]政治思想的影响',
-                    '分析了[[国体论]]在近代日本的传播',
-                    '批判了[[超国家主义]]的思想根源'
-                ]
-            },
-            {
-                'title': '第二章 西方政治思想的接受与转化',
-                'main_points': [
-                    '论述[[福泽谕吉]]的[[文明论]]思想',
-                    '分析[[霍布斯]]政治哲学的东渐',
-                    '考察[[明治维新]]对政治思想的影响'
-                ]
-            }
-        ]
-        
+        """Generate deterministic test-mode note data."""
+
+        entities = self._extract_mock_entities(text, list(self.ENTITY_TYPES.keys()))
         content = {
-            'title': title,
-            'summary': f'''本文探讨了近代日本政治思想的形成与发展。研究的核心问题是[[明治日本]]如何在接受西方政治思想的过程中形成独特的政治哲学体系。
-
-文章首先分析了[[丸山真男]]对[[国体论]]的批判性研究，指出[[超国家主义]]的思想根源在于对传统政治概念的错误理解。其次，通过考察[[福泽谕吉]]的《[[文明论概略]]》，揭示了[[文明开化]]运动在日本政治思想现代化中的关键作用。研究方法上，本文采用了思想史与政治哲学相结合的综合视角。
-
-研究表明，近代日本政治思想的形成是一个复杂的本土化过程，既吸收了[[霍布斯]]等西方政治哲学家的思想，又保留了传统[[国体论]]的某些核心概念。这一研究对于理解当代日本政治思想史具有重要的参考价值。''',
-            'chapters': mock_chapters,
-            'entities': mock_entities,
-            'keywords': ['日本政治思想', '丸山真男', '国体论', '明治维新', '文明开化'],
-            'authors': authors,
-            'year': year,
-            'created_date': datetime.now().strftime('%Y-%m-%d'),
-            'source_title': title
+            "title": metadata.get("title", "Test Title"),
+            "summary": self.create_bidirectional_links("Mock summary for test mode.", entities),
+            "chapters": [
+                {
+                    "title": "Key Arguments",
+                    "main_points": [
+                        "Mock argument one",
+                        "Mock argument two",
+                    ],
+                }
+            ],
+            "entities": entities,
+            "keywords": self._derive_keywords(entities),
+            "authors": metadata.get("authors", ""),
+            "year": metadata.get("year", ""),
+            "created_date": datetime.now().strftime("%Y-%m-%d"),
+            "source_title": metadata.get("title", "Test Title"),
+            "subject_tag": metadata.get("subject_tag", "history"),
+            "backend": "script",
+            "provider": self.api_provider,
+            "model": "mock-note-generator",
+            "needs_review": False,
         }
-        
-        content['markdown'] = self.apply_note_template(content)
-        
+        content["markdown"] = self.apply_note_template(content)
         return content
 
-    def _extract_mock_entities(self, text: str, 
-                              entity_types: Optional[List[str]] = None) -> Dict[str, List[str]]:
-        """提取模拟实体数据（测试模式）"""
+    def _extract_mock_entities(
+        self,
+        text: str,
+        entity_types: Optional[List[str]] = None,
+    ) -> Dict[str, List[str]]:
+        del text
         entity_types = entity_types or list(self.ENTITY_TYPES.keys())
-        
         mock_entities = {
-            'person': ['丸山真男', '福泽谕吉', '霍布斯', '洛克', '卢梭'],
-            'location': ['东京', '京都', '大阪', '明治日本', '江户'],
-            'event': ['明治维新', '甲午战争', '日俄战争', '大正民主', '战后改革'],
-            'concept': ['国体论', '超国家主义', '文明开化', '实学', '独立自尊'],
-            'literature': ['《日本政治思想史研究》', '《文明论概略》', '《西洋事情》']
+            "person": ["Tokugawa Ieyasu", "Fukuzawa Yukichi"],
+            "location": ["Edo", "Kyoto"],
+            "event": ["Meiji Restoration"],
+            "concept": ["kokutai", "civilization and enlightenment"],
+            "literature": ["An Outline of a Theory of Civilization"],
         }
-        
-        return {k: v for k, v in mock_entities.items() if k in entity_types}
+        return {key: value for key, value in mock_entities.items() if key in entity_types}
 
 
-def create_academic_note_generator(api_provider: str = "qwen", 
-                                   test_mode: bool = True) -> 'AcademicNoteGenerator':
-    """
-    工厂函数：创建学术笔记生成器实例
-    
-    Args:
-        api_provider: API提供商
-        test_mode: 是否使用测试模式
-        
-    Returns:
-        AcademicNoteGenerator: 配置好的生成器实例
-    """
+def create_academic_note_generator(
+    api_provider: str = "qwen",
+    test_mode: bool = True,
+) -> AcademicNoteGenerator:
+    """Factory helper preserved for compatibility."""
+
     return AcademicNoteGenerator(api_provider=api_provider, test_mode=test_mode)

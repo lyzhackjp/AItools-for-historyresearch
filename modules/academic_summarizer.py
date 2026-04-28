@@ -36,7 +36,7 @@ from modules.data_structurer import DataStructurer
 
 class AcademicSummarizer:
     """学术内容智能摘要生成器"""
-    
+
     DEFAULT_SYSTEM_PROMPT = """你是一位资深的学术研究助手，专精于学术文献的分析与摘要生成。
 
 你的专长包括：
@@ -47,11 +47,11 @@ class AcademicSummarizer:
 5. 判断文献与特定研究主题的相关性
 
 请严格按照JSON格式输出分析结果。"""
-    
+
     def __init__(self, api_provider: str = "qwen", test_mode: bool = True):
         """
         初始化学术摘要生成器
-        
+
         Args:
             api_provider: API提供商 ('qwen', 'minimax', 'gemini', 'chatgpt')
             test_mode: 测试模式标志
@@ -60,25 +60,45 @@ class AcademicSummarizer:
         self.test_mode = test_mode
         self.llm_client = None
         self.data_structurer = DataStructurer()
-        
+
         self.provider_mapping = {
             'qwen': 'dashscope',
             'minimax': 'minimax',
             'gemini': 'custom',
             'chatgpt': 'openai'
         }
-    
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        """Return a workflow-facing capability snapshot."""
+        provider = self.provider_mapping.get(self.api_provider, self.api_provider)
+        return {
+            "module": "academic_summarizer",
+            "backend": "script" if self.test_mode else "llm_api",
+            "provider": "mock_rules" if self.test_mode else provider,
+            "model": None if self.test_mode else self._create_provider_config(provider).get("model"),
+            "test_mode": self.test_mode,
+            "capabilities": [
+                "abstractive_summary",
+                "extractive_summary",
+                "research_question_extraction",
+                "core_concept_identification",
+                "research_method_extraction",
+                "relevance_scoring",
+            ],
+            "fallback_order": ["script:mock_rules", "llm_api:dashscope", "llm_api:minimax", "llm_api:openai", "skill", "mcp"],
+        }
+
     def _init_llm_client(self):
         """初始化LLM客户端"""
         if self.test_mode:
             return None
-            
+
         if self.llm_client is None:
             provider = self.provider_mapping.get(self.api_provider, 'dashscope')
-            
+
             config = self._create_provider_config(provider)
             self.llm_client = create_llm_client(config)
-    
+
     def _create_provider_config(self, provider: str) -> Dict[str, Any]:
         """创建provider配置字典"""
         configs = {
@@ -101,34 +121,34 @@ class AcademicSummarizer:
                 'base_url': None
             }
         }
-        
+
         return configs.get(provider, configs['dashscope'])
-    
-    def generate_abstractive_summary(self, text: str, 
+
+    def generate_abstractive_summary(self, text: str,
                                    max_length: int = 500,
                                    style: str = 'academic') -> str:
         """
         生成抽象式摘要
-        
+
         Args:
             text: 学术文献文本
             max_length: 最大长度（字符数）
             style: 摘要风格 ('academic', 'simple', 'bullet_points')
-            
+
         Returns:
             str: 生成的摘要
         """
         if self.test_mode:
             return self._generate_mock_abstract(text, max_length, style)
-        
+
         self._init_llm_client()
-        
+
         style_instructions = {
             'academic': '使用正式学术语言，客观陈述',
             'simple': '使用通俗易懂的语言，简明扼要',
             'bullet_points': '使用要点列表形式，每点一句话'
         }
-        
+
         prompt = f"""请为以下学术文献生成{max_length}字左右的摘要。
 
 摘要风格要求：{style_instructions.get(style, style_instructions['academic'])}
@@ -137,57 +157,57 @@ class AcademicSummarizer:
 {text[:6000]}
 
 请直接输出摘要内容，不要包含其他说明。"""
-        
+
         return self._call_llm(prompt)
-    
-    def generate_extractive_summary(self, text: str, 
+
+    def generate_extractive_summary(self, text: str,
                                   max_sentences: int = 5) -> str:
         """
         生成抽取式摘要
-        
+
         Args:
             text: 学术文献文本
             max_sentences: 最大句子数
-            
+
         Returns:
             str: 抽取的摘要句子
         """
         sentences = self._split_into_sentences(text)
-        
+
         if len(sentences) <= max_sentences:
             return text
-        
+
         if self.test_mode:
             return self._extract_key_sentences_mock(sentences, max_sentences)
-        
+
         scored_sentences = self._score_sentences_importance(sentences)
-        
+
         top_sentences = sorted(
-            scored_sentences.items(), 
-            key=lambda x: x[1], 
+            scored_sentences.items(),
+            key=lambda x: x[1],
             reverse=True
         )[:max_sentences]
-        
+
         selected_indices = [idx for idx, score in top_sentences]
         selected_indices.sort()
-        
+
         return ' '.join([sentences[i] for i in selected_indices])
-    
+
     def extract_research_questions(self, text: str) -> List[Dict[str, Any]]:
         """
         提取核心研究问题
-        
+
         Args:
             text: 学术文献文本
-            
+
         Returns:
             list: 研究问题列表，每个问题包含类型、描述、章节位置
         """
         if self.test_mode:
             return self._extract_mock_research_questions(text)
-        
+
         self._init_llm_client()
-        
+
         prompt = f"""请从以下学术文献中提取核心研究问题。
 
 文献内容：
@@ -208,29 +228,29 @@ class AcademicSummarizer:
         "importance": "high"
     }}
 ]"""
-        
+
         response = self._call_llm(prompt)
-        
+
         try:
             return json.loads(response)
         except json.JSONDecodeError:
             return self._parse_questions_from_text(response)
-    
+
     def identify_core_concepts(self, text: str) -> Dict[str, List[str]]:
         """
         识别核心概念
-        
+
         Args:
             text: 学术文献文本
-            
+
         Returns:
             dict: 按类型分类的概念字典
         """
         if self.test_mode:
             return self._identify_mock_concepts(text)
-        
+
         self._init_llm_client()
-        
+
         prompt = f"""请从以下学术文献中提取核心概念，并按类型分类。
 
 文献内容：
@@ -243,9 +263,9 @@ class AcademicSummarizer:
     "historical_concepts": ["历史概念列表"],
     "technical_terms": ["技术术语列表"]
 }}"""
-        
+
         response = self._call_llm(prompt)
-        
+
         try:
             return json.loads(response)
         except json.JSONDecodeError:
@@ -255,22 +275,22 @@ class AcademicSummarizer:
                 'historical_concepts': [],
                 'technical_terms': []
             }
-    
+
     def extract_research_methods(self, text: str) -> List[Dict[str, str]]:
         """
         提取研究方法
-        
+
         Args:
             text: 学术文献文本
-            
+
         Returns:
             list: 研究方法列表
         """
         if self.test_mode:
             return self._extract_mock_methods(text)
-        
+
         self._init_llm_client()
-        
+
         prompt = f"""请从以下学术文献中提取使用的研究方法。
 
 文献内容：
@@ -289,62 +309,62 @@ class AcademicSummarizer:
         "application": "用于梳理学术史脉络"
     }}
 ]"""
-        
+
         response = self._call_llm(prompt)
-        
+
         try:
             return json.loads(response)
         except json.JSONDecodeError:
             return []
-    
-    def filter_relevant_literature(self, documents: List[Dict[str, Any]], 
+
+    def filter_relevant_literature(self, documents: List[Dict[str, Any]],
                                   query: str,
                                   top_k: int = 10) -> List[Dict[str, Any]]:
         """
         评估文献与研究主题的相关度
-        
+
         Args:
             documents: 文献列表，每项包含text和metadata
             query: 研究主题查询
             top_k: 返回的相关文献数量
-            
+
         Returns:
             list: 按相关度排序的文献列表
         """
         scored_documents = []
-        
+
         for doc in documents:
             text = doc.get('text', '')
             metadata = doc.get('metadata', {})
-            
+
             relevance_score = self._calculate_relevance(text, query)
-            
+
             scored_documents.append({
                 'metadata': metadata,
                 'relevance_score': relevance_score,
                 'key_reasons': self._extract_relevance_reasons(text, query)
             })
-        
+
         scored_documents.sort(key=lambda x: x['relevance_score'], reverse=True)
-        
+
         return scored_documents[:top_k]
-    
+
     def batch_process(self, documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         批量处理多个文档
-        
+
         Args:
             documents: 文档列表
-            
+
         Returns:
             list: 处理结果列表
         """
         results = []
-        
+
         for doc in documents:
             text = doc.get('text', '')
             metadata = doc.get('metadata', {})
-            
+
             result = {
                 'metadata': metadata,
                 'abstractive_summary': self.generate_abstractive_summary(text),
@@ -353,24 +373,24 @@ class AcademicSummarizer:
                 'core_concepts': self.identify_core_concepts(text),
                 'research_methods': self.extract_research_methods(text)
             }
-            
+
             results.append(result)
-        
+
         return results
-    
+
     def generate_full_analysis(self, text: str, metadata: Optional[Dict] = None) -> Dict[str, Any]:
         """
         生成完整的文献分析报告
-        
+
         Args:
             text: 学术文献文本
             metadata: 文献元数据
-            
+
         Returns:
             dict: 完整的分析结果
         """
         metadata = metadata or {}
-        
+
         return {
             'metadata': metadata,
             'abstractive_summary': self.generate_abstractive_summary(text),
@@ -382,7 +402,78 @@ class AcademicSummarizer:
             'estimated_reading_time': self._estimate_reading_time(text),
             'language': self._detect_language(text)
         }
-    
+
+    def generate_full_analysis_package(self, text: str, metadata: Optional[Dict] = None) -> Dict[str, Any]:
+        """Generate a full analysis wrapped in the unified workflow envelope."""
+        analysis = self.generate_full_analysis(text, metadata=metadata)
+        quality_flags = self._analysis_quality_flags(text, analysis)
+        capabilities = self.get_capabilities()
+        confidence = self._estimate_analysis_confidence(text, analysis, quality_flags)
+        created_at = datetime.now().isoformat(timespec="seconds")
+        analysis["workflow_metadata"] = {
+            **capabilities,
+            "confidence": confidence,
+            "needs_review": bool(quality_flags),
+            "quality_flags": quality_flags,
+            "created_at": created_at,
+        }
+        return {
+            "type": "academic_analysis",
+            "metadata": analysis.get("metadata", {}),
+            "analysis": analysis,
+            "backend": capabilities["backend"],
+            "provider": capabilities["provider"],
+            "model": capabilities["model"],
+            "confidence": confidence,
+            "needs_review": bool(quality_flags),
+            "quality_flags": quality_flags,
+            "created_at": created_at,
+        }
+
+    def _analysis_quality_flags(self, text: str, analysis: Dict[str, Any]) -> List[str]:
+        flags: List[str] = []
+        if not text or not text.strip():
+            flags.append("empty_text")
+        if 0 < len(text.strip()) < 200:
+            flags.append("very_short_text")
+        if not analysis.get("abstractive_summary"):
+            flags.append("missing_abstractive_summary")
+        if not analysis.get("extractive_summary"):
+            flags.append("missing_extractive_summary")
+        if not analysis.get("research_questions"):
+            flags.append("no_research_questions")
+        if not any(analysis.get("core_concepts", {}).values()):
+            flags.append("no_core_concepts")
+        if not analysis.get("research_methods"):
+            flags.append("no_research_methods")
+        return flags
+
+    def _estimate_analysis_confidence(
+        self,
+        text: str,
+        analysis: Dict[str, Any],
+        quality_flags: List[str],
+    ) -> float:
+        if not text or not text.strip():
+            return 0.15
+        confidence = 0.45
+        if len(text.strip()) >= 800:
+            confidence += 0.15
+        if analysis.get("abstractive_summary") and analysis.get("extractive_summary"):
+            confidence += 0.15
+        if analysis.get("research_questions"):
+            confidence += 0.10
+        if any(analysis.get("core_concepts", {}).values()):
+            confidence += 0.10
+        if analysis.get("research_methods"):
+            confidence += 0.05
+        confidence -= min(0.30, len(quality_flags) * 0.06)
+        if self.test_mode:
+            confidence = min(confidence, 0.78)
+        if quality_flags:
+            confidence = min(confidence, 0.72)
+        return round(max(0.1, min(confidence, 0.95)), 2)
+
     def _call_llm(self, prompt: str) -> str:
         """调用LLM API"""
         try:
@@ -390,49 +481,49 @@ class AcademicSummarizer:
             return result.get('content', '')
         except Exception as e:
             raise RuntimeError(f"LLM API调用失败: {str(e)}")
-    
+
     def _split_into_sentences(self, text: str) -> List[str]:
         """将文本分割成句子"""
         sentence_endings = r'[。！？；\n]+'
         sentences = re.split(sentence_endings, text)
-        
+
         return [s.strip() for s in sentences if s.strip()]
-    
+
     def _score_sentences_importance(self, sentences: List[str]) -> Dict[int, float]:
         """评分句子重要性"""
         scores = {}
-        
+
         important_keywords = [
-            '研究', '本文', '主要', '核心', '关键', '结论', 
+            '研究', '本文', '主要', '核心', '关键', '结论',
             '提出', '认为', '分析', '证明', '发现', '表明',
             '讨论', '探讨', '论述', '论证', '观点', '理论'
         ]
-        
+
         for i, sentence in enumerate(sentences):
             score = 0.0
-            
+
             if i < 3:
                 score += 0.5
-            
+
             if i >= len(sentences) - 2:
                 score += 0.3
-            
+
             for keyword in important_keywords:
                 if keyword in sentence:
                     score += 0.1
-            
+
             if len(sentence) > 50:
                 score += 0.1
-            
+
             scores[i] = min(score, 1.0)
-        
+
         return scores
-    
+
     def _calculate_relevance(self, text: str, query: str) -> float:
         """计算文献与查询的相关度"""
         if self.test_mode:
             return self._mock_relevance_score(text, query)
-        
+
         prompt = f"""请评估以下文献与研究主题的相关度。
 
 研究主题：{query}
@@ -441,14 +532,14 @@ class AcademicSummarizer:
 {text[:1000]}
 
 请返回一个0-1之间的浮点数表示相关度（1表示高度相关），只返回数字，不要其他内容。"""
-        
+
         try:
             response = self._call_llm(prompt)
             score = float(response.strip())
             return max(0.0, min(1.0, score))
         except:
             return 0.5
-    
+
     def _extract_relevance_reasons(self, text: str, query: str) -> List[str]:
         """提取相关原因"""
         if self.test_mode:
@@ -457,7 +548,7 @@ class AcademicSummarizer:
                 "涉及相关理论框架",
                 "使用方法与研究相关"
             ]
-        
+
         prompt = f"""请分析以下文献与研究主题的相关原因。
 
 研究主题：{query}
@@ -466,46 +557,46 @@ class AcademicSummarizer:
 {text[:1000]}
 
 请输出2-3个简要的相关原因。"""
-        
+
         try:
             response = self._call_llm(prompt)
             return [r.strip() for r in response.split('\n') if r.strip()]
         except:
             return []
-    
+
     def _estimate_reading_difficulty(self, text: str) -> str:
         """估算阅读难度"""
         avg_sentence_length = sum(len(s) for s in self._split_into_sentences(text)) / max(len(text), 1)
-        
+
         technical_terms = len(re.findall(r'《[^》]+》|［[^］]+］|\([^) ]+\)', text))
-        
+
         if avg_sentence_length > 50 or technical_terms > 10:
             return 'difficult'
         elif avg_sentence_length > 30 or technical_terms > 5:
             return 'medium'
         else:
             return 'easy'
-    
+
     def _estimate_reading_time(self, text: str) -> int:
         """估算阅读时间（分钟）"""
         char_count = len(text)
-        
+
         reading_speed = 400
-        
+
         return max(1, char_count // reading_speed)
-    
+
     def _detect_language(self, text: str) -> str:
         """检测文本语言"""
         chinese_chars = len(re.findall(r'[\u4e00-\u9fff]', text))
         japanese_chars = len(re.findall(r'[\u3040-\u309f\u30a0-\u30ff]', text))
         total_chars = len(text)
-        
+
         if total_chars == 0:
             return 'unknown'
-        
+
         chinese_ratio = chinese_chars / total_chars
         japanese_ratio = japanese_chars / total_chars
-        
+
         if chinese_ratio > 0.3:
             return 'chinese'
         elif japanese_ratio > 0.2:
@@ -514,22 +605,22 @@ class AcademicSummarizer:
             return 'mixed_cjk'
         else:
             return 'other'
-    
+
     def _parse_questions_from_text(self, text: str) -> List[Dict[str, Any]]:
         """从文本中解析研究问题"""
         questions = []
-        
+
         current_type = 'unknown'
         for line in text.split('\n'):
             line = line.strip()
-            
+
             if 'main' in line.lower() or '主要' in line:
                 current_type = 'main_question'
             elif 'sub' in line.lower() or '次要' in line:
                 current_type = 'sub_question'
             elif 'method' in line.lower() or '方法' in line:
                 current_type = 'methodology_question'
-            
+
             if line and not line.startswith('{') and not line.startswith('['):
                 questions.append({
                     'type': current_type,
@@ -537,10 +628,10 @@ class AcademicSummarizer:
                     'chapter': '未知',
                     'importance': 'medium'
                 })
-        
+
         return questions[:5]
-    
-    def _generate_mock_abstract(self, text: str, max_length: int, 
+
+    def _generate_mock_abstract(self, text: str, max_length: int,
                                style: str) -> str:
         """生成模拟摘要"""
         if style == 'academic':
@@ -555,12 +646,12 @@ class AcademicSummarizer:
             return """- 核心问题：近代日本政治思想的形成
 - 主要论点：国体论批判与文明论建构
 - 研究方法：思想史分析"""
-    
-    def _extract_key_sentences_mock(self, sentences: List[str], 
+
+    def _extract_key_sentences_mock(self, sentences: List[str],
                                    max_sentences: int) -> str:
         """模拟提取关键句子"""
         return '。'.join(sentences[:max_sentences]) + '。'
-    
+
     def _extract_mock_research_questions(self, text: str) -> List[Dict[str, Any]]:
         """模拟提取研究问题"""
         return [
@@ -583,7 +674,7 @@ class AcademicSummarizer:
                 'importance': 'medium'
             }
         ]
-    
+
     def _identify_mock_concepts(self, text: str) -> Dict[str, List[str]]:
         """模拟识别核心概念"""
         return {
@@ -600,7 +691,7 @@ class AcademicSummarizer:
                 '政治哲学', '现代化', '西化', '民族主义'
             ]
         }
-    
+
     def _extract_mock_methods(self, text: str) -> List[Dict[str, str]]:
         """模拟提取研究方法"""
         return [
@@ -620,17 +711,17 @@ class AcademicSummarizer:
                 'application': '揭示概念的深层结构'
             }
         ]
-    
+
     def _mock_relevance_score(self, text: str, query: str) -> float:
         """模拟相关度评分"""
         query_keywords = query.lower().split()
-        
+
         text_lower = text.lower()
-        
+
         match_count = sum(1 for keyword in query_keywords if keyword in text_lower)
-        
+
         score = min(0.9, 0.3 + match_count * 0.2)
-        
+
         return score
 
 
@@ -638,11 +729,11 @@ def create_academic_summarizer(api_provider: str = "qwen",
                               test_mode: bool = True) -> AcademicSummarizer:
     """
     工厂函数：创建学术摘要生成器实例
-    
+
     Args:
         api_provider: API提供商
         test_mode: 是否使用测试模式
-        
+
     Returns:
         AcademicSummarizer: 配置好的生成器实例
     """

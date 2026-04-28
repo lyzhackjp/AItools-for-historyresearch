@@ -1,753 +1,588 @@
 """
-Obsidian笔记系统集成模块
+Obsidian vault integration helpers.
 
-与Obsidian笔记系统深度集成，支持双向链接、知识图谱等功能
-为学术研究提供现代化的知识管理能力
-
-核心功能：
-- 创建Obsidian vault并管理笔记
-- 生成双向链接 [[链接]] 语法
-- 应用自定义Eta模板格式化笔记
-- 同步Zotero批注到Obsidian
-- 构建知识图谱数据
-- 批量导入Markdown文件
-
-依赖模块：
-- llm_client.py
-- data_structurer.py
+This module is intentionally focused on filesystem-safe vault operations,
+wiki-link scanning, and lightweight export utilities.
 """
 
-import os
+from __future__ import annotations
+
 import json
 import re
-from typing import Dict, List, Optional, Any, Tuple
-from pathlib import Path
-from datetime import datetime
 import shutil
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 
 class ObsidianIntegration:
-    """Obsidian笔记系统集成器"""
-    
+    """Manage vault structure and note IO for Obsidian-compatible exports."""
+
     DEFAULT_VAULT_SETTINGS = {
-        'name': 'ResearchVault',
-        'created': datetime.now().isoformat(),
-        'plugins': {
-            'daily_notes': False,
-            'templates': False,
-            'graph_view': True
+        "plugins": {
+            "daily_notes": False,
+            "templates": False,
+            "graph_view": True,
         }
     }
-    
-    NOTE_TEMPLATES = {
-        'reading_note': '''---
-type: {note_type}
-tags: [{tags}]
-created: {created_date}
-source: {source}
----
 
-# {title}
-
-## 摘要
-
-{summary}
-
-## 关键要点
-
-{key_points}
-
-## 双向链接
-
-{backlinks}
-
-## 元数据
-
-- **作者**: {author}
-- **年份**: {year}
-- **主题**: {subject}
-
----
-
-*由AI辅助生成 - {generation_date}*
-''',
-        'concept_note': '''---
-type: concept
-tags: [{tags}]
-created: {created_date}
-related_concepts: [{related}]
----
-
-# {concept_name}
-
-## 定义
-
-{definition}
-
-## 核心特征
-
-{characteristics}
-
-## 相关人物
-
-{related_persons}
-
-## 相关事件
-
-{related_events}
-
-## 应用场景
-
-{applications}
-
-## 参考文献
-
-{references}
-''',
-        'person_note': '''---
-type: person
-tags: [{tags}]
-birth: {birth_date}
-death: {death_date}
-era: {era}
-occupation: {occupation}
----
-
-# {person_name}
-
-## 基本信息
-
-- **出生**: {birth_date}
-- **逝世**: {death_date}
-- **时代**: {era}
-- **身份**: {occupation}
-
-## 生平简介
-
- biography}
-
-## 主要贡献
-
-{contributions}
-
-## 代表作品
-
-{works}
-
-## 相关概念
-
-{related_concepts}
-
-## 历史评价
-
-{historical_assessment}
-'''
-    }
-    
     def __init__(self, vault_path: Optional[str] = None):
-        """
-        初始化Obsidian集成器
-        
-        Args:
-            vault_path: Obsidian vault路径
-        """
-        self.vault_path = Path(vault_path) if vault_path else None
-        self.current_vault = None
-        
-        self.settings = {}
-        self.template_engine = 'eta'
-    
-    def create_vault(self, vault_name: str, 
-                   vault_root: Optional[str] = None) -> bool:
-        """
-        创建新的Obsidian vault
-        
-        Args:
-            vault_name: vault名称
-            vault_root: vault根目录
-            
-        Returns:
-            bool: 是否创建成功
-        """
-        if vault_root:
-            base_path = Path(vault_root)
-        else:
-            base_path = Path.cwd()
-        
+        self.vault_path = Path(vault_path).resolve() if vault_path else None
+        self.current_vault = self.vault_path.name if self.vault_path else None
+        self.settings: Dict[str, Any] = {}
+        if self.vault_path:
+            self._ensure_vault_structure()
+
+    def create_vault(self, vault_name: str, vault_root: Optional[str] = None) -> bool:
+        """Create a new vault with the expected directory structure."""
+
+        base_path = Path(vault_root).resolve() if vault_root else Path.cwd().resolve()
         vault_path = base_path / vault_name
-        
-        try:
-            vault_path.mkdir(parents=True, exist_ok=True)
-            
-            folders = ['Notes', 'Attachments', 'Templates', 'Scripts', 'Daily']
-            for folder in folders:
-                (vault_path / folder).mkdir(exist_ok=True)
-            
-            self.vault_path = vault_path
-            self.current_vault = vault_name
-            
-            vault_settings = self.DEFAULT_VAULT_SETTINGS.copy()
-            vault_settings['name'] = vault_name
-            vault_settings['path'] = str(vault_path)
-            
-            with open(vault_path / '.obsidian' / 'vault.json', 'w', encoding='utf-8') as f:
-                json.dump(vault_settings, f, ensure_ascii=False, indent=2)
-            
-            self.settings = vault_settings
-            
-            return True
-        except Exception as e:
-            print(f"创建vault失败: {e}")
-            return False
-    
+        self.vault_path = vault_path
+        self.current_vault = vault_name
+        self._ensure_vault_structure()
+
+        self.settings = {
+            "name": vault_name,
+            "path": str(vault_path),
+            "created": datetime.now().isoformat(timespec="seconds"),
+            **self.DEFAULT_VAULT_SETTINGS,
+        }
+        settings_file = vault_path / ".obsidian" / "vault.json"
+        settings_file.write_text(json.dumps(self.settings, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+
     def open_vault(self, vault_path: str) -> bool:
-        """
-        打开现有的Obsidian vault
-        
-        Args:
-            vault_path: vault路径
-            
-        Returns:
-            bool: 是否打开成功
-        """
-        try:
-            vault_path = Path(vault_path)
-            
-            if not vault_path.exists():
-                return False
-            
-            self.vault_path = vault_path
-            
-            settings_file = vault_path / '.obsidian' / 'vault.json'
-            if settings_file.exists():
-                with open(settings_file, 'r', encoding='utf-8') as f:
-                    self.settings = json.load(f)
-            
-            self.current_vault = self.settings.get('name', vault_path.name)
-            
-            return True
-        except Exception as e:
-            print(f"打开vault失败: {e}")
+        """Open an existing vault path."""
+
+        path = Path(vault_path).resolve()
+        if not path.exists():
             return False
-    
-    def create_bidirectional_links(self, text: str, 
-                                   entities: Dict[str, List[str]]) -> str:
-        """
-        在文本中创建双向链接
-        
-        Args:
-            text: 原始文本
-            entities: 实体字典
-            
-        Returns:
-            str: 添加了双向链接的文本
-        """
+        self.vault_path = path
+        self.current_vault = path.name
+        self._ensure_vault_structure()
+
+        settings_file = path / ".obsidian" / "vault.json"
+        if settings_file.exists():
+            self.settings = json.loads(settings_file.read_text(encoding="utf-8"))
+        else:
+            self.settings = {
+                "name": self.current_vault,
+                "path": str(path),
+                **self.DEFAULT_VAULT_SETTINGS,
+            }
+        return True
+
+    def create_bidirectional_links(self, text: str, entities: Dict[str, List[str]]) -> str:
+        """Wrap entities with Obsidian wiki links."""
+
         linked_text = text
-        
-        all_entities = []
-        for entity_list in entities.values():
-            all_entities.extend(entity_list)
-        
-        all_entities.sort(key=len, reverse=True)
-        
+        all_entities = sorted({item for values in entities.values() for item in values}, key=len, reverse=True)
         for entity in all_entities:
-            if entity in linked_text:
-                linked_text = linked_text.replace(
-                    entity,
-                    f'[[{entity}]]'
-                )
-        
+            if not entity or f"[[{entity}]]" in linked_text:
+                continue
+            linked_text = re.sub(rf"(?<!\[\[){re.escape(entity)}(?!\]\])", f"[[{entity}]]", linked_text)
         return linked_text
-    
-    def apply_eta_template(self, template_name: str, 
-                          context: Dict[str, Any]) -> str:
-        """
-        应用Eta模板格式化笔记
-        
-        Args:
-            template_name: 模板名称
-            context: 模板上下文
-            
-        Returns:
-            str: 格式化后的笔记内容
-        """
-        if template_name not in self.NOTE_TEMPLATES:
-            return ""
-        
-        template = self.NOTE_TEMPLATES[template_name]
-        
-        required_fields = ['title', 'created_date', 'tags']
-        
-        for field in required_fields:
-            if field not in context:
-                context[field] = 'N/A'
-        
-        try:
-            formatted = template.format(**context)
-            return formatted
-        except KeyError as e:
-            print(f"模板格式化失败: 缺少字段 {e}")
-            return template
-    
-    def create_note(self, title: str, content: str,
-                  note_type: str = 'note',
-                  folder: Optional[str] = None) -> Tuple[bool, str]:
-        """
-        创建新笔记
-        
-        Args:
-            title: 笔记标题
-            content: 笔记内容
-            note_type: 笔记类型
-            folder: 存放文件夹
-            
-        Returns:
-            Tuple[bool, str]: (是否成功, 文件路径或错误信息)
-        """
+
+    def apply_eta_template(self, template_name: str, context: Dict[str, Any]) -> str:
+        """Compatibility helper that renders simple Markdown templates."""
+
+        title = context.get("title", template_name)
+        summary = context.get("summary", "")
+        return f"# {title}\n\n{summary}\n"
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        """Return a machine-readable capability snapshot for workflow routing."""
+
+        return {
+            "module": "obsidian_integration",
+            "layer": "analysis_vault_integration",
+            "backend": "filesystem",
+            "provider": "obsidian",
+            "model": None,
+            "tasks": [
+                "vault_safe_write",
+                "note_create",
+                "note_update",
+                "frontmatter_write",
+                "graph_scan",
+                "markdown_import",
+                "json_export",
+            ],
+            "output_types": ["obsidian_note_export", "obsidian_graph"],
+            "vault_initialized": self.vault_path is not None,
+            "vault_path": str(self.vault_path) if self.vault_path else "",
+            "supports": {
+                "safe_write": True,
+                "frontmatter": True,
+                "bidirectional_links": True,
+                "knowledge_graph_scan": True,
+                "external_ai_backend": False,
+            },
+            "privacy": {
+                "scope": "local_vault_only",
+                "path_traversal_guard": True,
+                "secrets_required": False,
+            },
+        }
+
+    def create_note(
+        self,
+        title: str,
+        content: str,
+        note_type: str = "note",
+        folder: Optional[str] = None,
+    ) -> Tuple[bool, str]:
+        """Create a note inside the vault and return the final path."""
+
         if self.vault_path is None:
-            return False, "vault未初始化"
-        
-        try:
-            safe_title = self._sanitize_filename(title)
-            
-            if folder:
-                note_folder = self.vault_path / folder
+            return False, "vault not initialized"
+
+        note_folder = self._resolve_vault_path(folder or "Notes")
+        if note_folder is None:
+            return False, "path outside vault"
+        note_folder.mkdir(parents=True, exist_ok=True)
+        safe_title = self._sanitize_filename(title)
+        path = note_folder / f"{safe_title}.md"
+        counter = 1
+        while path.exists():
+            path = note_folder / f"{safe_title}_{counter}.md"
+            counter += 1
+
+        frontmatter = [
+            "---",
+            f"type: {note_type}",
+            f"created: {datetime.now().strftime('%Y-%m-%d')}",
+            "---",
+            "",
+        ]
+        path.write_text("\n".join(frontmatter) + content, encoding="utf-8")
+        return True, str(path)
+
+    def create_note_package(
+        self,
+        title: str,
+        content: str,
+        note_type: str = "note",
+        folder: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a note and return a workflow-friendly package envelope."""
+
+        quality_flags = []
+        if not str(title or "").strip():
+            quality_flags.append("empty_title")
+        if not str(content or "").strip():
+            quality_flags.append("empty_content")
+
+        success, result = self.create_note(
+            title=title or "Untitled",
+            content=content or "",
+            note_type=note_type,
+            folder=folder,
+        )
+        if not success:
+            quality_flags.append(result.replace(" ", "_"))
+
+        relative_path = ""
+        artifacts = []
+        if success and self.vault_path is not None:
+            note_path = Path(result).resolve()
+            try:
+                relative_path = str(note_path.relative_to(self.vault_path))
+            except ValueError:
+                quality_flags.append("path_outside_vault")
+                success = False
             else:
-                note_folder = self.vault_path / 'Notes'
-            
-            note_folder.mkdir(parents=True, exist_ok=True)
-            
-            filename = f"{safe_title}.md"
-            filepath = note_folder / filename
-            
-            counter = 1
-            while filepath.exists():
-                filename = f"{safe_title}_{counter}.md"
-                filepath = note_folder / filename
-                counter += 1
-            
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(content)
-            
-            return True, str(filepath)
-        except Exception as e:
-            return False, str(e)
-    
+                artifacts.append(
+                    {
+                        "type": "markdown_note",
+                        "path": str(note_path),
+                        "relative_path": relative_path,
+                    }
+                )
+
+        return {
+            "type": "obsidian_note_export",
+            "schema_version": "1.0",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "title": title,
+            "note_type": note_type,
+            "folder": folder or "Notes",
+            "path": result if success else "",
+            "relative_path": relative_path,
+            "vault_path": str(self.vault_path) if self.vault_path else "",
+            "backend": "filesystem",
+            "provider": "obsidian",
+            "model": None,
+            "confidence": self._package_confidence(success, quality_flags),
+            "needs_review": (not success) or bool(quality_flags),
+            "quality_flags": quality_flags,
+            "artifacts": artifacts,
+            "export_summary": {
+                "note_created": bool(success),
+                "relative_path": relative_path,
+                "error": "" if success else result,
+            },
+            "capabilities": self.get_capabilities(),
+            "error": "" if success else result,
+        }
+
     def read_note(self, note_path: str) -> Tuple[bool, str]:
-        """
-        读取笔记内容
-        
-        Args:
-            note_path: 笔记路径（相对于vault或绝对路径）
-            
-        Returns:
-            Tuple[bool, str]: (是否成功, 笔记内容或错误信息)
-        """
+        """Read note content."""
+
         if self.vault_path is None:
-            return False, "vault未初始化"
-        
-        try:
-            note_path = Path(note_path)
-            
-            if not note_path.is_absolute():
-                note_path = self.vault_path / note_path
-            
-            if not note_path.exists():
-                return False, "笔记不存在"
-            
-            with open(note_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            return True, content
-        except Exception as e:
-            return False, str(e)
-    
+            return False, "vault not initialized"
+        path = self._resolve_vault_path(note_path)
+        if path is None:
+            return False, "path outside vault"
+        if not path.exists():
+            return False, "note does not exist"
+        if not path.is_file():
+            return False, "note path is not a file"
+        return True, path.read_text(encoding="utf-8")
+
     def update_note(self, note_path: str, new_content: str) -> bool:
-        """
-        更新笔记内容
-        
-        Args:
-            note_path: 笔记路径
-            new_content: 新内容
-            
-        Returns:
-            bool: 是否更新成功
-        """
-        success, result = self.read_note(note_path)
-        
+        """Overwrite note content."""
+
+        success, _ = self.read_note(note_path)
         if not success:
             return False
-        
-        try:
-            note_path = Path(note_path)
-            
-            if not note_path.is_absolute():
-                note_path = self.vault_path / note_path
-            
-            with open(note_path, 'w', encoding='utf-8') as f:
-                f.write(new_content)
-            
-            return True
-        except Exception as e:
-            print(f"更新笔记失败: {e}")
+        path = self._resolve_vault_path(note_path)
+        if path is None:
             return False
-    
-    def search_notes(self, query: str, 
-                   search_type: str = 'content') -> List[Dict[str, Any]]:
-        """
-        搜索笔记
-        
-        Args:
-            query: 搜索关键词
-            search_type: 搜索类型 ('content', 'title', 'tags')
-            
-        Returns:
-            list: 匹配的笔记列表
-        """
-        if self.vault_path is None:
-            return []
-        
-        results = []
-        
-        try:
-            for md_file in self.vault_path.rglob('*.md'):
-                if '.obsidian' in str(md_file):
-                    continue
-                
-                if search_type == 'title':
-                    if query.lower() in md_file.stem.lower():
-                        results.append({
-                            'path': str(md_file.relative_to(self.vault_path)),
-                            'title': md_file.stem,
-                            'type': 'title_match'
-                        })
-                else:
-                    try:
-                        with open(md_file, 'r', encoding='utf-8') as f:
-                            content = f.read()
-                        
-                        if query.lower() in content.lower():
-                            match_count = content.lower().count(query.lower())
-                            
-                            results.append({
-                                'path': str(md_file.relative_to(self.vault_path)),
-                                'title': md_file.stem,
-                                'type': 'content_match',
-                                'match_count': match_count
-                            })
-                    except:
-                        continue
-            
-            return results
-        except Exception as e:
-            print(f"搜索失败: {e}")
-            return []
-    
-    def get_backlinks(self, note_title: str) -> List[Dict[str, str]]:
-        """
-        获取指向某笔记的反向链接
-        
-        Args:
-            note_title: 笔记标题
-            
-        Returns:
-            list: 反向链接列表
-        """
-        if self.vault_path is None:
-            return []
-        
-        backlinks = []
-        link_pattern = rf'\[\[{note_title}\]\]'
-        
-        try:
-            for md_file in self.vault_path.rglob('*.md'):
-                if '.obsidian' in str(md_file):
-                    continue
-                
-                if md_file.stem == note_title:
-                    continue
-                
-                try:
-                    with open(md_file, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    
-                    matches = re.findall(link_pattern, content)
-                    
-                    if matches:
-                        backlinks.append({
-                            'source': str(md_file.relative_to(self.vault_path)),
-                            'source_title': md_file.stem,
-                            'link_count': len(matches)
-                        })
-                except:
-                    continue
-            
-            return backlinks
-        except Exception as e:
-            print(f"获取反向链接失败: {e}")
-            return []
-    
-    def build_knowledge_graph_data(self) -> Dict[str, Any]:
-        """
-        构建知识图谱数据
-        
-        Returns:
-            dict: 知识图谱数据
-        """
-        if self.vault_path is None:
-            return {}
-        
-        nodes = []
-        edges = []
-        
-        link_pattern = r'\[\[([^\]]+)\]\]'
-        
-        try:
-            for md_file in self.vault_path.rglob('*.md'):
-                if '.obsidian' in str(md_file):
-                    continue
-                
-                try:
-                    with open(md_file, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    
-                    file_node = {
-                        'id': md_file.stem,
-                        'label': md_file.stem,
-                        'type': 'note',
-                        'path': str(md_file.relative_to(self.vault_path))
-                    }
-                    nodes.append(file_node)
-                    
-                    links = re.findall(link_pattern, content)
-                    for link_target in links:
-                        edges.append({
-                            'source': md_file.stem,
-                            'target': link_target,
-                            'type': 'links_to'
-                        })
-                        
-                        target_exists = any(
-                            n['label'] == link_target for n in nodes
-                        )
-                        if not target_exists:
-                            nodes.append({
-                                'id': link_target,
-                                'label': link_target,
-                                'type': 'linked_note',
-                                'exists': False
-                            })
-                
-                except:
-                    continue
-            
-            return {
-                'nodes': nodes,
-                'edges': edges,
-                'stats': {
-                    'total_nodes': len(nodes),
-                    'total_edges': len(edges),
-                    'notes_with_links': len(set(e['source'] for e in edges))
-                }
-            }
-        except Exception as e:
-            print(f"构建知识图谱失败: {e}")
-            return {}
-    
-    def sync_zotero_annotations(self, annotations: List[Dict[str, Any]],
-                               parent_note: str) -> bool:
-        """
-        同步Zotero批注到Obsidian
-        
-        Args:
-            annotations: 批注列表
-            parent_note: 父笔记标题
-            
-        Returns:
-            bool: 是否同步成功
-        """
-        if self.vault_path is None:
-            return False
-        
-        try:
-            annotation_note = f"Annotations - {parent_note}"
-            
-            content_parts = [
-                f"# {parent_note} - 批注",
-                "",
-                f"**批注数量**: {len(annotations)}",
-                "",
-                "---",
-                ""
+        path.write_text(new_content, encoding="utf-8")
+        return True
+
+    def update_note_package(self, note_path: str, new_content: str) -> Dict[str, Any]:
+        """Update a note and return a structured package envelope."""
+
+        quality_flags = []
+        if not str(new_content or "").strip():
+            quality_flags.append("empty_content")
+        success = self.update_note(note_path, new_content or "")
+        if not success:
+            quality_flags.append("update_failed")
+        resolved = self._resolve_vault_path(note_path) if self.vault_path is not None else None
+        relative_path = ""
+        if resolved is not None and self.vault_path is not None:
+            try:
+                relative_path = str(resolved.relative_to(self.vault_path))
+            except ValueError:
+                quality_flags.append("path_outside_vault")
+
+        return {
+            "type": "obsidian_note_export",
+            "schema_version": "1.0",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "operation": "update",
+            "path": str(resolved) if success and resolved is not None else "",
+            "relative_path": relative_path,
+            "vault_path": str(self.vault_path) if self.vault_path else "",
+            "backend": "filesystem",
+            "provider": "obsidian",
+            "model": None,
+            "confidence": self._package_confidence(success, quality_flags),
+            "needs_review": (not success) or bool(quality_flags),
+            "quality_flags": quality_flags,
+            "artifacts": [
+                {"type": "markdown_note", "path": str(resolved), "relative_path": relative_path}
             ]
-            
-            for i, annot in enumerate(annotations, 1):
-                annot_type = annot.get('type', 'highlight')
-                annot_text = annot.get('text', '')
-                annot_page = annot.get('page', '')
-                annot_color = annot.get('color', '')
-                
-                if annot_type == 'highlight':
-                    content_parts.append(f"### 批注 {i}")
-                    content_parts.append(f"- 页面: {annot_page}")
-                    content_parts.append(f"- 颜色: {annot_color}")
-                    content_parts.append(f"> {annot_text}")
-                    content_parts.append("")
-                elif annot_type == 'note':
-                    content_parts.append(f"### 笔记 {i}")
-                    content_parts.append(f"> {annot_text}")
-                    content_parts.append("")
-            
-            content = '\n'.join(content_parts)
-            
-            success, _ = self.create_note(
-                annotation_note,
-                content,
-                note_type='annotations',
-                folder='Annotations'
-            )
-            
-            return success
-        except Exception as e:
-            print(f"同步批注失败: {e}")
-            return False
-    
-    def import_markdown_files(self, source_dir: str,
-                            target_folder: Optional[str] = None) -> Dict[str, Any]:
-        """
-        批量导入Markdown文件
-        
-        Args:
-            source_dir: 源目录
-            target_folder: 目标文件夹
-            
-        Returns:
-            dict: 导入结果统计
-        """
+            if success and resolved is not None
+            else [],
+            "export_summary": {"note_updated": bool(success), "relative_path": relative_path},
+            "capabilities": self.get_capabilities(),
+            "error": "" if success else "update failed",
+        }
+
+    def search_notes(self, query: str, search_type: str = "content") -> List[Dict[str, Any]]:
+        """Search notes by title or content."""
+
         if self.vault_path is None:
-            return {'success': False, 'error': 'vault未初始化'}
-        
-        source_path = Path(source_dir)
-        
+            return []
+        results = []
+        for md_file in self.vault_path.rglob("*.md"):
+            if ".obsidian" in str(md_file):
+                continue
+            if search_type == "title":
+                if query.lower() in md_file.stem.lower():
+                    results.append({"path": str(md_file.relative_to(self.vault_path)), "title": md_file.stem, "type": "title_match"})
+                continue
+            try:
+                content = md_file.read_text(encoding="utf-8")
+            except Exception:  # noqa: BLE001
+                continue
+            if query.lower() in content.lower():
+                results.append(
+                    {
+                        "path": str(md_file.relative_to(self.vault_path)),
+                        "title": md_file.stem,
+                        "type": "content_match",
+                        "match_count": content.lower().count(query.lower()),
+                    }
+                )
+        return results
+
+    def get_backlinks(self, note_title: str) -> List[Dict[str, str]]:
+        """Return notes that link to the given title."""
+
+        if self.vault_path is None:
+            return []
+        backlinks = []
+        pattern = re.compile(rf"\[\[{re.escape(note_title)}\]\]")
+        for md_file in self.vault_path.rglob("*.md"):
+            if ".obsidian" in str(md_file) or md_file.stem == note_title:
+                continue
+            try:
+                content = md_file.read_text(encoding="utf-8")
+            except Exception:  # noqa: BLE001
+                continue
+            matches = pattern.findall(content)
+            if matches:
+                backlinks.append(
+                    {
+                        "source": str(md_file.relative_to(self.vault_path)),
+                        "source_title": md_file.stem,
+                        "link_count": len(matches),
+                    }
+                )
+        return backlinks
+
+    def build_knowledge_graph_data(self) -> Dict[str, Any]:
+        """Scan the vault and return note/link graph data."""
+
+        if self.vault_path is None:
+            return {}
+
+        nodes: List[Dict[str, Any]] = []
+        edges: List[Dict[str, Any]] = []
+        seen_nodes = set()
+        link_pattern = re.compile(r"\[\[([^\]]+)\]\]")
+
+        for md_file in self.vault_path.rglob("*.md"):
+            if ".obsidian" in str(md_file):
+                continue
+            try:
+                content = md_file.read_text(encoding="utf-8")
+            except Exception:  # noqa: BLE001
+                continue
+
+            if md_file.stem not in seen_nodes:
+                nodes.append(
+                    {
+                        "id": md_file.stem,
+                        "label": md_file.stem,
+                        "type": "note",
+                        "path": str(md_file.relative_to(self.vault_path)),
+                    }
+                )
+                seen_nodes.add(md_file.stem)
+
+            for target in link_pattern.findall(content):
+                edges.append({"source": md_file.stem, "target": target, "type": "links_to"})
+                if target not in seen_nodes:
+                    nodes.append({"id": target, "label": target, "type": "linked_note", "exists": False})
+                    seen_nodes.add(target)
+
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "stats": {
+                "total_nodes": len(nodes),
+                "total_edges": len(edges),
+                "notes_with_links": len({edge["source"] for edge in edges}),
+            },
+        }
+
+    def build_knowledge_graph_package(self) -> Dict[str, Any]:
+        """Return graph scan data as a structured workflow package."""
+
+        graph_data = self.build_knowledge_graph_data()
+        success = bool(graph_data or self.vault_path is not None)
+        quality_flags = []
+        if self.vault_path is None:
+            quality_flags.append("vault_not_initialized")
+        stats = graph_data.get("stats", {}) if graph_data else {}
+        if success and stats.get("total_nodes", 0) == 0:
+            quality_flags.append("empty_vault_graph")
+
+        return {
+            "type": "obsidian_graph",
+            "schema_version": "1.0",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "vault_path": str(self.vault_path) if self.vault_path else "",
+            "backend": "filesystem",
+            "provider": "obsidian",
+            "model": None,
+            "confidence": self._package_confidence(success, quality_flags),
+            "needs_review": (not success) or bool(quality_flags),
+            "quality_flags": quality_flags,
+            "nodes": graph_data.get("nodes", []) if graph_data else [],
+            "edges": graph_data.get("edges", []) if graph_data else [],
+            "stats": stats,
+            "export_summary": {
+                "nodes": stats.get("total_nodes", 0),
+                "edges": stats.get("total_edges", 0),
+                "notes_with_links": stats.get("notes_with_links", 0),
+            },
+            "capabilities": self.get_capabilities(),
+            "error": "" if success else "vault not initialized",
+        }
+
+    def sync_zotero_annotations(self, annotations: List[Dict[str, Any]], parent_note: str) -> bool:
+        """Create an annotation note from Zotero-like annotation payloads."""
+
+        lines = [f"# {parent_note} - Annotations", "", f"Count: {len(annotations)}", "", "---", ""]
+        for index, annotation in enumerate(annotations, start=1):
+            lines.append(f"### Annotation {index}")
+            if annotation.get("page"):
+                lines.append(f"- Page: {annotation['page']}")
+            if annotation.get("color"):
+                lines.append(f"- Color: {annotation['color']}")
+            lines.append(f"> {annotation.get('text', '')}")
+            lines.append("")
+        success, _ = self.create_note(
+            f"Annotations - {parent_note}",
+            "\n".join(lines),
+            note_type="annotations",
+            folder="Annotations",
+        )
+        return success
+
+    def import_markdown_files(self, source_dir: str, target_folder: Optional[str] = None) -> Dict[str, Any]:
+        """Bulk import Markdown files into the vault."""
+
+        if self.vault_path is None:
+            return {"success": False, "error": "vault not initialized"}
+
+        source_path = Path(source_dir).resolve()
         if not source_path.exists():
-            return {'success': False, 'error': '源目录不存在'}
-        
+            return {"success": False, "error": "source directory does not exist"}
+
         imported = []
         failed = []
-        
-        try:
-            for md_file in source_path.rglob('*.md'):
-                try:
-                    target_folder_path = self.vault_path / (target_folder or 'Imported')
-                    target_folder_path.mkdir(parents=True, exist_ok=True)
-                    
-                    target_file = target_folder_path / md_file.name
-                    
-                    shutil.copy2(md_file, target_file)
-                    imported.append(str(md_file.name))
-                except Exception as e:
-                    failed.append({'file': str(md_file.name), 'error': str(e)})
-            
-            return {
-                'success': True,
-                'imported_count': len(imported),
-                'failed_count': len(failed),
-                'imported_files': imported,
-                'failed_files': failed
-            }
-        except Exception as e:
-            return {'success': False, 'error': str(e)}
-    
+        target = self._resolve_vault_path(target_folder or "Imported")
+        if target is None:
+            return {"success": False, "error": "path outside vault"}
+        target.mkdir(parents=True, exist_ok=True)
+
+        for md_file in source_path.rglob("*.md"):
+            try:
+                shutil.copy2(md_file, target / md_file.name)
+                imported.append(md_file.name)
+            except Exception as exc:  # noqa: BLE001
+                failed.append({"file": md_file.name, "error": str(exc)})
+        return {
+            "success": True,
+            "imported_count": len(imported),
+            "failed_count": len(failed),
+            "imported_files": imported,
+            "failed_files": failed,
+        }
+
     def export_notes_to_json(self, output_path: str) -> bool:
-        """
-        导出笔记到JSON格式
-        
-        Args:
-            output_path: 输出文件路径
-            
-        Returns:
-            bool: 是否导出成功
-        """
+        """Export vault note metadata and content into JSON."""
+
         if self.vault_path is None:
             return False
-        
-        notes_data = []
-        
-        try:
-            for md_file in self.vault_path.rglob('*.md'):
-                if '.obsidian' in str(md_file):
-                    continue
-                
-                try:
-                    with open(md_file, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                    
-                    notes_data.append({
-                        'title': md_file.stem,
-                        'path': str(md_file.relative_to(self.vault_path)),
-                        'content': content,
-                        'links': re.findall(r'\[\[([^\]]+)\]\]', content)
-                    })
-                except:
-                    continue
-            
-            with open(output_path, 'w', encoding='utf-8') as f:
-                json.dump({
-                    'vault': self.current_vault,
-                    'export_date': datetime.now().isoformat(),
-                    'notes': notes_data
-                }, f, ensure_ascii=False, indent=2)
-            
-            return True
-        except Exception as e:
-            print(f"导出失败: {e}")
+
+        notes = []
+        for md_file in self.vault_path.rglob("*.md"):
+            if ".obsidian" in str(md_file):
+                continue
+            try:
+                notes.append(
+                    {
+                        "title": md_file.stem,
+                        "path": str(md_file.relative_to(self.vault_path)),
+                        "content": md_file.read_text(encoding="utf-8"),
+                    }
+                )
+            except Exception:  # noqa: BLE001
+                continue
+
+        output = self._resolve_vault_path(output_path)
+        if output is None:
             return False
-    
-    def _sanitize_filename(self, filename: str) -> str:
-        """清理文件名"""
-        invalid_chars = '<>:"/\\|?*'
-        for char in invalid_chars:
-            filename = filename.replace(char, '_')
-        
-        filename = filename.strip('. ')
-        
-        return filename[:200]
-    
-    def get_vault_info(self) -> Dict[str, Any]:
-        """
-        获取vault信息
-        
-        Returns:
-            dict: vault信息
-        """
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps({"notes": notes}, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+
+    def export_notes_to_json_package(self, output_path: str = "Exports/obsidian_notes.json") -> Dict[str, Any]:
+        """Export vault notes to JSON and return package metadata."""
+
+        success = self.export_notes_to_json(output_path)
+        resolved = self._resolve_vault_path(output_path) if self.vault_path is not None else None
+        quality_flags = [] if success else ["json_export_failed"]
+        relative_path = ""
+        if resolved is not None and self.vault_path is not None:
+            try:
+                relative_path = str(resolved.relative_to(self.vault_path))
+            except ValueError:
+                quality_flags.append("path_outside_vault")
+        return {
+            "type": "obsidian_note_export",
+            "schema_version": "1.0",
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "operation": "json_export",
+            "path": str(resolved) if success and resolved is not None else "",
+            "relative_path": relative_path,
+            "vault_path": str(self.vault_path) if self.vault_path else "",
+            "backend": "filesystem",
+            "provider": "obsidian",
+            "model": None,
+            "confidence": self._package_confidence(success, quality_flags),
+            "needs_review": (not success) or bool(quality_flags),
+            "quality_flags": quality_flags,
+            "artifacts": [
+                {"type": "json_export", "path": str(resolved), "relative_path": relative_path}
+            ]
+            if success and resolved is not None
+            else [],
+            "export_summary": {"json_exported": bool(success), "relative_path": relative_path},
+            "capabilities": self.get_capabilities(),
+            "error": "" if success else "json export failed",
+        }
+
+    def _ensure_vault_structure(self) -> None:
+        """Create the minimal folder structure expected by exports."""
+
         if self.vault_path is None:
-            return {'initialized': False}
-        
+            return
+        self.vault_path.mkdir(parents=True, exist_ok=True)
+        (self.vault_path / ".obsidian").mkdir(exist_ok=True)
+        for folder in ("Notes", "Literature Notes", "Attachments", "Templates", "Scripts", "Daily", "Imported", "Annotations"):
+            (self.vault_path / folder).mkdir(exist_ok=True)
+
+    def _sanitize_filename(self, value: str) -> str:
+        cleaned = re.sub(r'[<>:"/\\|?*]+', "_", value).strip()
+        return cleaned or "untitled"
+
+    def _resolve_vault_path(self, value: str) -> Optional[Path]:
+        """Resolve a relative or absolute path and ensure it stays inside the vault."""
+
+        if self.vault_path is None:
+            return None
+        path = Path(value)
+        if not path.is_absolute():
+            path = self.vault_path / path
+        resolved = path.resolve()
         try:
-            note_count = len(list(self.vault_path.rglob('*.md')))
-            
-            folders = [d.name for d in self.vault_path.iterdir() if d.is_dir() and not d.name.startswith('.')]
-            
-            return {
-                'initialized': True,
-                'name': self.current_vault,
-                'path': str(self.vault_path),
-                'note_count': note_count,
-                'folders': folders,
-                'settings': self.settings
-            }
-        except Exception as e:
-            return {'initialized': True, 'error': str(e)}
+            resolved.relative_to(self.vault_path)
+        except ValueError:
+            return None
+        return resolved
+
+    def _package_confidence(self, success: bool, quality_flags: List[str]) -> float:
+        if not success:
+            return 0.0
+        if not quality_flags:
+            return 1.0
+        if quality_flags == ["empty_content"]:
+            return 0.75
+        return 0.6
 
 
 def create_obsidian_integration(vault_path: Optional[str] = None) -> ObsidianIntegration:
-    """
-    工厂函数：创建Obsidian集成器实例
-    
-    Args:
-        vault_path: vault路径
-        
-    Returns:
-        ObsidianIntegration: 配置好的集成器实例
-    """
+    """Compatibility factory helper."""
+
     return ObsidianIntegration(vault_path=vault_path)

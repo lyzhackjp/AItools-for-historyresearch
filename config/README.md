@@ -216,10 +216,10 @@ switch_environment('production')
 
 ```bash
 # Windows
-set DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxx
+set DASHSCOPE_API_KEY=DASHSCOPE_API_KEY_PLACEHOLDER
 
 # Linux/Mac
-export DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxx
+export DASHSCOPE_API_KEY=DASHSCOPE_API_KEY_PLACEHOLDER
 ```
 
 ### 方式2：创建.env文件
@@ -232,7 +232,7 @@ create_env_file_from_template(output_path='.env')
 
 ### 方式3：直接编辑配置文件
 
-在 `api_config.json` 中指定环境变量名：
+在 `api_config.json` 中只能指定环境变量名，不能写入真实 key：
 
 ```json
 {
@@ -243,6 +243,8 @@ create_env_file_from_template(output_path='.env')
   }
 }
 ```
+
+`api_config.json`、`current_environment.json` 和 `external_config.json` 是可提交模板文件，只能包含相对路径、公开端点、默认模型名和环境变量名。真实 API key、NDL 账号、NDL 密码、cookie、session、个人路径或本地绝对模型路径必须放在环境变量、系统密钥管理器或被 `.gitignore` 排除的 `secrets/` 中。
 
 ## 📊 获取Provider信息
 

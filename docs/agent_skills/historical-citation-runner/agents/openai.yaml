@@ -1,0 +1,4 @@
+interface:
+  display_name: "Historical Citation Runner"
+  short_description: "Run private NDL citation checks safely"
+  default_prompt: "Use $historical-citation-runner to run a private NDL historical citation verification workflow."

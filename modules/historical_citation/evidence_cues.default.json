@@ -1,0 +1,16 @@
+{
+  "description": "Default cross-script evidence cue groups for Japanese historical citation alignment. Each group contains terms treated as equivalent topical cues.",
+  "cue_groups": [
+    ["華族令", "华族令"],
+    ["会館", "會館", "会馆"],
+    ["会議", "會議", "会议"],
+    ["倶楽部", "俱樂部", "クラブ", "俱乐部"],
+    ["資金", "资金", "資本", "財用", "費用", "会計", "寄附", "出資", "集資", "公債", "利子"],
+    ["二倍", "倍", "加倍"],
+    ["教育", "學資", "学資", "学校"],
+    ["天皇", "天子", "勅諭", "敕谕", "聖訓", "圣训"],
+    ["負担", "負擔", "负担", "同族"],
+    ["廃除", "廢除", "廃止", "廃ス", "废除", "裁撤"],
+    ["改革", "改正", "修正"]
+  ]
+}

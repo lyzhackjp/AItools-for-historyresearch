@@ -1,385 +1,97 @@
-# 历史研究论文全流程工作流模块 — 设计规划
+# 历史研究全流程工作流设计
 
-> 版本：v0.2 | 日期：2026-04-04 | 状态：**Phase 1~4 全部完成**
+> 当前版本: 2026-04-28
+> 状态: 根目录索引版，详细设计已拆分到 `docs/workflow/`
 
----
+## 设计目标
 
-## 一、背景与目标
+工作流服务于“日本史研究全流程工具箱”的原始构想: 从材料搜集、史料整理、OCR/NER、史料考察，到论文写作、润色和最终引文格式化，形成可复核、可恢复、可归档的研究流水线。
 
-### 现有能力盘点
+核心约束:
 
-| 阶段 | 已有模块 | 功能 |
-|------|----------|------|
-| **搜集材料** | `HistoryFieldExplorer`, `PaperFinder` | 学术论文/文献搜索 |
-| | `CrossRefAdapter`（新增） | CrossRef API 学术期刊搜索 |
-| | `ndl_ocr_batch_processor` | NDL 图书馆批量 OCR |
-| **整理史料** | `BookCitationOrganizer` | 扫描书元数据提取 + 引用格式生成 |
-| | `CitationFormatter` | Chicago/APA/GB7714/MLA 引用格式 |
-| | `AcademicNoteGenerator` | 从文献生成 Obsidian 格式结构化笔记 |
-| **提取信息** | `NERProcessor` (+ `_integrated`, `_optimized`) | 历史专有名词识别 |
-| | `UnifiedOCRProcessor` | 多引擎 OCR（Qwen VL / ndlocr-lite / Tesseract）|
-| | `NERDisambiguation` | 实体消歧 |
-| **史料考察** | `CitationNetworkAnalyzer` | 引文网络分析（谁是核心文献/孤证）|
-| | `ReverseOutlineAnalyzer` | 论文逻辑链逆向审视 |
-| **撰写论文** | `HistoryFieldExplorer.draft_paper()` | 生成研究论文（含双语）|
-| | `AcademicSummarizer` | 学术文献摘要生成 |
-| **论文修改** | `PaperPolisher` (含 `_enhanced`, `_optimized`) | 冗余内容精简、Track Changes |
-| | `StyleTransfer` | 文风分析与迁移（少样本模仿）|
-| **注释格式** | `CitationFormatter` | 多种引用格式输出 |
-| | `CitationNormalizer` | 引用格式标准化 |
+- 本地优先，外部 API 只作为可替换增强层。
+- 所有阶段写回统一项目状态，而不是散落在临时脚本里。
+- 每个阶段都保留 `backend/provider/model/confidence/needs_review` 等执行元数据。
+- 本地小模型后端必须先通过短 smoke，再进入复杂 OCR/NER/摘要/写作任务。
+- 阶段输出必须能被人工复核、断点恢复和后续模块复用。
+- 日志与报告不记录真实密钥、敏感原文或可复原的私密材料。
 
-### 缺失能力（待新增）
+## 分层文档
 
-- **阶段间数据传递**：各模块输出格式不统一，难以直接对接
-- **工作流编排层**：`unified_task_executor.py` 是单任务执行器，缺多步骤串联能力
-- **史料验证层**：无专门的历史事实核查（fact-checking）模块
-- **论文校对层**：无拼写/语法校对模块
+| 文档 | 用途 |
+| --- | --- |
+| [docs/workflow/README.md](docs/workflow/README.md) | 工作流总览与阅读路径 |
+| [docs/workflow/STAGE_PROTOCOL.md](docs/workflow/STAGE_PROTOCOL.md) | 阶段输入输出、元数据、复核队列与 artifact 协议 |
+| [docs/workflow/STAGE_1_3_INGEST_ANALYSIS.md](docs/workflow/STAGE_1_3_INGEST_ANALYSIS.md) | Stage 1-3: 材料搜集、整理、OCR/NER 抽取 |
+| [docs/workflow/STAGE_4_7_WRITING_OUTPUT.md](docs/workflow/STAGE_4_7_WRITING_OUTPUT.md) | Stage 4-7: 史料考察、写作、润色、格式化 |
+| [docs/workflow/PRIVACY_AND_ARTIFACTS.md](docs/workflow/PRIVACY_AND_ARTIFACTS.md) | 隐私、日志、中间文件、归档与清理规范 |
+| [docs/project/AI_AGENT_SKILL_DESIGN_2026-04-25.md](docs/project/AI_AGENT_SKILL_DESIGN_2026-04-25.md) | AI agent 工作区 skill 设计方案 |
+| [docs/project/AI_AGENT_SKILL_UPGRADE_DESIGN_2026-04-25.md](docs/project/AI_AGENT_SKILL_UPGRADE_DESIGN_2026-04-25.md) | AI agent skill 小模型友好升级方案 |
 
----
+## 七阶段流水线
 
-## 二、工作流总体设计
-
-### 2.1 七阶段流水线
-
-```
-[Stage 1] 搜集材料
-    输入：研究主题关键词
-    输出：文献列表（标题/作者/年份/摘要/URL）
-         ↓
-[Stage 2] 整理史料
-    输入：文献列表 + （可选）扫描书/PDF
-    输出：结构化元数据CSV、Obsidian格式笔记、引用格式化数据
-         ↓
-[Stage 3] 提取信息
-    输入：史料原文（PDF/扫描件/文本）
-    输出：实体列表（人名/地名/事件/概念）、关系图谱
-         ↓
-[Stage 4] 史料考察
-    输入：实体列表 + 文献引用关系
-    输出：引文网络图、关键文献标注、可信度评估
-         ↓
-[Stage 5] 撰写论文
-    输入：实体 + 笔记 + 文献元数据
-    输出：论文草稿（中英双语，含章节结构）
-         ↓
-[Stage 6] 论文修改润色
-    输入：论文草稿
-    输出：精简版（去冗余）、文风调整版、逻辑审视报告
-         ↓
-[Stage 7] 注释格式修改
-    输入：含注释的论文草稿 + 目标格式（Chicago/APA/GB7714）
-    输出：格式规范化的最终论文
+```mermaid
+flowchart LR
+    S1["Stage 1 collect\n搜集材料"] --> S2["Stage 2 organize\n整理史料与笔记"]
+    S2 --> S3["Stage 3 extract\nOCR/NER/实体抽取"]
+    S3 --> S4["Stage 4 examine\n史料考察与引文网络"]
+    S4 --> S5["Stage 5 write\n论文草稿"]
+    S5 --> S6["Stage 6 polish\n润色/文风/大纲审视"]
+    S6 --> S7["Stage 7 format\n引文与最终输出"]
 ```
 
-### 2.2 双语处理规则
-
-- **主要语言** = 研究对象国/主要研究者语言（英文研究→English；日文研究→日本語）
-- **辅助语言** = 学术级中文翻译（`bilingual=True` 时，每段附中文翻译）
-- 实现：`HistoryFieldExplorer.draft_paper(bilingual=True)` → 每段自动附中译
-
----
-
-## 三、核心数据结构设计
-
-### 3.1 研究项目（ResearchProject）
-
-```python
-@dataclass
-class ResearchProject:
-    """一个研究项目的完整生命周期数据"""
-    id: str                           # UUID
-    topic: str                        # 研究主题
-    language: str                     # 主要语言 (en/ja/zh)
-    bilingual: bool                  # 是否生成双语
-
-    # Stage 1 产出
-    literature: List[PaperRecord]    # 搜集到的文献
-
-    # Stage 2 产出
-    book_metadata: List[BookMetadata]    # 图书元数据
-    notes: List[ObsidianNote]             # Obsidian格式笔记
-    citations: List[Citation]              # 格式化引用
-
-    # Stage 3 产出
-    entities: List[HistoricalEntity]  # 识别的历史实体
-    entity_relations: List[Relation]  # 实体关系
-
-    # Stage 4 产出
-    citation_network: CitationNetwork # 引文网络
-    key_sources: List[str]           # 关键文献ID列表
-
-    # Stage 5 产出
-    paper_draft: str                  # 论文草稿（Markdown）
-
-    # Stage 6 产出
-    polished_draft: str              # 精简后草稿
-    style_transfered: str            # 文风调整版
-    outline_review: OutlineReview    # 逻辑审视报告
-
-    # Stage 7 产出
-    final_paper: str                 # 最终论文
-    citation_format: str             # 目标引用格式
-
-    metadata: Dict[str, Any]         # 杂项元数据
-```
-
-### 3.2 各阶段输入/输出（I/O）规范
-
-| 阶段 | 输入类型 | 输出类型 |
-|------|----------|----------|
-| Stage 1 | `str`（关键词）| `List[PaperRecord]` |
-| Stage 2 | `List[PaperRecord]` + `List[BookFile]` | `List[ObsidianNote]` + `List[Citation]` |
-| Stage 3 | `List[Document]`（PDF/文本）| `List[HistoricalEntity]` |
-| Stage 4 | `List[HistoricalEntity]` + `List[Citation]` | `CitationNetwork` |
-| Stage 5 | `ResearchProject` | `str`（论文草稿）|
-| Stage 6 | `str`（草稿）| `str`（精简/润色版）|
-| Stage 7 | `str` + `str`（目标格式）| `str`（格式化终稿）|
-
----
-
-## 四、新增模块：WorkflowOrchestrator
-
-### 4.1 定位
-
-```
-WorkflowOrchestrator
-├── 基于现有 unified_task_executor.py（任务执行）
-├── 基于现有 module_adapters.py（模块适配）
-└── 新增：StageOrchestrator（阶段编排器）
-```
-
-### 4.2 核心接口
-
-```python
-class WorkflowOrchestrator:
-    """
-    历史研究论文全流程工作流编排器
-
-    使用方法：
-        from tools.workflow.workflow_orchestrator import WorkflowOrchestrator
-
-        wf = WorkflowOrchestrator(
-            topic="Tudor England",
-            language="en",
-            bilingual=True
-        )
-
-        # 全自动模式
-        result = wf.run_all()
-
-        # 单阶段执行
-        wf.run_stage(1)   # 搜集材料
-        wf.run_stage(2)   # 整理史料
-        wf.run_stage(3)   # 提取信息
-        ...
-    """
-
-    STAGES = [
-        "collect",    # Stage 1: 搜集材料
-        "organize",   # Stage 2: 整理史料
-        "extract",    # Stage 3: 提取信息
-        "examine",    # Stage 4: 史料考察
-        "write",      # Stage 5: 撰写论文
-        "polish",     # Stage 6: 论文修改润色
-        "format",     # Stage 7: 注释格式修改
-    ]
-
-    def __init__(
-        self,
-        topic: str,
-        language: str = "en",
-        bilingual: bool = True,
-        citation_format: str = "chicago",
-        output_dir: str = "./output",
-    ):
-        ...
-
-    def run_all(self) -> ResearchProject:
-        """全自动执行所有阶段"""
-        ...
-
-    def run_stage(self, stage: int, **kwargs) -> Any:
-        """执行单个阶段"""
-        ...
-
-    def get_output(self, stage: int) -> Any:
-        """获取指定阶段的产出"""
-        ...
-
-    def export(self, format: str = "markdown") -> str:
-        """导出最终论文（markdown / docx / pdf）"""
-        ...
-```
-
-### 4.3 各阶段实现方案
-
-#### Stage 1：搜集材料（collect）
-- **模块**：`HistoryFieldExplorer`
-- **调用**：`explore(topic, search_limit=60)`
-- **配置**：`sources=['arxiv', 'paperswithcode', 'crossref']`（英语）
-- **输出**：`report.literature`（论文列表）
-
-#### Stage 2：整理史料（organize）
-- **模块**：`AcademicNoteGenerator` → 从论文摘要生成 Obsidian 笔记
-- **模块**：`BookCitationOrganizer` → 扫描书元数据提取
-- **模块**：`CitationFormatter` → 引用格式化
-- **输出**：`notes[]`, `citations[]`
-
-#### Stage 3：提取信息（extract）
-- **模块**：`NERProcessor`（日文）/ 英文 NER 旁路 + LLM
-- **模块**：`UnifiedOCRProcessor`（扫描史料数字化）
-- **输出**：`entities[]`, `entity_relations[]`
-
-#### Stage 4：史料考察（examine）
-- **模块**：`CitationNetworkAnalyzer` → 构建引文网络，识别核心文献
-- **模块**：`ReverseOutlineAnalyzer` → 论文逻辑审视
-- **输出**：`citation_network`, `key_sources[]`
-
-#### Stage 5：撰写论文（write）
-- **模块**：`HistoryFieldExplorer.draft_paper()`
-- **配置**：`language=en, bilingual=True`
-- **输出**：`paper_draft`（中英双语 Markdown）
-
-#### Stage 6：论文修改润色（polish）
-- **模块**：`PaperPolisher` → 冗余内容精简 + Track Changes
-- **模块**：`StyleTransfer` → 目标文风迁移（可选）
-- **模块**：`ReverseOutlineAnalyzer` → 逻辑审视报告
-- **输出**：`polished_draft`, `outline_review`
-
-#### Stage 7：注释格式修改（format）
-- **模块**：`CitationFormatter` → 目标格式（Chicago/APA/GB7714/MLA）
-- **模块**：`CitationNormalizer` → 引用标准化
-- **输出**：`final_paper`
-
----
-
-## 五、文件结构设计
-
-```
-tools/
-└── workflow/
-    ├── __init__.py
-    ├── workflow_orchestrator.py   # 主编排器
-    ├── research_project.py        # ResearchProject 数据类
-    ├── stages/
-    │   ├── __init__.py
-    │   ├── stage1_collect.py      # 搜集材料
-    │   ├── stage2_organize.py    # 整理史料
-    │   ├── stage3_extract.py     # 提取信息
-    │   ├── stage4_examine.py     # 史料考察
-    │   ├── stage5_write.py       # 撰写论文
-    │   ├── stage6_polish.py      # 论文修改润色
-    │   └── stage7_format.py       # 注释格式修改
-    └── adapters/
-        ├── __init__.py
-        └── workflow_adapter.py   # UnifiedTaskExecutor 适配
-```
-
----
-
-## 六、实现优先级
-
-### Phase 1 ✅ 完成（2026-04-03）
-- [x] `research_project.py` — 统一数据结构
-- [x] `WorkflowOrchestrator` 骨架
-- [x] Stage 1 + Stage 5 打通（搜集→论文草稿）
-- [x] `HistoryFieldExplorer` 整合
-
-### Phase 2 ✅ 完成（2026-04-04）
-- [x] Stage 2（笔记生成 + 引用格式化）
-- [x] Stage 3（NER + OCR）
-- [x] Stage 4（引文网络 + 逻辑审视）
-
-### Phase 3 ✅ 完成（2026-04-04）
-- [x] Stage 6（润色 + 文风调整）
-- [x] Stage 7（引用格式转换 + Word 导出）
-- [x] Word 导出（`python-docx` + 脚注支持）
-
-### Phase 4 ✅ 完成（2026-04-04）
-- [x] Web UI（`app.py` 集成工作流 API）
-- [x] 断点续做（`ResearchProject.save/load`）
-- [x] Flask REST API 端点
-
----
-
-### 已知问题 / 待优化（2026-04-04）
-
-| 问题 | 原因 | 状态 |
-|------|------|------|
-| Stage 3 实体检索 0 | 文献摘要为空（PaperFinder fallback 数据缺陷）；LLM 提取逻辑需加强 | 待修复 |
-| Stage 6 文风迁移失败 | `ReverseOutlineAnalyzer._call_llm` 使用 `.chat()` 接口与 `LLMClient._call_llm()` 不匹配 | ✅ 已修复（commit 4a44be6） |
-| Obsidian Vault 链接提取失败 | `ObsidianIntegration` 返回非预期数据结构的兜底处理 | ✅ 已修复（commit 4a44be6） |
-| EmbeddingManager 初始化阻塞 | `EmbeddingManager.__init__` 内部 import transformers 触发 HuggingFace 连接 | ✅ 已用 LLM 重排替代 |
-| PapersWithCode 超时 | huggingface.co 网络不通（国内环境） | 已知局限，fallback 到 PaperFinder |
-
----
-
-### Word 文档导出（含脚注）
-
-**文件**：`tools/workflow/word_exporter.py`
-
-**功能**：
-- Markdown → Word 转换（标题、加粗、斜体、引用块、列表）
-- 脚注引用 `[^n]` → Word 原生脚注
-- 参考文献列表 → Word 脚注（学术规范）
-
-**使用方式**：
-```python
-from tools.workflow.word_exporter import export_paper_to_word, export_paper_with_footnotes
-
-# Markdown → Word
-path = export_paper_to_word(
-    paper_text,
-    output_path="paper.docx",
-    language="en",
-    title="论文标题",
-    citation_format="chicago"
-)
-
-# 带脚注的 Word
-path = export_paper_with_footnotes(
-    paper_text,
-    footnotes=[{"id": "1", "text": "引用内容..."}, ...],
-    output_path="paper_with_footnotes.docx"
-)
-```
-
-**Stage 7 集成**：运行 Stage 7 后自动导出：
-- `workflow_output/{topic}_{date}.docx`（Markdown 格式）
-- `workflow_output/{topic}_{date}_footnotes.docx`（脚注格式）
-
----
-
-## 七、关键设计决策
-
-### 7.1 为什么需要 WorkflowOrchestrator 而不是直接用 unified_task_executor？
-
-`unified_task_executor` 是**单任务**执行器（输入一段文本，输出一个结果）。
-`WorkflowOrchestrator` 是**多阶段流水线**编排器：
-- 管理跨阶段的**状态传递**（Stage 3 的实体 → Stage 5 的论文）
-- 支持**条件分支**（如无扫描书则跳过 OCR）
-- 支持**断点续做**（保存/加载 ResearchProject）
-
-### 7.2 为什么不用 LangChain / AutoGen 等现成框架？
-
-- 这是一个**领域专用**工具（日语/英语历史研究）
-- 现有模块（NERProcessor, CitationFormatter 等）已深度适配历史研究场景
-- 引入 LangChain 会增加不必要的复杂度
-
-### 7.3 双语处理在哪里做？
-
-**Stage 5（撰写论文）时由 `HistoryFieldExplorer.draft_paper(bilingual=True)` 统一处理**。
-Stage 6 的润色只需处理主要语言版本，中文翻译保持不变。
-
-### 7.4 引用格式转换的时机
-
-在 **Stage 7** 一次性转换，避免 Stage 6 润色时引用格式不一致。
-
----
-
-## 八、待解决问题
-
-1. **Stage 3 NER 对英文支持弱** — 当前 `NERProcessor` 主要针对日语，需要为英语/汉语增加专用 NER
-2. **引文网络分析** — `CitationNetworkAnalyzer` 尚未测试（无实际调用）
-3. **OCR 引擎网络问题** — HuggingFace 超时，ndlocr-lite 需本地部署
-4. **Word 导出** — `PaperPolisher` 使用 `python-docx`，但其他模块无 DocX 输出能力
+## 当前主实现
+
+- 项目状态模型: `tools/workflow/research_project.py`
+- 编排层: `tools/workflow/workflow_orchestrator.py`
+- 阶段实现: `tools/workflow/stages/`
+- Word 输出: `tools/workflow/word_exporter.py`
+- 统一任务层: `modules/task_manager.py`, `modules/unified_task_executor.py`
+- API 入口: `app/app.py`
+
+## 后续优化纪律
+
+1. 以 [docs/project/MODULE_OPTIMIZATION_DESIGN_2026-04-21.md](docs/project/MODULE_OPTIMIZATION_DESIGN_2026-04-21.md) 为推进锚点。
+2. 若发现新的优化方向，先补写到锚点文件，再实现。
+3. 每个优化步骤完成后，必须在 `log/feature_development/` 输出报告。
+4. 临时脚本和中间文件只允许短期存在，报告生成后归档或删除。
+5. 根目录只保留稳定入口文档、稳定运行脚本和必要配置，长文档拆入 `docs/`。
+6. 后续 AI agent 可使用 `docs/agent_skills/historyresearch-workspace/` 对齐隐私、package、测试和报告流程。
+7. 使用 Ollama 等本地小模型时，优先走 `local_llm` 后端并保留 fallback 链，例如 `local_llm -> script`。
+8. Stage 2 学术笔记生成应优先记录 `academic_note` package 摘要，便于后续 vault、写作和复核链消费。
+9. Stage 6 写作润色应优先记录 `paper_polish` package 摘要，低置信或 fallback 结果进入复核链。
+10. Stage 6 反向大纲审校应优先记录 `outline_review` package 摘要，结构缺口和失衡标记进入复核链。
+11. Stage 6 文风迁移应优先记录 `style_transfer` package 摘要，激进改写风险和 fallback 输出进入复核链。
+12. Stage 2 Obsidian/vault 输出应优先记录 `obsidian_note_export` 与 `obsidian_graph` package 摘要，所有读写路径必须约束在托管 vault 内。
+13. Stage 3/分析链路若使用历史发言提取，应优先记录 `historical_speech_analysis` package 摘要，承载 speeches/dates/entities 与复核标记。
+14. 嵌入检索链路应优先记录 `embedding_index/semantic_search` package 摘要；未显式加载模型时必须使用轻量 fallback，避免自动触发重依赖或外网模型下载。
+15. Stage 3 实体消歧应优先记录 `entity_disambiguation` package 摘要，承载规范名、类型变化、未知规则和低置信复核信号。
+16. Stage 1/5 的领域探索和草稿生成应优先记录 `field_research/field_draft` package 摘要，逐步把 `FieldSearch/FieldSynthesis/FieldDrafting` 拆分到稳定外部契约后面。
+17. Stage 7 引用格式化应优先记录 `citation_formatting` package 摘要，格式层只负责规范化 citation record 的渲染，不承担解析或校验职责。
+18. 历史引文核验链路应优先通过 `historical_citation` 统一任务或 `HistoricalCitationWorkspaceInterface` 读取 `historical_citation_workspace_package`；默认 DOCX 解析保持离线，NDL/Japan Search/Internet Archive 检索和下载必须由调用方显式开启，旧 verifier 原始文件不得作为工作流集成点继续扩写。
+19. 版面分析链路应优先读取 `layout_page/layout_document` package；小模型 agent 可先走 metadata-only 路径，只有明确需要 PDF/图像分析时才加载 `fitz/numpy/PIL/ONNX` 等重依赖。
+20. 古典籍 OCR 训练准备链路应优先读取 `date_extraction/date_match_pairs/training_samples` package；默认离线，不读取本地密钥配置文件，LLM 日期识别必须由调用方显式开启。
+21. 古典籍 OCR 训练总线应优先记录 `training_workflow_summary/training_samples` package；总线只协调版面分析、日期匹配和样本导出，不把实验性长流程结果作为唯一状态来源。
+22. 人物传记结构化链路应优先读取 `biography_entities/biography_batch` package；默认只运行本地规则，OCR、LLM、skill 或 MCP 后端必须显式接入并回收到同一 schema。
+23. `biographical_ner.py` 定位为人物传记专属离线规则库；后续应被 `BiographyExtractor` 或薄 pipeline 调用，不再作为并行主流程扩张。
+24. `biography_pipeline.py` 定位为人物传记薄工作流封装；后续只协调 PDF/OCR 与 `biography_batch` package，不再维护独立实体 schema。
+25. 统一任务层必须优先公开 `TaskManager.get_task_registry()`、`get_capabilities()` 与 `execute_task_package()`；API、skill、MCP 和小模型 agent 不应直接猜测 adapter 内部入口，而应消费任务注册表、preset、backend 与 `task_execution` envelope。
+26. 底层 `UnifiedTaskExecutor` 执行结果必须携带 `validation/confidence/needs_review/quality_flags`；artifact 只在调用方显式传入路径时写出，且不得写入 `secrets/`。
+27. `module_adapters` 只做薄代理和兼容层；新增调用方应先读取 `get_adapter_registry()` 或 `get_adapter_spec()`，再通过 adapter 的主方法或 `execute_package()` 调用。
+28. 工作流项目状态应通过 `ResearchProject.register_package()` 或 `register_artifact()` 登记 package、artifact、quality flags 与 review queue，避免各阶段手写不一致的挂载逻辑。
+29. `WorkflowOrchestrator` 负责 checkpoint 和异常摘要的统一登记；阶段失败必须产生 `workflow_stage_failure` package，而不是只把异常字符串写入 metadata。
+30. Stage 3 的 NER 链路应保存 `task_layer_snapshot`，并优先通过统一任务层 `execute_task_package()` 获取 `task_execution` 摘要；旧执行方法只作为兼容 fallback。
+31. 密钥与配置 facade 默认只能返回脱敏状态报告；key hash、真实 secrets 路径和任何密钥值不得进入 API、日志、报告或 agent 能力快照。
+32. API 层健康检查和能力查询必须走 lazy service 状态，不得因为 `/api/system/status` 或 app factory 初始化而加载 OCR/LLM/下载器等重服务。
+33. artifact manager 必须采用 managed-root 策略；默认只登记 manifest，显式写入时也必须拒绝 `secrets/` 与 root 外路径。
+34. 优化分支归档先做 manifest 和引用状态确认；仍被测试、动态导入或兼容 facade 使用的 `optimized/enhanced/integrated` 文件不得直接移动。
+35. Stage 2 的 academic note、Obsidian note export 和 graph package 必须通过 `ResearchProject.register_package()` 进入项目状态，vault/export artifact 通过 `register_artifact()` 登记。
+36. Stage 4 的 citation network 与 outline review 必须同时保留 execution_summary 和项目级 package 登记，确保 citation/outline 复核项可从 review queue 追踪。
+37. Stage 5 必须登记 `field_draft` 和/或 `paper_draft` package；source snapshot、草稿长度、结构、引用占位和质量标记要进入项目状态，供 Stage 6/7 消费。
+38. Stage 6 必须将 `paper_polish`、`style_transfer`、`outline_review` package 通过 `ResearchProject.register_package()` 登记，并在 `package_protocol` 中保留 registered package 摘要，避免润色链只写 execution_summary 而无法被 Stage 7、API 或 agent skill 追踪。
+39. Stage 7 必须通过 `ResearchProject.register_package()` 登记 `citation_formatting` package，并通过 `register_artifact()` 登记最终 Word 输出；`package_protocol` 与 `artifact_protocol` 是最终输出交接的审计入口。
+40. Workflow checkpoint 写入必须经过 `ArtifactManager` 托管 root；`WorkflowOrchestrator` 可以继续把 checkpoint path 登记回 `ResearchProject`，但不应绕过 artifact manager 的路径约束直接写散落 JSON。
+41. API 统一任务入口必须返回 `task_execution` envelope；`/api/tasks/execute` 不应只返回旧式 adapter result，否则前端、skill、MCP 和 agent 无法共享 `schema_version/task_options/quality_flags`。
+42. `optimized/enhanced/integrated` 分支文件在仍有测试或动态导入引用时只允许 manifest/exit-prep 归档，不允许物理移动；物理移动必须先完成 canonical package/facade 覆盖和 rollback note。
+43. AI agent skill 应先运行只读契约快照，读取 `TaskManager` 任务注册表和 `ArtifactManager` 能力摘要，再选择 API/task/workflow 路径；小模型不应凭模块文件名猜测调用入口。
+44. tracked 配置文件只能保存公共模板、环境变量名和相对路径；`config/api_config.json`、`config/current_environment.json`、`config/external_config.json` 若再次出现本机绝对路径、真实 key/token、NDL 登录名或密码，`scripts/check_github_upload_safety.py` 必须重新阻断上传。

@@ -236,7 +236,11 @@ class DataStructurer:
             return ''
 
         if isinstance(data, list) and len(data) > 0 and isinstance(data[0], dict):
-            fieldnames = list(data[0].keys())
+            fieldnames = []
+            for row in data:
+                for key in row.keys():
+                    if key not in fieldnames:
+                        fieldnames.append(key)
 
             output = io.StringIO()
             writer = csv.DictWriter(output, fieldnames=fieldnames)
@@ -269,6 +273,92 @@ class DataStructurer:
             return csv_content
 
         return ''
+
+    def validate_schema(
+        self,
+        record: Dict[str, Any],
+        required_fields: Optional[List[str]] = None,
+        optional_fields: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Validate one lightweight structured record."""
+        required_fields = required_fields or []
+        optional_fields = optional_fields or []
+        missing = [field for field in required_fields if record.get(field) in (None, '')]
+        known_fields = set(required_fields) | set(optional_fields)
+        extra = [field for field in record.keys() if known_fields and field not in known_fields]
+        confidence = 1.0 if not required_fields else (len(required_fields) - len(missing)) / len(required_fields)
+        return {
+            'is_valid': not missing,
+            'missing_fields': missing,
+            'extra_fields': extra,
+            'confidence': round(confidence, 2),
+            'needs_review': bool(missing),
+        }
+
+    def normalize_record(
+        self,
+        record: Dict[str, Any],
+        schema: Optional[Dict[str, Any]] = None,
+        source_type: str = 'generic',
+    ) -> Dict[str, Any]:
+        """Normalize one OCR/NER/citation-like record into a shared envelope."""
+        schema = schema or {}
+        required_fields = list(schema.get('required', []))
+        optional_fields = list(schema.get('optional', []))
+        cleaned: Dict[str, Any] = {}
+
+        for key, value in dict(record or {}).items():
+            if isinstance(value, str):
+                cleaned[key] = self.clean_text(value)
+            else:
+                cleaned[key] = value
+
+        validation = self.validate_schema(cleaned, required_fields, optional_fields)
+        return {
+            'type': source_type,
+            'data': cleaned,
+            'validation': validation,
+            'confidence': validation['confidence'],
+            'needs_review': validation['needs_review'],
+            'backend': schema.get('backend', 'script'),
+            'provider': schema.get('provider', 'data_structurer'),
+            'model': schema.get('model'),
+        }
+
+    def normalize_records(
+        self,
+        records: List[Dict[str, Any]],
+        schema: Optional[Dict[str, Any]] = None,
+        source_type: str = 'generic',
+    ) -> List[Dict[str, Any]]:
+        """Normalize a batch of records with the same lightweight schema."""
+        return [
+            self.normalize_record(record, schema=schema, source_type=source_type)
+            for record in records
+        ]
+
+    def build_export_payload(
+        self,
+        records: List[Dict[str, Any]],
+        schema: Optional[Dict[str, Any]] = None,
+        source_type: str = 'generic',
+    ) -> Dict[str, Any]:
+        """Build a workflow-friendly export payload from structured records."""
+        normalized = self.normalize_records(records, schema=schema, source_type=source_type)
+        return {
+            'type': source_type,
+            'records': normalized,
+            'record_count': len(normalized),
+            'records_needing_review': sum(1 for item in normalized if item.get('needs_review')),
+            'backend': 'script',
+            'provider': 'data_structurer',
+            'model': None,
+            'confidence': round(
+                sum(item.get('confidence', 0.0) for item in normalized) / len(normalized),
+                2
+            ) if normalized else 0.0,
+            'needs_review': any(item.get('needs_review') for item in normalized),
+        }
 
     def export_structured_data(self, data: Dict[str, Any],
                               format: str = 'json',

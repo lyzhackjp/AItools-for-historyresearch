@@ -21,6 +21,7 @@ from typing import Dict, Any, List, Optional, Union
 from dataclasses import dataclass
 import tempfile
 import json
+from datetime import datetime
 
 
 @dataclass
@@ -64,6 +65,45 @@ class NDLKotenOCRLiteResult:
     def merge_all_text(self) -> str:
         """合并所有页面的文本"""
         return '\n\n'.join([page['text'] for page in self.pages if page.get('text')])
+
+    def to_package(self, source_path: Optional[str] = None) -> Dict[str, Any]:
+        """Return a workflow-ready OCR package."""
+        text = self.merge_all_text() or self.text
+        quality_flags: List[str] = []
+        if not self.success:
+            quality_flags.append("ocr_failed")
+        if not text.strip():
+            quality_flags.append("no_text")
+        if not self.pages:
+            quality_flags.append("no_pages")
+        if self.error:
+            quality_flags.append("has_error")
+        confidence = 0.72 if self.success and text.strip() else 0.2
+        if quality_flags:
+            confidence = min(confidence, 0.62)
+        return {
+            "type": "ocr_result",
+            "source_path": source_path,
+            "success": self.success,
+            "text": text,
+            "xml_content": self.xml_content,
+            "pages": self.pages,
+            "structures": self.structures,
+            "artifacts": [
+                {"type": "visualization", "path": path}
+                for path in self.visualization_paths
+            ],
+            "output_dir": self.output_dir,
+            "backend": "local_engine",
+            "provider": "ndlkotenocr_lite",
+            "model": "ndlkotenocr-lite",
+            "processing_time": self.processing_time,
+            "confidence": round(confidence, 2),
+            "needs_review": bool(quality_flags),
+            "quality_flags": quality_flags,
+            "error": self.error,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
 
 
 class NDLKotenOCRLiteProcessor:
@@ -130,6 +170,25 @@ class NDLKotenOCRLiteProcessor:
         """检查是否已安装ndlkotenocr-lite"""
         return self._ndlkoten_executable is not None
 
+    def get_capabilities(self) -> Dict[str, Any]:
+        """Return local NDL Koten OCR capability metadata."""
+        return {
+            "module": "ndlkotenocr_lite",
+            "backend": "local_engine",
+            "provider": "ndlkotenocr_lite",
+            "model": "ndlkotenocr-lite",
+            "available": self.is_installed(),
+            "capabilities": [
+                "image_ocr",
+                "directory_ocr",
+                "xml_output",
+                "visualization_output",
+                "classical_japanese_ocr",
+            ],
+            "supported_formats": list(self.config.supported_formats),
+            "fallback_order": ["local_engine:ndlkotenocr_lite", "local_engine:ndlocr_lite", "llm_ocr"],
+        }
+
     def get_installation_guide(self) -> str:
         """获取安装指南"""
         return """
@@ -185,9 +244,9 @@ NDL古典籍OCR-Lite 安装指南
             list: 命令列表
         """
         import sys
-        
+
         python_cmd = sys.executable
-        
+
         is_dir = os.path.isdir(source)
 
         if is_dir:
@@ -204,7 +263,7 @@ NDL古典籍OCR-Lite 安装指南
         if self._model_dir and os.path.exists(self._model_dir):
             det_weights = os.path.join(self._model_dir, 'rtmdet-s-1280x1280.onnx')
             rec_weights = os.path.join(self._model_dir, 'parseq-ndl-32x384-tiny-10.onnx')
-            
+
             if os.path.exists(det_weights):
                 cmd.extend(['--det-weights', det_weights])
             if os.path.exists(rec_weights):
@@ -213,7 +272,7 @@ NDL古典籍OCR-Lite 安装指南
         if self._config_dir and os.path.exists(self._config_dir):
             det_classes = os.path.join(self._config_dir, 'ndl.yaml')
             rec_classes = os.path.join(self._config_dir, 'NDLmoji.yaml')
-            
+
             if os.path.exists(det_classes):
                 cmd.extend(['--det-classes', det_classes])
             if os.path.exists(rec_classes):
@@ -281,6 +340,13 @@ NDL古典籍OCR-Lite 安装指南
 
         return result
 
+    def process_image_package(self, image_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
+        """Process one image and return a workflow package."""
+        result = self.process_image(image_path, output_dir=output_dir)
+        package = result.to_package(source_path=image_path)
+        package["capabilities"] = self.get_capabilities()
+        return package
+
     def process_directory(self, directory_path: str, output_dir: Optional[str] = None) -> NDLKotenOCRLiteResult:
         """
         批量处理目录中的所有图片
@@ -337,6 +403,15 @@ NDL古典籍OCR-Lite 安装指南
             result.error = f"处理异常: {str(e)}"
 
         return result
+
+    def process_directory_package(self, directory_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
+        """Process a directory and return a workflow package."""
+        result = self.process_directory(directory_path, output_dir=output_dir)
+        package = result.to_package(source_path=directory_path)
+        package["type"] = "ocr_batch"
+        package["capabilities"] = self.get_capabilities()
+        package["page_count"] = len(result.pages)
+        return package
 
     def _parse_output(self, output_dir: str, result: NDLKotenOCRLiteResult) -> NDLKotenOCRLiteResult:
         """

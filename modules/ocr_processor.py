@@ -1,9 +1,19 @@
-import pytesseract
-from PIL import Image
+try:
+    import pytesseract
+except ImportError:  # pragma: no cover - exercised through runtime fallback
+    pytesseract = None
+try:
+    from PIL import Image
+except ImportError:  # pragma: no cover - exercised through runtime fallback
+    Image = None
 import io
 from typing import Dict, Any, Optional, List
-import numpy as np
+try:
+    import numpy as np
+except ImportError:  # pragma: no cover - optional dependency
+    np = None
 import os
+from datetime import datetime
 
 
 class OCRProcessor:
@@ -26,20 +36,148 @@ class OCRProcessor:
             tesseract_path: Tesseract可执行文件路径（可选）
             ndl_model_path: NDL OCR模型路径（可选）
         """
-        if tesseract_path:
+        if tesseract_path and pytesseract is not None:
             pytesseract.pytesseract.tesseract_cmd = tesseract_path
-        
+
         self.ndl_model = None
         self.ndl_processor = None
         self.ndl_model_path = ndl_model_path
         self.ndl_available = False
-        
+
         self._init_ndl_model()
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        """Return a lightweight OCR capability snapshot."""
+        return {
+            "module": "ocr_processor",
+            "backend": "script",
+            "provider": "tesseract",
+            "model": None,
+            "capabilities": [
+                "image_ocr",
+                "bytes_ocr",
+                "region_ocr",
+                "batch_ocr",
+                "llm_ocr_adapter",
+                "ndl_ocr_adapter",
+            ],
+            "languages": list(self.LANGUAGES_MAP.keys()),
+            "supported_language_codes": list(self.SUPPORTED_LANGUAGES),
+            "ndl_available": self.ndl_available,
+            "fallback_order": ["script:tesseract", "llm_ocr", "ndl_ocr", "unified_ocr_processor"],
+        }
+
+    def _result_to_package(
+        self,
+        result: Dict[str, Any],
+        source_path: Optional[str] = None,
+        source_type: str = "image",
+    ) -> Dict[str, Any]:
+        """Wrap an OCR result dict in the shared workflow envelope."""
+        text = result.get("text", "") or ""
+        words = result.get("words", []) or []
+        pages = result.get("pages", []) or []
+        if not pages and text:
+            pages = [
+                {
+                    "page": 1,
+                    "text": text,
+                    "confidence": self._word_average_confidence(words),
+                }
+            ]
+        quality_flags = self._ocr_quality_flags(result, text, pages)
+        confidence = self._estimate_package_confidence(result, words, pages, quality_flags)
+        provider = result.get("provider") or result.get("method") or "tesseract"
+        return {
+            "type": "ocr_result",
+            "source_type": source_type,
+            "source_path": source_path,
+            "success": bool(result.get("success")),
+            "text": text,
+            "words": words,
+            "pages": pages,
+            "structured_data": result.get("structured_data", {}),
+            "statistics": result.get("statistics", {}),
+            "artifacts": [
+                {"type": "visualization", "path": path}
+                for path in result.get("visualization_paths", []) or []
+            ],
+            "output_dir": result.get("output_dir"),
+            "backend": "script",
+            "provider": provider,
+            "model": result.get("model"),
+            "confidence": confidence,
+            "needs_review": bool(quality_flags) or bool(result.get("needs_review")),
+            "quality_flags": quality_flags,
+            "error": result.get("error"),
+            "metadata": {
+                "language": result.get("language"),
+                "config": result.get("config"),
+                "method": result.get("method"),
+            },
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    def _word_average_confidence(self, words: List[Dict[str, Any]]) -> Optional[float]:
+        values = []
+        for word in words:
+            try:
+                value = float(word.get("confidence"))
+            except (TypeError, ValueError):
+                continue
+            if value >= 0:
+                values.append(value / 100 if value > 1 else value)
+        if not values:
+            return None
+        return round(sum(values) / len(values), 3)
+
+    def _ocr_quality_flags(
+        self,
+        result: Dict[str, Any],
+        text: str,
+        pages: List[Dict[str, Any]],
+    ) -> List[str]:
+        flags: List[str] = []
+        if not result.get("success"):
+            flags.append("ocr_failed")
+        if not text.strip():
+            flags.append("no_text")
+        if not pages:
+            flags.append("no_pages")
+        if result.get("error"):
+            flags.append("has_error")
+        return flags
+
+    def _estimate_package_confidence(
+        self,
+        result: Dict[str, Any],
+        words: List[Dict[str, Any]],
+        pages: List[Dict[str, Any]],
+        quality_flags: List[str],
+    ) -> float:
+        page_values = [
+            float(page.get("confidence"))
+            for page in pages
+            if page.get("confidence") is not None
+        ]
+        if page_values:
+            confidence = sum(page_values) / len(page_values)
+        else:
+            word_confidence = self._word_average_confidence(words)
+            if word_confidence is not None:
+                confidence = word_confidence
+            elif result.get("success") and result.get("text"):
+                confidence = 0.68
+            else:
+                confidence = 0.2
+        if quality_flags:
+            confidence = min(confidence, 0.62)
+        return round(max(0.1, min(confidence, 0.95)), 2)
 
     def _init_ndl_model(self):
         """
         初始化NDL Lab OCR模型
-        
+
         NDL (National Diet Library) Lab发布了基于Transformer的OCR模型
         主要用于日文文献的识别，GitHub: https://github.com/ndl-lab/ndl-ocr
         """
@@ -47,22 +185,22 @@ class OCRProcessor:
             from transformers import AutoProcessor, AutoModelForVision2Seq
             from PIL import Image
             import torch
-            
+
             if self.ndl_model_path and os.path.exists(self.ndl_model_path):
                 model_name = self.ndl_model_path
             else:
                 model_name = "NDLCLab/ndl-ocr-japanese"
-            
+
             self.ndl_processor = AutoProcessor.from_pretrained(model_name)
             self.ndl_model = AutoModelForVision2Seq.from_pretrained(
                 model_name,
                 torch_dtype=torch.float16,
                 device_map="auto"
             )
-            
+
             self.ndl_available = True
             print(f"NDL OCR模型加载成功")
-            
+
         except ImportError:
             print("警告: transformers库未安装，无法使用NDL OCR模型")
             print("请运行: pip install transformers torch")
@@ -86,6 +224,10 @@ class OCRProcessor:
             dict: 包含识别结果和详细信息的字典
         """
         try:
+            if Image is None:
+                raise RuntimeError("Pillow is not installed")
+            if pytesseract is None:
+                raise RuntimeError("pytesseract is not installed")
             img = Image.open(image_path)
 
             lang_code = self.LANGUAGES_MAP.get(language, language)
@@ -131,6 +273,18 @@ class OCRProcessor:
                 'method': 'tesseract'
             }
 
+    def extract_text_from_image_package(
+        self,
+        image_path: str,
+        language: str = 'zh',
+        config: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Extract OCR text from an image and return a workflow package."""
+        result = self.extract_text_from_image(image_path, language=language, config=config)
+        package = self._result_to_package(result, source_path=image_path, source_type="image")
+        package["capabilities"] = self.get_capabilities()
+        return package
+
     def extract_text_from_bytes(self, image_bytes: bytes,
                                 language: str = 'zh',
                                 config: Optional[str] = None) -> Dict[str, Any]:
@@ -146,6 +300,10 @@ class OCRProcessor:
             dict: 包含识别结果的字典
         """
         try:
+            if Image is None:
+                raise RuntimeError("Pillow is not installed")
+            if pytesseract is None:
+                raise RuntimeError("pytesseract is not installed")
             img = Image.open(io.BytesIO(image_bytes))
 
             lang_code = self.LANGUAGES_MAP.get(language, language)
@@ -172,6 +330,18 @@ class OCRProcessor:
                 'method': 'tesseract'
             }
 
+    def extract_text_from_bytes_package(
+        self,
+        image_bytes: bytes,
+        language: str = 'zh',
+        config: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Extract OCR text from image bytes and return a workflow package."""
+        result = self.extract_text_from_bytes(image_bytes, language=language, config=config)
+        package = self._result_to_package(result, source_type="bytes")
+        package["capabilities"] = self.get_capabilities()
+        return package
+
     def extract_text_with_regions(self, image_path: str,
                                  regions: List[Dict[str, int]],
                                  language: str = 'zh') -> Dict[str, Any]:
@@ -186,7 +356,11 @@ class OCRProcessor:
         Returns:
             dict: 各区域的识别结果
         """
+        if Image is None:
+            return {f"region_{i}": "" for i, _ in enumerate(regions)}
         img = Image.open(image_path)
+        if pytesseract is None:
+            return {f"region_{i}": "" for i, _ in enumerate(regions)}
         results = {}
 
         lang_code = self.LANGUAGES_MAP.get(language, language)
@@ -225,6 +399,39 @@ class OCRProcessor:
 
         return results
 
+    def batch_ocr_package(self, image_paths: List[str], language: str = 'zh') -> Dict[str, Any]:
+        """Run batch OCR and return a batch-level workflow package."""
+        packages = [
+            self.extract_text_from_image_package(image_path, language=language)
+            for image_path in image_paths
+        ]
+        quality_flags = []
+        if not packages:
+            quality_flags.append("no_images")
+        if any(package.get("needs_review") for package in packages):
+            quality_flags.append("page_review_needed")
+        return {
+            "type": "ocr_batch",
+            "source_type": "image_list",
+            "image_count": len(image_paths),
+            "page_count": len(packages),
+            "packages": packages,
+            "text": "\n\n".join(package.get("text", "") for package in packages if package.get("text")),
+            "backend": "script",
+            "provider": "tesseract",
+            "model": None,
+            "confidence": round(
+                sum(package.get("confidence", 0.0) for package in packages) / len(packages),
+                2,
+            )
+            if packages
+            else 0.2,
+            "needs_review": bool(quality_flags),
+            "quality_flags": quality_flags,
+            "capabilities": self.get_capabilities(),
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
     def llm_ocr(self, image_path: str,
                 llm_client,
                 language: str = 'zh',
@@ -241,6 +448,13 @@ class OCRProcessor:
         Returns:
             dict: LLM OCR结果
         """
+        if Image is None:
+            return {
+                'success': False,
+                'error': 'Pillow is not installed',
+                'text': '',
+                'method': 'llm'
+            }
         img = Image.open(image_path)
 
         with open(image_path, 'rb') as f:
@@ -273,16 +487,36 @@ class OCRProcessor:
                 'method': 'llm'
             }
 
+    def llm_ocr_package(
+        self,
+        image_path: str,
+        llm_client,
+        language: str = 'zh',
+        prompt_template: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Run LLM OCR and return a workflow package."""
+        result = self.llm_ocr(
+            image_path=image_path,
+            llm_client=llm_client,
+            language=language,
+            prompt_template=prompt_template,
+        )
+        package = self._result_to_package(result, source_path=image_path, source_type="image")
+        package["backend"] = "llm_api"
+        package["provider"] = getattr(llm_client, "provider", result.get("provider", "llm"))
+        package["capabilities"] = self.get_capabilities()
+        return package
+
     def ndl_ocr(self, image_path: str) -> Dict[str, Any]:
         """
         使用NDL Lab OCR模型进行文字识别
-        
+
         NDL Lab的OCR模型基于Transformer架构，专门针对日文文献优化
         支持手写文字、历史文献等多种复杂场景
-        
+
         Args:
             image_path: 图片文件路径
-            
+
         Returns:
             dict: 包含识别结果的字典
         """
@@ -293,39 +527,39 @@ class OCRProcessor:
                 'text': '',
                 'method': 'ndl'
             }
-        
+
         try:
             from transformers import AutoProcessor, AutoModelForVision2Seq
             from PIL import Image
             import torch
-            
+
             image = Image.open(image_path)
-            
+
             if image.mode != 'RGB':
                 image = image.convert('RGB')
-            
+
             inputs = self.ndl_processor(text="日OCR", images=image, return_tensors="pt")
-            
+
             if torch.cuda.is_available():
-                inputs = {k: v.to("cuda") if isinstance(v, torch.Tensor) else v 
+                inputs = {k: v.to("cuda") if isinstance(v, torch.Tensor) else v
                          for k, v in inputs.items()}
-            
+
             generated_ids = self.ndl_model.generate(
                 pixel_values=inputs["pixel_values"],
                 max_length=512,
                 num_beams=5,
                 do_sample=False
             )
-            
+
             generated_text = self.ndl_processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-            
+
             return {
                 'success': True,
                 'text': generated_text.strip(),
                 'method': 'ndl',
                 'model': 'NDL-Lab-OCR'
             }
-            
+
         except Exception as e:
             return {
                 'success': False,
@@ -337,20 +571,20 @@ class OCRProcessor:
     def ndl_ocr_batch(self, image_paths: List[str]) -> List[Dict[str, Any]]:
         """
         批量使用NDL OCR模型进行文字识别
-        
+
         Args:
             image_paths: 图片文件路径列表
-            
+
         Returns:
             list: 每个图片的OCR结果
         """
         results = []
-        
+
         for image_path in image_paths:
             result = self.ndl_ocr(image_path)
             result['image_path'] = image_path
             results.append(result)
-        
+
         return results
 
     def extract_text_with_method(self, image_path: str,
@@ -359,13 +593,13 @@ class OCRProcessor:
                                  llm_client=None) -> Dict[str, Any]:
         """
         使用指定方法提取文字
-        
+
         Args:
             image_path: 图片文件路径
             method: OCR方法 ('tesseract', 'ndl', 'llm')
             language: 识别语言
             llm_client: LLM客户端实例（当method='llm'时必需）
-            
+
         Returns:
             dict: 识别结果
         """
@@ -393,11 +627,11 @@ class OCRProcessor:
     def get_available_languages(self) -> List[str]:
         """获取支持的OCR语言列表"""
         return list(self.LANGUAGES_MAP.keys())
-    
+
     def is_ndl_available(self) -> bool:
         """检查NDL OCR模型是否可用"""
         return self.ndl_available
-    
+
     def get_supported_methods(self) -> List[str]:
         """获取支持的OCR方法列表"""
         methods = ['tesseract']
@@ -418,27 +652,27 @@ class OCRProcessor:
                        enable_viz: bool = False) -> Dict[str, Any]:
         """
         使用NDL OCR-Lite进行文字识别
-        
+
         NDL OCR-Lite是日本国立国会图书馆开发的轻量级OCR工具
         专门针对日文文献优化，支持批量处理
-        
+
         Args:
             image_path: 图片文件路径
             use_gpu: 是否使用GPU加速
             enable_viz: 是否生成可视化结果
-            
+
         Returns:
             dict: 识别结果
         """
         try:
             from modules.ndlocr_lite import create_ndlocr_processor, NDLOCRLiteResult
             from modules.ndlocr_result_processor import create_result_processor
-            
+
             processor = create_ndlocr_processor(
                 use_gpu=use_gpu,
                 enable_viz=enable_viz
             )
-            
+
             if not processor.is_installed():
                 return {
                     'success': False,
@@ -446,12 +680,12 @@ class OCRProcessor:
                     'method': 'ndlocr-lite',
                     'text': ''
                 }
-            
+
             result = processor.process_image(image_path)
-            
+
             result_processor = create_result_processor()
             processed = result_processor.process_result(result)
-            
+
             return {
                 'success': result.success,
                 'text': processed.get('processed_text', ''),
@@ -464,7 +698,7 @@ class OCRProcessor:
                 'output_dir': result.output_dir,
                 'visualization_paths': result.visualization_paths
             }
-            
+
         except ImportError:
             return {
                 'success': False,
@@ -485,24 +719,24 @@ class OCRProcessor:
                           enable_viz: bool = False) -> Dict[str, Any]:
         """
         批量使用NDL OCR-Lite处理目录中的图片
-        
+
         Args:
             directory_path: 包含图片的目录路径
             use_gpu: 是否使用GPU加速
             enable_viz: 是否生成可视化结果
-            
+
         Returns:
             dict: 批量处理结果
         """
         try:
             from modules.ndlocr_lite import create_ndlocr_processor
             from modules.ndlocr_result_processor import create_result_processor
-            
+
             processor = create_ndlocr_processor(
                 use_gpu=use_gpu,
                 enable_viz=enable_viz
             )
-            
+
             if not processor.is_installed():
                 return {
                     'success': False,
@@ -510,12 +744,12 @@ class OCRProcessor:
                     'method': 'ndlocr-lite',
                     'text': ''
                 }
-            
+
             result = processor.process_directory(directory_path)
-            
+
             result_processor = create_result_processor()
             processed = result_processor.process_result(result)
-            
+
             return {
                 'success': result.success,
                 'text': processed.get('processed_text', ''),
@@ -529,7 +763,7 @@ class OCRProcessor:
                 'output_dir': result.output_dir,
                 'visualization_paths': result.visualization_paths
             }
-            
+
         except ImportError:
             return {
                 'success': False,
@@ -555,15 +789,15 @@ class OCRProcessor:
             return False
 
 
-def create_ocr_processor(tesseract_path: Optional[str] = None, 
+def create_ocr_processor(tesseract_path: Optional[str] = None,
                         ndl_model_path: Optional[str] = None) -> OCRProcessor:
     """
     工厂函数 - 创建OCR处理器实例
-    
+
     Args:
         tesseract_path: Tesseract路径
         ndl_model_path: NDL OCR模型路径
-        
+
     Returns:
         OCRProcessor: OCR处理器实例
     """

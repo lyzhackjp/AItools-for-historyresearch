@@ -1,629 +1,478 @@
-"""
-命名实体识别模块
+from __future__ import annotations
 
-从日文史料中识别和分类历史专有名词
-支持多种实体类型和批量处理
-
-核心功能：
-- 识别历史专有名词
-- 按类型分类实体（人名、地名、机构、年代等）
-- 提取实体间的关联关系
-- 批量处理文献进行NER标注
-- 支持日文、简体中文、繁体中文
-
-实体分类：
-- 历史人物
-- 幕府机构
-- 地理位置
-- 历史年代
-- 重要事件
-
-API优先级：
-1. 阿里通义千问 (dashscope)
-2. MiniMax
-3. Gemini/ChatGPT（备选）
-
-测试模式：使用模拟数据，不调用真实API
-
-依赖模块：
-- llm_client.py
-- ocr_processor.py
-"""
-
-import re
 import json
-import os
-from typing import Dict, List, Optional, Any, Tuple
-from pathlib import Path
+import re
 from collections import defaultdict
-from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from modules.unified_task_executor import TaskConfig, TaskType, UnifiedTaskExecutor
 
 
 class NERProcessor:
-    """命名实体识别处理器"""
-    
+    """Historical NER processor with unified multi-backend execution."""
+
     ENTITY_CATEGORIES = {
-        'person': '历史人物 (Historical Figure)',
-        'location': '地理位置 (Location)',
-        'organization': '机构组织 (Organization)',
-        'event': '历史事件 (Event)',
-        'date': '历史年代 (Date/Period)',
-        'work': '著作文献 (Work/Literature)',
-        'concept': '思想概念 (Concept/Idea)',
-        'custom': '自定义类型 (Custom)'
+        "person": "Historical Figure",
+        "location": "Location",
+        "organization": "Organization",
+        "event": "Historical Event",
+        "date": "Date/Period",
+        "work": "Work/Literature",
+        "concept": "Concept/Idea",
+        "custom": "Custom",
     }
-    
+
     JAPAN_HISTORICAL_ENTITIES = {
-        'eras': ['明治', '大正', '昭和', '平成', '奈良', '平安', '鎌倉', '室町', '戦国', '江戸'],
-        'institutions': ['幕府', '朝廷', '国会', '貴族院', '衆议院', '内務省', '外務省', '大蔵省', '軍部'],
-        'political_groups': ['薩摩藩', '長州藩', '土佐藩', '肥前藩', '公家', '武家', '華族', '平民']
+        "eras": ["明治", "大正", "昭和", "平成", "令和", "奈良", "平安", "镰仓", "室町", "战国", "江户"],
+        "institutions": ["幕府", "朝廷", "国会", "贵族院", "众议院", "内务省", "外务省", "太政官"],
+        "political_groups": ["萨摩藩", "长州藩", "土佐藩", "肥前藩", "公家", "武家", "藩士", "平民"],
     }
-    
-    def __init__(self, api_provider: str = "qwen", test_mode: bool = True):
-        """
-        初始化NER处理器
-        
-        Args:
-            api_provider: API提供商
-            test_mode: 测试模式标志
-        """
+
+    PERSON_PATTERNS = [
+        re.compile(r"[\u4e00-\u9fff]{2,4}(?:天皇|将军|公|侯|氏|子)?"),
+    ]
+    LOCATION_PATTERNS = [
+        re.compile(r"[\u4e00-\u9fff]{2,6}(?:国|都|道|府|县|縣|市|村|町)"),
+    ]
+    DATE_PATTERNS = [
+        re.compile(r"\d{3,4}年(?:\d{1,2}月(?:\d{1,2}日)?)?"),
+        re.compile(r"(?:明治|大正|昭和|平成|令和)\d{1,2}年"),
+    ]
+
+    def __init__(
+        self,
+        api_provider: str = "qwen",
+        test_mode: bool = True,
+        backend: Optional[str] = None,
+        local_model: Optional[str] = None,
+    ):
         self.api_provider = api_provider
         self.test_mode = test_mode
-        self.llm_client = None
-        
-        self.provider_mapping = {
-            'qwen': 'dashscope',
-            'minimax': 'minimax',
-            'gemini': 'custom',
-            'chatgpt': 'openai'
-        }
-        
-        self.recognized_entities = []
-        self.entity_cache = {}
-    
-    def _init_llm_client(self):
-        """初始化LLM客户端"""
+        self.backend = backend
+        self.local_model = local_model
+        self.executor = UnifiedTaskExecutor(default_mode="script" if test_mode else "auto")
+        self.executor.set_provider(api_provider)
+        self.last_result_metadata: Dict[str, Any] = {}
+        self.recognized_entities: List[Dict[str, Any]] = []
+        self.entity_cache: Dict[str, List[Dict[str, Any]]] = {}
+
+    def get_capabilities(self) -> Dict[str, Any]:
+        capability = self.executor.get_task_capability("ner")
+        capability.setdefault("module", "ner_processor")
+        capability.setdefault("fallback_order", ["script", "local_llm", "llm_api", "skill", "mcp", "hybrid"])
+        capability["active_backend"] = self._default_backend()
+        capability["provider"] = self.api_provider
+        capability["model"] = self.local_model
+        capability["test_mode"] = self.test_mode
+        return capability
+
+    def _default_backend(self) -> str:
+        if self.backend:
+            return self.backend
         if self.test_mode:
-            return None
-            
-        if self.llm_client is None:
-            provider = self.provider_mapping.get(self.api_provider, 'dashscope')
-            
-            config = self._create_provider_config(provider)
-            self.llm_client = create_llm_client(config)
-    
-    def _create_provider_config(self, provider: str) -> Dict[str, Any]:
-        """创建provider配置字典"""
-        configs = {
-            'dashscope': {
-                'provider': 'dashscope',
-                'model': 'qwen-turbo',
-                'api_key': os.getenv('DASHSCOPE_API_KEY'),
-                'base_url': 'https://dashscope.aliyuncs.com/api/v1'
-            },
-            'minimax': {
-                'provider': 'minimax',
-                'model': 'abab6-chat',
-                'api_key': os.getenv('MINIMAX_API_KEY'),
-                'base_url': 'https://api.minimax.chat/v1'
-            },
-            'openai': {
-                'provider': 'openai',
-                'model': 'gpt-4',
-                'api_key': os.getenv('OPENAI_API_KEY'),
-                'base_url': None
-            }
-        }
-        
-        return configs.get(provider, configs['dashscope'])
-    
-    def recognize_historical_entities(self, text: str,
-                                    categories: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-        """
-        识别历史专有名词
-        
-        Args:
-            text: 待识别的文本
-            categories: 要识别的实体类型列表
-            
-        Returns:
-            list: 识别出的实体列表，每个元素包含实体、类型、位置等信息
-        """
-        if self.test_mode:
-            return self._recognize_mock_entities(text, categories)
-        
-        self._init_llm_client()
-        
-        categories = categories or list(self.ENTITY_CATEGORIES.keys())
-        categories_text = '\n'.join([f"- {k}: {v}" for k, v in self.ENTITY_CATEGORIES.items()])
-        
-        prompt = f"""请从以下日文/中文史料中识别并标注命名实体。
+            return "script"
+        return "llm_api"
 
-【实体类型】
-{categories_text}
-
-【特殊提示 - 日本史相关实体】
-时代：{', '.join(self.JAPAN_HISTORICAL_ENTITIES['eras'])}
-机构：{', '.join(self.JAPAN_HISTORICAL_ENTITIES['institutions'])}
-政治集团：{', '.join(self.JAPAN_HISTORICAL_ENTITIES['political_groups'])}
-
-【待处理文本】
-{text[:5000]}
-
-请以JSON数组格式输出，每个元素包含：
-- "entity": 实体名称
-- "category": 实体类型
-- "start_pos": 在文本中的起始位置
-- "end_pos": 在文本中的结束位置
-- "confidence": 识别置信度 (0-1)
-- "notes": 补充说明（可选）
-
-输出示例：
-[
-    {{
-        "entity": "明治維新",
-        "category": "event",
-        "start_pos": 15,
-        "end_pos": 19,
-        "confidence": 0.95,
-        "notes": "日本近代重要历史事件"
-    }}
-]"""
-        
-        response = self._call_llm(prompt)
-        
-        try:
-            entities = json.loads(response)
-            self.recognized_entities.extend(entities)
-            return entities
-        except json.JSONDecodeError:
-            return self._parse_entities_from_text(response)
-    
-    def classify_entities(self, entities: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-        """
-        按类型分类实体
-        
-        Args:
-            entities: 实体列表
-            
-        Returns:
-            dict: 按类型分类的实体字典
-        """
-        classified = defaultdict(list)
-        
-        for entity in entities:
-            category = entity.get('category', 'unknown')
-            classified[category].append(entity)
-        
-        return dict(classified)
-    
-    def extract_entity_relationships(self, text: str,
-                                   entities: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-        """
-        提取实体间的关联关系
-        
-        Args:
-            text: 原始文本
-            entities: 识别出的实体列表
-            
-        Returns:
-            list: 关系列表
-        """
-        if self.test_mode:
-            return self._extract_mock_relationships(text, entities)
-        
-        self._init_llm_client()
-        
-        entity_names = [e['entity'] for e in entities[:20]]
-        
-        prompt = f"""请分析以下文本中实体之间的关系。
-
-【文本】
-{text[:3000]}
-
-【已识别实体】
-{', '.join(entity_names)}
-
-请识别实体间的关系，以JSON数组格式输出：
-[
-    {{
-        "source": "实体A",
-        "target": "实体B",
-        "relation": "关系类型",
-        "description": "关系描述"
-    }}
-]
-
-关系类型可包括：
-- 属于/包含关系
-- 对立/敌对关系
-- 影响/导致关系
-- 同时期关系
-- 人物-机构关系
-- 地点-事件关系"""
-        
-        response = self._call_llm(prompt)
-        
-        try:
-            return json.loads(response)
-        except json.JSONDecodeError:
+    def _default_fallbacks(self, backend: str) -> List[str]:
+        if backend == "script":
             return []
-    
-    def batch_process_documents(self, documents: List[Dict[str, Any]],
-                              categories: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-        """
-        批量处理多个文档进行NER标注
-        
-        Args:
-            documents: 文档列表，每项包含text和metadata
-            categories: 要识别的实体类型
-            
-        Returns:
-            list: 处理结果列表
-        """
-        results = []
-        
-        for doc in documents:
-            text = doc.get('text', '')
-            metadata = doc.get('metadata', {})
-            
-            entities = self.recognize_historical_entities(text, categories)
-            classified = self.classify_entities(entities)
-            relationships = self.extract_entity_relationships(text, entities)
-            
-            results.append({
-                'metadata': metadata,
-                'entities': entities,
-                'classified_entities': classified,
-                'relationships': relationships,
-                'entity_count': len(entities)
-            })
-        
-        return results
-    
-    def get_entity_statistics(self, entities: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """
-        获取实体统计信息
-        
-        Args:
-            entities: 实体列表
-            
-        Returns:
-            dict: 统计信息
-        """
-        total = len(entities)
-        
-        category_counts = defaultdict(int)
-        for entity in entities:
-            category_counts[entity.get('category', 'unknown')] += 1
-        
-        confidence_sum = 0
-        for entity in entities:
-            confidence_sum += entity.get('confidence', 0)
-        avg_confidence = confidence_sum / total if total > 0 else 0
-        
-        return {
-            'total_entities': total,
-            'category_distribution': dict(category_counts),
-            'average_confidence': avg_confidence,
-            'most_common_category': max(category_counts.items(), key=lambda x: x[1])[0] if category_counts else None
+        if backend == "local_llm":
+            return ["script"]
+        return ["local_llm", "script"]
+
+    def _normalize_entity(self, entity: Dict[str, Any], text: str, backend: str) -> Dict[str, Any]:
+        name = entity.get("entity") or entity.get("text") or entity.get("name") or ""
+        start_pos = entity.get("start_pos")
+        end_pos = entity.get("end_pos")
+        if start_pos is None and entity.get("position") is not None:
+            start_pos = int(entity["position"])
+        if end_pos is None and start_pos is not None and name:
+            end_pos = int(start_pos) + len(name)
+        confidence = entity.get("confidence")
+        if confidence is None:
+            confidence = 0.45 if backend == "script" else 0.75
+        normalized = {
+            "entity": name,
+            "text": name,
+            "category": entity.get("category", "unknown"),
+            "start_pos": start_pos,
+            "end_pos": end_pos,
+            "confidence": float(confidence),
+            "notes": entity.get("notes", ""),
+            "source": entity.get("source", backend),
+            "backend": backend,
+            "provider": self.last_result_metadata.get("provider", self.api_provider),
+            "model": self.last_result_metadata.get("model"),
+            "needs_review": bool(entity.get("needs_review", False)),
         }
-    
-    def filter_entities_by_confidence(self, entities: List[Dict[str, Any]],
-                                     threshold: float = 0.7) -> List[Dict[str, Any]]:
-        """
-        按置信度过滤实体
-        
-        Args:
-            entities: 实体列表
-            threshold: 置信度阈值
-            
-        Returns:
-            list: 过滤后的实体
-        """
-        return [e for e in entities if e.get('confidence', 0) >= threshold]
-    
-    def search_entities(self, query: str, 
-                       entities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        在实体列表中搜索
-        
-        Args:
-            query: 搜索关键词
-            entities: 实体列表
-            
-        Returns:
-            list: 匹配的实体
-        """
-        query_lower = query.lower()
-        
-        results = []
-        for entity in entities:
-            entity_name = entity.get('entity', '').lower()
-            notes = entity.get('notes', '').lower()
-            
-            if query_lower in entity_name or query_lower in notes:
-                results.append(entity)
-        
-        return results
-    
-    def export_entities_for_obsidian(self, entities: List[Dict[str, Any]],
-                                    output_format: str = 'json') -> str:
-        """
-        导出实体为Obsidian格式
-        
-        Args:
-            entities: 实体列表
-            output_format: 输出格式 ('json' 或 'markdown')
-            
-        Returns:
-            str: 格式化后的字符串
-        """
-        if output_format == 'markdown':
-            return self._export_as_markdown(entities)
-        else:
-            return json.dumps(entities, ensure_ascii=False, indent=2)
-    
-    def create_entity_network(self, entities: List[Dict[str, Any]],
-                            relationships: List[Dict[str, str]]) -> Dict[str, Any]:
-        """
-        创建实体网络图
-        
-        Args:
-            entities: 实体列表
-            relationships: 关系列表
-            
-        Returns:
-            dict: 网络图数据
-        """
-        nodes = []
-        edges = []
-        
-        for entity in entities:
-            nodes.append({
-                'id': entity.get('entity'),
-                'label': entity.get('entity'),
-                'category': entity.get('category'),
-                'confidence': entity.get('confidence')
-            })
-        
-        for rel in relationships:
-            edges.append({
-                'source': rel.get('source'),
-                'target': rel.get('target'),
-                'relation': rel.get('relation'),
-                'label': rel.get('relation')
-            })
-        
-        return {
-            'nodes': nodes,
-            'edges': edges,
-            'stats': {
-                'total_nodes': len(nodes),
-                'total_edges': len(edges)
-            }
+        if not normalized["entity"] and start_pos is not None and end_pos is not None:
+            normalized["entity"] = text[start_pos:end_pos]
+            normalized["text"] = normalized["entity"]
+        return normalized
+
+    def _rule_entities(self, text: str, categories: Optional[List[str]]) -> List[Dict[str, Any]]:
+        allowed = set(categories or ["person", "location", "date"])
+        entities: List[Dict[str, Any]] = []
+
+        if "person" in allowed:
+            for pattern in self.PERSON_PATTERNS:
+                for match in pattern.finditer(text):
+                    entities.append(
+                        {
+                            "entity": match.group(),
+                            "category": "person",
+                            "start_pos": match.start(),
+                            "end_pos": match.end(),
+                            "confidence": 0.4,
+                            "source": "rule",
+                        }
+                    )
+        if "location" in allowed:
+            for pattern in self.LOCATION_PATTERNS:
+                for match in pattern.finditer(text):
+                    entities.append(
+                        {
+                            "entity": match.group(),
+                            "category": "location",
+                            "start_pos": match.start(),
+                            "end_pos": match.end(),
+                            "confidence": 0.45,
+                            "source": "rule",
+                        }
+                    )
+        if "date" in allowed:
+            for pattern in self.DATE_PATTERNS:
+                for match in pattern.finditer(text):
+                    entities.append(
+                        {
+                            "entity": match.group(),
+                            "category": "date",
+                            "start_pos": match.start(),
+                            "end_pos": match.end(),
+                            "confidence": 0.7,
+                            "source": "rule",
+                        }
+                    )
+
+        # Lexicon enrichment
+        joined_lexicon = {
+            "date": self.JAPAN_HISTORICAL_ENTITIES["eras"],
+            "organization": self.JAPAN_HISTORICAL_ENTITIES["institutions"] + self.JAPAN_HISTORICAL_ENTITIES["political_groups"],
         }
-    
-    def recognize_person_entities(self, text: str) -> List[Dict[str, Any]]:
-        """专门识别历史人物"""
-        return self.recognize_historical_entities(text, ['person'])
-    
-    def recognize_location_entities(self, text: str) -> List[Dict[str, Any]]:
-        """专门识别地理位置"""
-        return self.recognize_historical_entities(text, ['location'])
-    
-    def recognize_event_entities(self, text: str) -> List[Dict[str, Any]]:
-        """专门识别历史事件"""
-        return self.recognize_historical_entities(text, ['event'])
-    
-    def recognize_organization_entities(self, text: str) -> List[Dict[str, Any]]:
-        """专门识别机构组织"""
-        return self.recognize_historical_entities(text, ['organization'])
-    
-    def _call_llm(self, prompt: str) -> str:
-        """调用LLM API"""
-        try:
-            full_prompt = f"你是一位专精于日本历史的名实体识别专家。\n\n{prompt}"
-            result = self.llm_client._call_llm(full_prompt, temperature=0.1)
-            return result.get('content', '')
-        except Exception as e:
-            raise RuntimeError(f"LLM API调用失败: {str(e)}")
-    
-    def _recognize_mock_entities(self, text: str,
-                                categories: Optional[List[str]]) -> List[Dict[str, Any]]:
-        """模拟实体识别"""
-        mock_entities = [
-            {
-                'entity': '明治維新',
-                'category': 'event',
-                'start_pos': 10,
-                'end_pos': 14,
-                'confidence': 0.95,
-                'notes': '日本近代重要历史事件'
-            },
-            {
-                'entity': '福沢諭吉',
-                'category': 'person',
-                'start_pos': 50,
-                'end_pos': 55,
-                'confidence': 0.92,
-                'notes': '明治时期启蒙思想家'
-            },
-            {
-                'entity': '東京',
-                'category': 'location',
-                'start_pos': 80,
-                'end_pos': 82,
-                'confidence': 0.98,
-                'notes': '日本首都'
-            },
-            {
-                'entity': '幕府',
-                'category': 'organization',
-                'start_pos': 120,
-                'end_pos': 122,
-                'confidence': 0.94,
-                'notes': '德川幕府'
-            },
-            {
-                'entity': '国体論',
-                'category': 'concept',
-                'start_pos': 160,
-                'end_pos': 163,
-                'confidence': 0.88,
-                'notes': '日本政治思想核心概念'
-            },
-            {
-                'entity': '丸山真男',
-                'category': 'person',
-                'start_pos': 200,
-                'end_pos': 204,
-                'confidence': 0.96,
-                'notes': '战后政治思想史学家'
-            },
-            {
-                'entity': '昭和',
-                'category': 'date',
-                'start_pos': 240,
-                'end_pos': 242,
-                'confidence': 0.97,
-                'notes': '日本年号'
-            },
-            {
-                'entity': '文明開化',
-                'category': 'event',
-                'start_pos': 280,
-                'end_pos': 285,
-                'confidence': 0.91,
-                'notes': '明治时期社会变革运动'
-            },
-            {
-                'entity': '内務省',
-                'category': 'organization',
-                'start_pos': 320,
-                'end_pos': 323,
-                'confidence': 0.93,
-                'notes': '日本政府机构'
-            },
-            {
-                'entity': '『文明論概略』',
-                'category': 'work',
-                'start_pos': 360,
-                'end_pos': 366,
-                'confidence': 0.95,
-                'notes': '福沢諭吉著作'
-            }
-        ]
-        
-        if categories:
-            mock_entities = [e for e in mock_entities if e['category'] in categories]
-        
-        return mock_entities
-    
-    def _extract_mock_relationships(self, text: str,
-                                  entities: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-        """模拟关系提取"""
-        return [
-            {
-                'source': '福沢諭吉',
-                'target': '文明開化',
-                'relation': '推动',
-                'description': '福沢谕吉是文明开化运动的重要推动者'
-            },
-            {
-                'source': '明治維新',
-                'target': '幕府',
-                'relation': '推翻',
-                'description': '明治维新推翻了德川幕府的统治'
-            },
-            {
-                'source': '丸山真男',
-                'target': '国体論',
-                'relation': '批判',
-                'description': '丸山真男对国体论进行了深刻的学术批判'
-            },
-            {
-                'source': '福沢諭吉',
-                'target': '『文明論概略』',
-                'relation': '著作',
-                'description': '《文明论概略》是福沢谕吉的代表性著作'
-            }
-        ]
-    
-    def _parse_entities_from_text(self, text: str) -> List[Dict[str, Any]]:
-        """从文本中解析实体"""
-        entities = []
-        
-        current_category = 'unknown'
-        for line in text.split('\n'):
-            line = line.strip()
-            
-            if not line:
+        for category, candidates in joined_lexicon.items():
+            if category not in allowed and category != "organization":
                 continue
-            
-            if ':' in line:
-                parts = line.split(':', 1)
-                key = parts[0].strip().lower()
-                value = parts[1].strip()
-                
-                if 'person' in key or '人物' in key:
-                    current_category = 'person'
-                    entities.append({
-                        'entity': value,
-                        'category': current_category,
-                        'confidence': 0.8
-                    })
-                elif 'location' in key or '地点' in key:
-                    current_category = 'location'
-                    entities.append({
-                        'entity': value,
-                        'category': current_category,
-                        'confidence': 0.8
-                    })
-        
-        return entities[:10]
-    
-    def _export_as_markdown(self, entities: List[Dict[str, Any]]) -> str:
-        """导出为Markdown格式"""
-        lines = [
-            "# 命名实体识别结果",
-            "",
-            f"**识别时间**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"**实体总数**: {len(entities)}",
-            ""
+            if category == "organization" and "organization" not in allowed:
+                continue
+            for candidate in candidates:
+                start = 0
+                while True:
+                    pos = text.find(candidate, start)
+                    if pos == -1:
+                        break
+                    entities.append(
+                        {
+                            "entity": candidate,
+                            "category": category,
+                            "start_pos": pos,
+                            "end_pos": pos + len(candidate),
+                            "confidence": 0.8,
+                            "source": "lexicon",
+                        }
+                    )
+                    start = pos + 1
+        return entities
+
+    def _merge_entities(self, text: str, entities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        merged: Dict[tuple, Dict[str, Any]] = {}
+        for entity in entities:
+            normalized = self._normalize_entity(entity, text, entity.get("backend", entity.get("source", "script")))
+            key = (normalized["entity"], normalized["category"], normalized["start_pos"], normalized["end_pos"])
+            existing = merged.get(key)
+            if existing is None or normalized["confidence"] > existing["confidence"]:
+                merged[key] = normalized
+            elif existing is not None:
+                existing["needs_review"] = existing["needs_review"] or normalized["needs_review"]
+        ordered = list(merged.values())
+        ordered.sort(key=lambda item: (item.get("start_pos") or 10**9, item["entity"]))
+        return ordered
+
+    def recognize_historical_entities(
+        self,
+        text: str,
+        categories: Optional[List[str]] = None,
+        backend: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        cache_key = json.dumps({"text": text[:500], "categories": categories, "backend": backend}, ensure_ascii=False)
+        if cache_key in self.entity_cache:
+            return self.entity_cache[cache_key]
+
+        selected_backend = backend or self._default_backend()
+        config = TaskConfig(
+            task_type=TaskType.NER,
+            provider=self.api_provider,
+            model=self.local_model if selected_backend == "local_llm" else None,
+            backend=selected_backend,
+            fallback_backends=self._default_fallbacks(selected_backend),
+            cache_enabled=True,
+            extra_params={"local_model": self.local_model} if self.local_model else {},
+        )
+        result = self.executor.execute("ner", config=config, text=text, categories=categories)
+        self.last_result_metadata = result.metadata
+
+        executor_entities = result.data.get("entities", []) if result.success and isinstance(result.data, dict) else []
+        rule_entities = self._rule_entities(text, categories)
+        if selected_backend == "script":
+            merged = self._merge_entities(text, rule_entities + executor_entities)
+        else:
+            merged = self._merge_entities(text, executor_entities + rule_entities)
+
+        self.recognized_entities.extend(merged)
+        self.entity_cache[cache_key] = merged
+        return merged
+
+    def recognize_historical_entities_package(
+        self,
+        text: str,
+        categories: Optional[List[str]] = None,
+        backend: Optional[str] = None,
+        source: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Run NER and return a workflow-ready extraction envelope."""
+        entities = self.recognize_historical_entities(text, categories=categories, backend=backend)
+        relationships = self.extract_entity_relationships(text, entities)
+        stats = self.get_entity_statistics(entities)
+        quality_flags = self._package_quality_flags(text, entities)
+        confidence = self._package_confidence(entities, quality_flags)
+        metadata = dict(self.last_result_metadata or {})
+        selected_backend = metadata.get("backend") or backend or self._default_backend()
+        provider = metadata.get("provider") or self.api_provider
+        model = metadata.get("model") or (self.local_model if selected_backend == "local_llm" else None)
+        return {
+            "type": "ner_extraction",
+            "source": dict(source or {}),
+            "text_length": len(text or ""),
+            "entities": entities,
+            "relationships": relationships,
+            "classified_entities": self.classify_entities(entities),
+            "statistics": stats,
+            "backend": selected_backend,
+            "provider": provider,
+            "model": model,
+            "confidence": confidence,
+            "needs_review": bool(quality_flags),
+            "quality_flags": quality_flags,
+            "capabilities": self.get_capabilities(),
+        }
+
+    def _package_quality_flags(self, text: str, entities: List[Dict[str, Any]]) -> List[str]:
+        flags: List[str] = []
+        if not text or not text.strip():
+            flags.append("empty_text")
+        if 0 < len(text.strip()) < 20:
+            flags.append("very_short_text")
+        if not entities:
+            flags.append("no_entities")
+        if any(float(entity.get("confidence", 0.0)) < 0.6 for entity in entities):
+            flags.append("low_confidence_entities")
+        if not self.last_result_metadata.get("backend"):
+            flags.append("missing_backend_metadata")
+        return flags
+
+    def _package_confidence(self, entities: List[Dict[str, Any]], quality_flags: List[str]) -> float:
+        if not entities:
+            return 0.2
+        confidence = sum(float(entity.get("confidence", 0.0)) for entity in entities) / len(entities)
+        confidence -= min(0.25, len(quality_flags) * 0.05)
+        return round(max(0.1, min(confidence, 0.95)), 2)
+
+    def classify_entities(self, entities: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+        classified: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for entity in entities:
+            classified[entity.get("category", "unknown")].append(entity)
+        return dict(classified)
+
+    def extract_entity_relationships(self, text: str, entities: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        relationships: List[Dict[str, str]] = []
+        if len(entities) < 2:
+            return relationships
+
+        sentences = [sentence.strip() for sentence in re.split(r"[。！？!?]\s*|\n+", text) if sentence.strip()]
+        for sentence in sentences:
+            present = [entity for entity in entities if entity["entity"] in sentence]
+            if len(present) < 2:
+                continue
+            relation = "co_occurs"
+            if "属于" in sentence or "属" in sentence:
+                relation = "belongs_to"
+            elif "对抗" in sentence or "反对" in sentence:
+                relation = "opposes"
+            elif "参与" in sentence or "参加" in sentence:
+                relation = "participated_in"
+            for index in range(len(present) - 1):
+                relationships.append(
+                    {
+                        "source": present[index]["entity"],
+                        "target": present[index + 1]["entity"],
+                        "relation": relation,
+                        "description": sentence[:120],
+                    }
+                )
+        return relationships
+
+    def batch_process_documents(
+        self,
+        documents: List[Dict[str, Any]],
+        categories: Optional[List[str]] = None,
+        backend: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        results: List[Dict[str, Any]] = []
+        for document in documents:
+            text = document.get("text", "")
+            metadata = document.get("metadata", {})
+            entities = self.recognize_historical_entities(text, categories=categories, backend=backend)
+            results.append(
+                {
+                    "metadata": metadata,
+                    "entities": entities,
+                    "classified_entities": self.classify_entities(entities),
+                    "relationships": self.extract_entity_relationships(text, entities),
+                    "entity_count": len(entities),
+                    "backend": self.last_result_metadata.get("backend"),
+                }
+            )
+        return results
+
+    def batch_process_documents_package(
+        self,
+        documents: List[Dict[str, Any]],
+        categories: Optional[List[str]] = None,
+        backend: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Process many documents and return a batch-level NER envelope."""
+        packages = []
+        for index, document in enumerate(documents):
+            source = dict(document.get("metadata", {}))
+            source.setdefault("index", index)
+            if document.get("id"):
+                source.setdefault("id", document["id"])
+            if document.get("title"):
+                source.setdefault("title", document["title"])
+            packages.append(
+                self.recognize_historical_entities_package(
+                    document.get("text", ""),
+                    categories=categories,
+                    backend=backend,
+                    source=source,
+                )
+            )
+        quality_flags = []
+        if not packages:
+            quality_flags.append("no_documents")
+        if any(package.get("needs_review") for package in packages):
+            quality_flags.append("document_review_needed")
+        entity_count = sum(len(package.get("entities", [])) for package in packages)
+        return {
+            "type": "ner_batch",
+            "documents_processed": len(packages),
+            "entity_count": entity_count,
+            "packages": packages,
+            "backend": packages[-1].get("backend") if packages else (backend or self._default_backend()),
+            "provider": packages[-1].get("provider") if packages else self.api_provider,
+            "model": packages[-1].get("model") if packages else self.local_model,
+            "confidence": round(
+                sum(package.get("confidence", 0.0) for package in packages) / len(packages),
+                2,
+            )
+            if packages
+            else 0.2,
+            "needs_review": bool(quality_flags),
+            "quality_flags": quality_flags,
+            "capabilities": self.get_capabilities(),
+        }
+
+    def get_entity_statistics(self, entities: List[Dict[str, Any]]) -> Dict[str, Any]:
+        total = len(entities)
+        category_counts = defaultdict(int)
+        confidence_sum = 0.0
+        for entity in entities:
+            category_counts[entity.get("category", "unknown")] += 1
+            confidence_sum += float(entity.get("confidence", 0.0))
+        return {
+            "total_entities": total,
+            "category_distribution": dict(category_counts),
+            "average_confidence": confidence_sum / total if total else 0.0,
+            "most_common_category": max(category_counts.items(), key=lambda item: item[1])[0] if category_counts else None,
+            "backend": self.last_result_metadata.get("backend"),
+        }
+
+    def filter_entities_by_confidence(
+        self,
+        entities: List[Dict[str, Any]],
+        threshold: float = 0.7,
+    ) -> List[Dict[str, Any]]:
+        return [entity for entity in entities if float(entity.get("confidence", 0.0)) >= threshold]
+
+    def search_entities(self, query: str, entities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        query_lower = query.lower()
+        return [
+            entity
+            for entity in entities
+            if query_lower in entity.get("entity", "").lower()
+            or query_lower in entity.get("notes", "").lower()
         ]
-        
-        classified = self.classify_entities(entities)
-        
-        for category, ents in classified.items():
-            lines.append(f"## {self.ENTITY_CATEGORIES.get(category, category)}")
-            lines.append("")
-            
-            for entity in ents:
-                lines.append(f"- **{entity['entity']}**")
-                if entity.get('notes'):
-                    lines.append(f"  - 说明：{entity['notes']}")
-                if entity.get('confidence'):
-                    lines.append(f"  - 置信度：{entity['confidence']:.2f}")
-            
-            lines.append("")
-        
-        return '\n'.join(lines)
+
+    def export_entities_for_obsidian(
+        self,
+        entities: List[Dict[str, Any]],
+        output_format: str = "json",
+    ) -> str:
+        if output_format == "markdown":
+            lines = ["# Entities", ""]
+            for entity in entities:
+                lines.append(
+                    f"- [[{entity.get('entity', '')}]] ({entity.get('category', 'unknown')}, confidence={entity.get('confidence', 0.0):.2f})"
+                )
+            return "\n".join(lines)
+        return json.dumps(entities, ensure_ascii=False, indent=2)
+
+    def create_entity_network(
+        self,
+        entities: List[Dict[str, Any]],
+        relationships: List[Dict[str, str]],
+    ) -> Dict[str, Any]:
+        nodes = [
+            {
+                "id": entity.get("entity"),
+                "label": entity.get("entity"),
+                "category": entity.get("category"),
+                "confidence": entity.get("confidence"),
+            }
+            for entity in entities
+        ]
+        edges = [
+            {
+                "source": relation.get("source"),
+                "target": relation.get("target"),
+                "relation": relation.get("relation"),
+                "label": relation.get("relation"),
+            }
+            for relation in relationships
+        ]
+        return {"nodes": nodes, "edges": edges, "stats": {"total_nodes": len(nodes), "total_edges": len(edges)}}
+
+    def recognize_person_entities(self, text: str) -> List[Dict[str, Any]]:
+        return self.recognize_historical_entities(text, ["person"])
+
+    def recognize_location_entities(self, text: str) -> List[Dict[str, Any]]:
+        return self.recognize_historical_entities(text, ["location"])
+
+    def recognize_event_entities(self, text: str) -> List[Dict[str, Any]]:
+        return self.recognize_historical_entities(text, ["event"])
+
+    def recognize_organization_entities(self, text: str) -> List[Dict[str, Any]]:
+        return self.recognize_historical_entities(text, ["organization"])
 
 
-def create_ner_processor(api_provider: str = "qwen",
-                        test_mode: bool = True) -> NERProcessor:
-    """
-    工厂函数：创建NER处理器实例
-    
-    Args:
-        api_provider: API提供商
-        test_mode: 是否使用测试模式
-        
-    Returns:
-        NERProcessor: 配置好的处理器实例
-    """
+def create_ner_processor(api_provider: str = "qwen", test_mode: bool = True) -> NERProcessor:
     return NERProcessor(api_provider=api_provider, test_mode=test_mode)
-
-
-from modules.llm_client import create_llm_client
