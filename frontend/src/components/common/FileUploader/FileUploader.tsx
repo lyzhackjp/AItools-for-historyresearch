@@ -1,92 +1,37 @@
-import React, { useCallback, useState } from 'react';
-import { Upload, message } from 'antd';
 import { InboxOutlined } from '@ant-design/icons';
-import type { UploadProps } from 'antd';
-import classNames from 'classnames';
-import { FileUploaderProps } from '../../types';
+import { Upload, type UploadProps } from 'antd';
 
-const { Dragger } = Upload;
+interface FileUploaderProps {
+  accept?: string;
+  multiple?: boolean;
+  onFilesSelected: (files: File[]) => void;
+}
 
-const FileUploader: React.FC<FileUploaderProps> = ({
-  accept,
-  maxSize,
-  multiple = false,
-  onUpload,
-  onError,
-  disabled = false,
-  className,
-}) => {
-  const [isDragging, setIsDragging] = useState(false);
-
-  const validateFiles = useCallback(
-    (files: File[]): File[] => {
-      const validFiles: File[] = [];
-      const maxSizeBytes = maxSize * 1024 * 1024;
-
-      for (const file of files) {
-        const fileExtension = '.' + file.name.split('.').pop()?.toLowerCase();
-        const isValidType = accept.some((type) =>
-          type.toLowerCase() === fileExtension
-        );
-
-        if (!isValidType) {
-          onError(`不支持的文件格式: ${file.name}`);
-          continue;
-        }
-
-        if (file.size > maxSizeBytes) {
-          onError(`文件大小超过限制: ${file.name} (最大 ${maxSize}MB)`);
-          continue;
-        }
-
-        validFiles.push(file);
-      }
-
-      return validFiles;
-    },
-    [accept, maxSize, onError]
-  );
-
-  const uploadProps: UploadProps = {
-    name: 'file',
-    multiple,
-    disabled,
-    accept: accept.join(','),
+function FileUploader({ accept, multiple = false, onFilesSelected }: FileUploaderProps) {
+  const props: UploadProps = {
+    accept,
     beforeUpload: (file) => {
-      const validFiles = validateFiles([file]);
-      if (validFiles.length > 0) {
-        onUpload(validFiles);
-      }
+      onFilesSelected([file]);
       return false;
     },
-    onDrop: (e) => {
-      setIsDragging(false);
-      const files = Array.from(e.dataTransfer.files);
-      const validFiles = validateFiles(files);
-      if (validFiles.length > 0) {
-        onUpload(validFiles);
+    multiple,
+    onChange: (info) => {
+      if (multiple) {
+        onFilesSelected(info.fileList.map((item) => item.originFileObj).filter(Boolean) as File[]);
       }
     },
-    onDragEnter: () => setIsDragging(true),
-    onDragLeave: () => setIsDragging(false),
-    showUploadList: false,
+    showUploadList: true,
   };
 
   return (
-    <div className={classNames('upload-dragger', className, { dragging: isDragging })}>
-      <Dragger {...uploadProps}>
-        <p className="ant-upload-drag-icon">
-          <InboxOutlined style={{ fontSize: 48, color: '#1890ff' }} />
-        </p>
-        <p className="ant-upload-text" style={{ fontSize: 16, margin: '16px 0' }}>
-          拖拽文件到此处，或<span style={{ color: '#1890ff' }}>点击选择</span>
-        </p>
-        <p className="ant-upload-hint" style={{ color: '#999' }}>
-          支持 {accept.join(', ')} 格式，最大 {maxSize}MB
-        </p>
-      </Dragger>
-    </div>
+    <Upload.Dragger {...props}>
+      <p className="ant-upload-drag-icon">
+        <InboxOutlined />
+      </p>
+      <p className="ant-upload-text">拖拽文件到此处，或点击选择</p>
+      <p className="ant-upload-hint">支持本地 OCR、远程大模型 OCR、DOCX 解析和批量处理场景。</p>
+    </Upload.Dragger>
   );
-};
+}
 
 export default FileUploader;

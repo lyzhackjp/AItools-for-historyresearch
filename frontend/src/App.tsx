@@ -1,55 +1,29 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { useState, useEffect } from 'react'
-import { Layout, theme } from 'antd'
-import MainLayout from './components/layout/MainLayout'
-import HomePage from './pages/Home'
-import PaperPolishPage from './pages/PaperPolish'
-import OcrProcessPage from './pages/OcrProcess'
-import EntityRecognitionPage from './pages/EntityRecognition'
-import NoteGeneratorPage from './pages/NoteGenerator'
-import ResearchAssistantPage from './pages/ResearchAssistant'
-import SettingsPage from './pages/Settings'
-import PromptEditorPage from './pages/PromptEditor'
-import { useApiStore } from './stores/useApiStore'
-import './index.css'
-
-const { Content } = Layout
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import MainLayout from './components/layout/MainLayout';
+import AgentSoloPage from './pages/AgentSolo';
+import HomePage from './pages/Home';
+import ManualWorkspacePage from './pages/ManualWorkspace';
+import SettingsPage from './pages/Settings';
+import TaskCenterPage from './pages/TaskCenter';
+import WorkflowPage from './pages/Workflow';
 
 function App() {
-  const [isLoading, setIsLoading] = useState(true)
-  const { loadFromStorage } = useApiStore()
-  const { token } = theme.useToken()
-
-  useEffect(() => {
-    loadFromStorage()
-    setIsLoading(false)
-  }, [loadFromStorage])
-
-  if (isLoading) {
-    return null
-  }
-
   return (
     <BrowserRouter>
-      <Layout style={{ minHeight: '100vh', background: token.colorBgLayout }}>
-        <MainLayout>
-          <Content style={{ padding: '24px', margin: 0, minHeight: 280 }}>
-            <Routes>
-              <Route path="/" element={<Navigate to="/home" replace />} />
-              <Route path="/home" element={<HomePage />} />
-              <Route path="/paper-polish" element={<PaperPolishPage />} />
-              <Route path="/ocr-process" element={<OcrProcessPage />} />
-              <Route path="/entity-recognition" element={<EntityRecognitionPage />} />
-              <Route path="/note-generator" element={<NoteGeneratorPage />} />
-              <Route path="/research-assistant" element={<ResearchAssistantPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-              <Route path="/prompt-editor" element={<PromptEditorPage />} />
-            </Routes>
-          </Content>
-        </MainLayout>
-      </Layout>
+      <MainLayout>
+        <Routes>
+          <Route path="/" element={<Navigate to="/home" replace />} />
+          <Route path="/home" element={<HomePage />} />
+          <Route path="/manual" element={<ManualWorkspacePage />} />
+          <Route path="/agent-solo" element={<AgentSoloPage />} />
+          <Route path="/workflow" element={<WorkflowPage />} />
+          <Route path="/tasks" element={<TaskCenterPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
+          <Route path="*" element={<Navigate to="/home" replace />} />
+        </Routes>
+      </MainLayout>
     </BrowserRouter>
-  )
+  );
 }
 
-export default App
+export default App;

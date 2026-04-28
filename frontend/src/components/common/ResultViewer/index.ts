@@ -1,1 +1,1 @@
-export { default as ResultViewer } from './ResultViewer';
+export { default } from './ResultViewer';

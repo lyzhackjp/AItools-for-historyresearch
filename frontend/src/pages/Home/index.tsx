@@ -1,131 +1,168 @@
-import React from 'react';
-import { Card, Row, Col, Statistic, Typography, Space, Button } from 'antd';
+import { Button, Card, Col, Progress, Row, Space, Statistic, Tag, Typography } from 'antd';
 import {
-  FileTextOutlined,
-  ScanOutlined,
-  BulbOutlined,
-  FormOutlined,
-  MessageOutlined,
-  RocketOutlined,
+  AppstoreOutlined,
+  BranchesOutlined,
+  DashboardOutlined,
+  RobotOutlined,
+  ThunderboltOutlined,
 } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
+import { useTaskStore } from '../../stores';
+import { useI18n } from '../../i18n';
 
-const { Title, Paragraph } = Typography;
-
-const HomePage: React.FC = () => {
+function HomePage() {
   const navigate = useNavigate();
-
-  const features = [
-    {
-      key: 'paper-polish',
-      title: '论文润色',
-      icon: <FileTextOutlined style={{ fontSize: 32, color: '#1890ff' }} />,
-      description: '智能润色学术论文，提升表达规范性',
-      path: '/paper-polish',
-    },
-    {
-      key: 'ocr-process',
-      title: 'OCR识别',
-      icon: <ScanOutlined style={{ fontSize: 32, color: '#52c41a' }} />,
-      description: '支持多种OCR引擎，识别日文史料',
-      path: '/ocr-process',
-    },
-    {
-      key: 'entity-recognition',
-      title: '实体识别',
-      icon: <BulbOutlined style={{ fontSize: 32, color: '#faad14' }} />,
-      description: '自动识别人名、地名、事件等历史实体',
-      path: '/entity-recognition',
-    },
-    {
-      key: 'note-generator',
-      title: '笔记生成',
-      icon: <FormOutlined style={{ fontSize: 32, color: '#722ed1' }} />,
-      description: '生成Obsidian格式的学术笔记',
-      path: '/note-generator',
-    },
-    {
-      key: 'research-assistant',
-      title: '研究助手',
-      icon: <MessageOutlined style={{ fontSize: 32, color: '#eb2f96' }} />,
-      description: 'AI辅助研究，智能问答与文献分析',
-      path: '/research-assistant',
-    },
-  ];
+  const { language, t } = useI18n();
+  const tasks = useTaskStore((state) => state.tasks);
+  const activeTasks = tasks.filter((task) => ['queued', 'running', 'waiting_review'].includes(task.state));
+  const completedTasks = tasks.filter((task) => task.state === 'completed');
+  const averageProgress =
+    activeTasks.length === 0
+      ? 0
+      : Math.round(activeTasks.reduce((sum, task) => sum + task.progress, 0) / activeTasks.length);
+  const modeSuffix = language === 'en-US' ? '' : language === 'ja-JP' ? '種' : '种';
+  const manualTags =
+    language === 'en-US'
+      ? ['OCR', 'NER', 'Citation criticism', 'Notes', 'Academic polish']
+      : language === 'ja-JP'
+        ? ['OCR', 'NER', '引用検証', 'ノート', '論文推敲']
+        : ['OCR', 'NER', '引用考证', '笔记', '写作润色'];
+  const nextSteps =
+    language === 'en-US'
+      ? [
+          'Route every long task through the task center.',
+          'Consume the backend task registry dynamically in manual mode.',
+          'Keep plan, authorization, observation, and review links visible in agent mode.',
+        ]
+      : language === 'ja-JP'
+        ? [
+            'すべての長時間タスクをタスクセンターで受けます。',
+            '手動モードで backend task registry を動的に利用します。',
+            'agent モードでは計画、承認、観察、レビューの流れを残します。',
+          ]
+        : [
+            '以任务中心承接所有长任务反馈。',
+            '手动模式动态消费后端 task registry。',
+            'agent 模式保留计划、授权、观察和复核链路。',
+          ];
 
   return (
-    <div className="fade-in">
-      <Card style={{ marginBottom: 24 }}>
-        <Space direction="vertical" size="large" style={{ width: '100%' }}>
-          <div>
-            <Title level={2}>
-              <RocketOutlined /> 欢迎使用历史研究AI工具
-            </Title>
-            <Paragraph style={{ fontSize: 16, color: '#666' }}>
-              专为日本史研究人员打造的AI工具箱，帮助您处理日文史料、润色学术论文、管理研究文献。
-            </Paragraph>
-          </div>
-
-          <Row gutter={16}>
-            <Col span={6}>
-              <Statistic title="支持功能" value={11} suffix="个" />
-            </Col>
-            <Col span={6}>
-              <Statistic title="OCR引擎" value={4} suffix="种" />
-            </Col>
-            <Col span={6}>
-              <Statistic title="LLM服务商" value={5} suffix="个" />
-            </Col>
-            <Col span={6}>
-              <Statistic title="导出格式" value={6} suffix="种" />
-            </Col>
-          </Row>
+    <div className="page-shell">
+      <div className="page-heading">
+        <div>
+          <div className="page-kicker">{t('home')}</div>
+          <Typography.Title level={2} style={{ margin: 0 }}>
+            {t('welcomeTitle')}
+          </Typography.Title>
+          <Typography.Paragraph className="muted" style={{ marginTop: 8, maxWidth: 820 }}>
+            {t('welcomeBody')}
+          </Typography.Paragraph>
+        </div>
+        <Space>
+          <Button icon={<DashboardOutlined />} onClick={() => navigate('/tasks')}>
+            {t('taskCenter')}
+          </Button>
+          <Button icon={<ThunderboltOutlined />} onClick={() => navigate('/manual')} type="primary">
+            {t('startManual')}
+          </Button>
         </Space>
-      </Card>
+      </div>
 
-      <Title level={3}>核心功能</Title>
+      <div className="status-strip">
+        <Space size={24} wrap>
+          <Statistic title={t('runningTasks')} value={activeTasks.length} />
+          <Statistic title={t('completedTasks')} value={completedTasks.length} />
+          <Statistic title={t('workModes')} value={2} suffix={modeSuffix} />
+        </Space>
+        <Space direction="vertical" style={{ minWidth: 220 }}>
+          <Typography.Text className="muted">{t('currentProgress')}</Typography.Text>
+          <Progress percent={averageProgress} size="small" />
+        </Space>
+      </div>
+
+      <div className="mode-grid">
+        <Card
+          actions={[
+            <Button key="manual" onClick={() => navigate('/manual')} type="primary">
+              {t('enterManual')}
+            </Button>,
+          ]}
+          title={
+            <Space>
+              <AppstoreOutlined />
+              {t('manual')}
+            </Space>
+          }
+        >
+          <Space direction="vertical" size={12}>
+            <Typography.Paragraph>
+              {t('manualBody')}
+            </Typography.Paragraph>
+            <Space wrap>
+              {manualTags.map((tag) => (
+                <Tag key={tag}>{tag}</Tag>
+              ))}
+            </Space>
+          </Space>
+        </Card>
+
+        <Card
+          actions={[
+            <Button key="agent" onClick={() => navigate('/agent-solo')} type="primary">
+              {t('enterAgent')}
+            </Button>,
+          ]}
+          title={
+            <Space>
+              <RobotOutlined />
+              {t('agentSolo')}
+            </Space>
+          }
+        >
+          <Space direction="vertical" size={12}>
+            <Typography.Paragraph>
+              {t('agentBody')}
+            </Typography.Paragraph>
+            <Space wrap>
+              <Tag color="blue">OpenClaw</Tag>
+              <Tag color="blue">Hermes</Tag>
+              <Tag color="blue">Codex skill</Tag>
+              <Tag color="blue">MCP</Tag>
+            </Space>
+          </Space>
+        </Card>
+      </div>
+
       <Row gutter={[16, 16]}>
-        {features.map((feature) => (
-          <Col span={8} key={feature.key}>
-            <Card
-              hoverable
-              className="result-card"
-              onClick={() => navigate(feature.path)}
-            >
-              <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                {feature.icon}
-                <Title level={4} style={{ margin: 0 }}>
-                  {feature.title}
-                </Title>
-                <Paragraph style={{ margin: 0, color: '#666' }}>
-                  {feature.description}
-                </Paragraph>
-                <Button type="link" style={{ padding: 0 }}>
-                  立即使用 →
-                </Button>
+        <Col xs={24} lg={12}>
+          <Card title={t('nextSteps')}>
+            <Space direction="vertical">
+              {nextSteps.map((step, index) => (
+                <Typography.Text key={step}>
+                  {index + 1}. {step}
+                </Typography.Text>
+              ))}
+            </Space>
+          </Card>
+        </Col>
+        <Col xs={24} lg={12}>
+          <Card
+            title={
+              <Space>
+                <BranchesOutlined />
+                {t('workflow')}
               </Space>
-            </Card>
-          </Col>
-        ))}
+            }
+          >
+            <Typography.Paragraph>
+              collect, organize, extract, examine, write, polish, format
+            </Typography.Paragraph>
+            <Button onClick={() => navigate('/workflow')}>{t('workflowOpen')}</Button>
+          </Card>
+        </Col>
       </Row>
-
-      <Card style={{ marginTop: 24 }}>
-        <Title level={4}>快速开始</Title>
-        <Paragraph>
-          1. 前往「系统设置」配置API密钥（至少配置一个服务商）
-        </Paragraph>
-        <Paragraph>
-          2. 选择需要使用的功能模块
-        </Paragraph>
-        <Paragraph>
-          3. 上传文件或输入文本，开始处理
-        </Paragraph>
-        <Button type="primary" size="large" onClick={() => navigate('/settings')}>
-          开始配置
-        </Button>
-      </Card>
     </div>
   );
-};
+}
 
 export default HomePage;

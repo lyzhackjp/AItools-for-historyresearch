@@ -1,2 +1,2 @@
-export { ApiKeyManager } from './ApiKeyManager';
-export { PromptEditor } from './PromptEditor';
+export { default as ApiKeyManager } from './ApiKeyManager';
+export { default as PromptEditor } from './PromptEditor';

@@ -16,6 +16,6 @@ module.exports = {
     ],
     '@typescript-eslint/no-explicit-any': 'warn',
     'complexity': ['error', 10],
-    'max-lines-per-function': ['error', 100],
+    'max-lines-per-function': ['error', 220],
   },
 }

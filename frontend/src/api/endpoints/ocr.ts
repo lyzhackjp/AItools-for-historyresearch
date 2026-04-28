@@ -1,43 +1,19 @@
 import apiClient from '../client';
-import { OCRResult } from '../types';
 
 export const ocrApi = {
-  extractText: async (
-    file: File,
-    engine: string,
-    options?: {
-      language?: string;
-      dpi?: number;
-      removeWatermark?: boolean;
-    }
-  ): Promise<OCRResult> => {
+  extractText: async (file: File, engine: string, options: Record<string, string | number | boolean> = {}) => {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('engine', engine);
+    Object.entries(options).forEach(([key, value]) => formData.append(key, String(value)));
 
-    if (options) {
-      if (options.language) formData.append('language', options.language);
-      if (options.dpi) formData.append('dpi', options.dpi.toString());
-      if (options.removeWatermark !== undefined) {
-        formData.append('remove_watermark', options.removeWatermark.toString());
-      }
-    }
-
-    const response = await apiClient.post('/api/ocr/extract', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
+    return apiClient.post<unknown, unknown>('/api/ocr/extract', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
     });
-
-    return response as OCRResult;
   },
 
   getModels: async () => {
-    return apiClient.get('/api/ocr/models');
-  },
-
-  getModelStatus: async (modelId: string) => {
-    return apiClient.get(`/api/ocr/models/${modelId}/status`);
+    return apiClient.get<unknown, unknown>('/api/ocr/models');
   },
 
   compareModels: async (file: File, models: string[]) => {
@@ -45,10 +21,8 @@ export const ocrApi = {
     formData.append('file', file);
     models.forEach((model) => formData.append('models', model));
 
-    return apiClient.post('/api/ocr/model/compare', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
+    return apiClient.post<unknown, unknown>('/api/ocr/model/compare', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
     });
   },
 };

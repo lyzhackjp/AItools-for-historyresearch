@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, send_from_directory
 import os
 import uuid
 from dataclasses import asdict, is_dataclass
@@ -25,6 +25,40 @@ from modules.unified_ocr_processor import UnifiedOCRProcessor, UnifiedOCRConfig,
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = config['default'].MAX_CONTENT_LENGTH
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+FRONTEND_DIST_DIR = PROJECT_ROOT / 'frontend' / 'dist'
+
+
+def _frontend_serving_enabled():
+    mode = os.getenv('HISTORY_RESEARCH_SERVE_FRONTEND', 'auto').strip().lower()
+    if mode in {'0', 'false', 'no', 'off'}:
+        return False
+    return (FRONTEND_DIST_DIR / 'index.html').exists()
+
+
+def _cors_origins():
+    raw = os.getenv(
+        'HISTORY_RESEARCH_CORS_ORIGINS',
+        'http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173',
+    )
+    return {item.strip() for item in raw.split(',') if item.strip()}
+
+
+@app.after_request
+def add_local_cors_headers(response):
+    """Allow local Vite development clients while production uses same-origin UI."""
+
+    origins = _cors_origins()
+    origin = request.headers.get('Origin')
+    if '*' in origins:
+        response.headers['Access-Control-Allow-Origin'] = '*'
+    elif origin in origins:
+        response.headers['Access-Control-Allow-Origin'] = origin
+
+    response.headers['Vary'] = 'Origin'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
+    return response
 
 class LazyService:
     def __init__(self, factory, name="", description=""):
@@ -192,10 +226,8 @@ def _run_reusable_pdf_to_ner_pipeline(temp_pdf_path, options):
     return pipeline.run()
 
 
-@app.route('/')
-def index():
-    """系统信息接口"""
-    return jsonify({
+def _system_info_payload():
+    return {
         'name': 'History Research AI Tools',
         'version': '1.1.0',
         'description': '日本史研究辅助工具后端系统',
@@ -238,7 +270,23 @@ def index():
                 'execute': 'POST /api/tasks/execute - 统一任务执行入口'
             }
         }
-    })
+    }
+
+
+@app.route('/')
+def index():
+    """Serve the integrated UI when available, otherwise return system info."""
+
+    if _frontend_serving_enabled():
+        return send_from_directory(FRONTEND_DIST_DIR, 'index.html')
+    return jsonify(_system_info_payload())
+
+
+@app.route('/api/system/info', methods=['GET'])
+def system_info():
+    """系统信息接口"""
+
+    return jsonify(_system_info_payload())
 
 
 @app.route('/api/system/status', methods=['GET'])
@@ -1569,5 +1617,22 @@ def workflow_stages_info():
     })
 
 
+@app.route('/<path:path>', methods=['GET'])
+def serve_frontend_asset(path):
+    """Serve React assets and SPA routes for the packaged desktop-like UI."""
+
+    if path.startswith('api/'):
+        return jsonify({'error': '接口不存在'}), 404
+
+    if not _frontend_serving_enabled():
+        return jsonify({'error': '资源不存在'}), 404
+
+    asset_path = FRONTEND_DIST_DIR / path
+    if asset_path.is_file():
+        return send_from_directory(FRONTEND_DIST_DIR, path)
+    return send_from_directory(FRONTEND_DIST_DIR, 'index.html')
+
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    debug = _parse_bool(os.getenv('FLASK_DEBUG'), False)
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', '5000')), debug=debug)

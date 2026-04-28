@@ -1,1 +1,1 @@
-export { default as PromptEditor } from './PromptEditor';
+export { default } from './PromptEditor';

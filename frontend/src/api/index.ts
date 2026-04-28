@@ -1,6 +1,7 @@
-export { default as apiClient } from './client';
+export { baseURL, default as apiClient } from './client';
 export { docApi } from './endpoints/doc';
-export { ocrApi } from './endpoints/ocr';
 export { nerApi } from './endpoints/ner';
-export { researchApi } from './endpoints/research';
+export { ocrApi } from './endpoints/ocr';
 export { promptApi } from './endpoints/prompt';
+export { researchApi } from './endpoints/research';
+export { taskApi } from './endpoints/tasks';

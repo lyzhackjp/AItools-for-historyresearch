@@ -54,6 +54,8 @@ env/
 .venv/
 .venv*/
 *_venv/
+.runtime/
+dist-windows/
 TraeAI-*/
 
 # ===========================================

@@ -1509,3 +1509,30 @@
 - 292 tests OK, skipped=13。
 - `python scripts/check_github_upload_safety.py`
 - Result: clean。
+
+### 61. 前端模块目录与自由编排接合优化
+
+报告:
+
+- `log/feature_development/2026-04-28_前端模块目录与自由编排接合优化.md`
+
+产出:
+
+- `frontend/src/data/moduleCatalog.ts`
+- `frontend/src/pages/ManualWorkspace/index.tsx`
+- `frontend/src/pages/ManualWorkspace/WorkflowBuilder.tsx`
+- `frontend/src/pages/AgentSolo/index.tsx`
+- `frontend/src/pages/AgentSolo/SkillConfigurator.tsx`
+- `frontend/src/types/models.ts`
+
+关键结果:
+
+- 前端模块目录覆盖 TaskManager 任务、七阶段 workflow、package-only 模块三类能力。
+- 手动挡新增 Dify 风格的自由工作流编排，可配置节点、输入输出绑定、backend/provider、review gate，并生成 blueprint JSON。
+- agent solo 模式新增 workspace skill 配置器，可限制模块范围、backend 与外部检索/下载/写入/付费 API 权限，并生成 `SKILL.md` 草案。
+
+验证:
+
+- `npm run lint`
+- `npm run test -- --run`
+- `npm run build`

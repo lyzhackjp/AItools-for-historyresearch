@@ -1,96 +1,64 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
-import { ApiKeyConfig, UserPreferences } from '../types';
+import type { ApiKeyConfig } from '../types';
 
 interface ApiStore {
-  apiKeys: Record<string, ApiKeyConfig>;
+  providers: ApiKeyConfig[];
   activeProvider: string;
-  providers: Array<{
-    id: string;
-    name: string;
-    recommended: boolean;
-  }>;
-
-  setApiKey: (provider: string, key: string) => void;
-  removeApiKey: (provider: string) => void;
-  switchProvider: (provider: string) => void;
-  getActiveKey: () => string | null;
-  hasKey: (provider: string) => boolean;
+  setActiveProvider: (provider: string) => void;
+  markConfigured: (provider: string, displayName: string) => void;
   loadFromStorage: () => void;
-  saveToStorage: () => void;
+  getActiveKey: () => string | undefined;
 }
 
-export const useApiStore = create<ApiStore>()(
-  persist(
-    (set, get) => ({
-      apiKeys: {},
-      activeProvider: 'qwen',
-      providers: [
-        { id: 'qwen', name: '通义千问', recommended: true },
-        { id: 'openai', name: 'OpenAI', recommended: false },
-        { id: 'zhipu', name: '智谱AI', recommended: false },
-        { id: 'minimax', name: 'MiniMax', recommended: false },
-      ],
+const STORAGE_KEY = 'historyresearch-api-status';
 
-      setApiKey: (provider, key) =>
-        set((state) => ({
-          apiKeys: {
-            ...state.apiKeys,
-            [provider]: {
-              key,
-              createdAt: Date.now(),
-            },
-          },
-        })),
+const defaultProviders: ApiKeyConfig[] = [
+  { provider: 'qwen', displayName: '通义千问', configured: false },
+  { provider: 'openai', displayName: 'OpenAI', configured: false },
+  { provider: 'ollama', displayName: 'Ollama 本地模型', configured: true },
+  { provider: 'minimax', displayName: 'MiniMax', configured: false },
+];
 
-      removeApiKey: (provider) =>
-        set((state) => {
-          const newKeys = { ...state.apiKeys };
-          delete newKeys[provider];
-          return { apiKeys: newKeys };
-        }),
+export const useApiStore = create<ApiStore>((set, get) => ({
+  providers: defaultProviders,
+  activeProvider: 'ollama',
 
-      switchProvider: (provider) => set({ activeProvider: provider }),
+  setActiveProvider: (provider) => {
+    set({ activeProvider: provider });
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ providers: get().providers, activeProvider: provider }));
+  },
 
-      getActiveKey: () => {
-        const state = get();
-        const keyConfig = state.apiKeys[state.activeProvider];
-        return keyConfig ? keyConfig.key : null;
-      },
+  markConfigured: (provider, displayName) => {
+    set((state) => {
+      const providers = state.providers.some((item) => item.provider === provider)
+        ? state.providers.map((item) =>
+            item.provider === provider
+              ? { ...item, configured: true, displayName, updatedAt: Date.now() }
+              : item,
+          )
+        : [...state.providers, { provider, displayName, configured: true, updatedAt: Date.now() }];
 
-      hasKey: (provider) => {
-        const state = get();
-        return provider in state.apiKeys;
-      },
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ providers, activeProvider: state.activeProvider }));
+      return { providers };
+    });
+  },
 
-      loadFromStorage: () => {
-        const stored = localStorage.getItem('api-config');
-        if (stored) {
-          try {
-            const data = JSON.parse(stored);
-            set({
-              apiKeys: data.apiKeys || {},
-              activeProvider: data.activeProvider || 'qwen',
-            });
-          } catch (error) {
-            console.error('Failed to load API config from storage:', error);
-          }
-        }
-      },
-
-      saveToStorage: () => {
-        const state = get();
-        localStorage.setItem(
-          'api-config',
-          JSON.stringify({
-            apiKeys: state.apiKeys,
-            activeProvider: state.activeProvider,
-          })
-        );
-      },
-    }),
-    {
-      name: 'api-config',
+  loadFromStorage: () => {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      return;
     }
-  )
-);
+
+    try {
+      const parsed = JSON.parse(raw) as Pick<ApiStore, 'providers' | 'activeProvider'>;
+      set({
+        providers: parsed.providers ?? defaultProviders,
+        activeProvider: parsed.activeProvider ?? 'ollama',
+      });
+    } catch {
+      set({ providers: defaultProviders, activeProvider: 'ollama' });
+    }
+  },
+
+  getActiveKey: () => undefined,
+}));

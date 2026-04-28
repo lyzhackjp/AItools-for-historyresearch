@@ -1,1 +1,1 @@
-export { default as ApiKeyManager } from './ApiKeyManager';
+export { default } from './ApiKeyManager';

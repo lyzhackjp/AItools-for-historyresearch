@@ -1,61 +1,36 @@
-import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
+import axios, { AxiosError, type AxiosInstance, type InternalAxiosRequestConfig } from 'axios';
 import { message } from 'antd';
-import { useApiStore } from '../stores/useApiStore';
 
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+const sameOriginBaseURL = typeof window === 'undefined' ? 'http://localhost:5000' : window.location.origin;
+const baseURL = import.meta.env.DEV
+  ? import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000'
+  : sameOriginBaseURL;
 
 const apiClient: AxiosInstance = axios.create({
-  baseURL: BASE_URL,
-  timeout: 60000,
-  headers: {
-    'Content-Type': 'application/json',
-  },
+  baseURL,
+  timeout: 90_000,
 });
 
-apiClient.interceptors.request.use(
-  (config: InternalAxiosRequestConfig) => {
-    const apiKey = useApiStore.getState().getActiveKey();
-    if (apiKey && config.headers) {
-      config.headers['X-API-Key'] = apiKey;
-    }
-    return config;
-  },
-  (error: AxiosError) => {
-    return Promise.reject(error);
-  }
-);
+apiClient.interceptors.request.use((config: InternalAxiosRequestConfig) => {
+  return config;
+});
 
 apiClient.interceptors.response.use(
   (response) => response.data,
-  (error: AxiosError<any>) => {
-    if (error.response) {
-      const status = error.response.status;
-      const errorMessage = error.response.data?.error || error.message;
-
-      switch (status) {
-        case 401:
-          message.error('API密钥无效，请检查配置');
-          break;
-        case 403:
-          message.error('没有权限访问此资源');
-          break;
-        case 404:
-          message.error('请求的资源不存在');
-          break;
-        case 500:
-          message.error('服务器内部错误，请稍后重试');
-          break;
-        default:
-          message.error(errorMessage);
-      }
-    } else if (error.request) {
-      message.error('网络连接失败，请检查网络');
+  (error: AxiosError<{ error?: string; message?: string }>) => {
+    const errorMessage = error.response?.data?.error ?? error.response?.data?.message ?? error.message;
+    if (error.response?.status === 404) {
+      message.error('请求的接口或资源不存在。');
+    } else if (error.response?.status && error.response.status >= 500) {
+      message.error('后端服务返回错误，请查看任务中心或服务日志。');
+    } else if (!error.response) {
+      message.warning('暂时无法连接后端，前端会保留本地任务状态。');
     } else {
-      message.error(error.message);
+      message.error(errorMessage);
     }
-
     return Promise.reject(error);
-  }
+  },
 );
 
+export { baseURL };
 export default apiClient;
