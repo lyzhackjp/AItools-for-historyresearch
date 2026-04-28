@@ -73,3 +73,11 @@ Then open `http://127.0.0.1:5000/`.
 ## Privacy
 
 This workspace is local-first by default. Logs, reports, README files, screenshots, and examples must not contain real secrets, cookies, recoverable private source text, or sensitive paths. AI outputs should keep `confidence`, `needs_review`, `quality_flags`, and artifact paths for human review.
+
+## Disclaimer
+
+- This project is a research and learning aid for historical research, digital humanities, and scholarly writing. It does not directly provide, host, resell, or proxy any large language model service, NDL Lab / NDL OCR-Lite / NDL Koten OCR-Lite model, NDL search/download service, or third-party data content.
+- References to LLM providers, local models, NDL Lab models, NDL search/download tools, or similar capabilities mean that this workspace can connect to or orchestrate them through adapters. Users must obtain, install, configure, and use those services, models, datasets, and source providers under their own licenses, terms of use, account rules, rate limits, and copyright obligations.
+- NDL search and download helpers are intended only to help organize search, logging, and download workflows where the user already has lawful access and the relevant institution or content provider permits such use. They must not be used to bypass access controls, perform prohibited bulk scraping, redistribute protected materials, or violate the terms of NDL or other platforms.
+- LLM, OCR, NER, citation verification, source criticism, and writing-assistance outputs may contain errors, omissions, misrecognitions, or hallucinations. This project does not replace scholarly judgment, primary-source verification, copyright review, ethics review, legal assessment, or formal publication checks.
+- Users are responsible for API costs, account security, rights clearance, citation practice, privacy protection, external-service upload risks, and the academic integrity of final research outputs. This public repository and installer exclude `secrets/`, private sources, logs, caches, and user outputs by default; do not upload unauthorized archives, full texts, or sensitive credentials to remote services.
