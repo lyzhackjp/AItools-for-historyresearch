@@ -16,6 +16,20 @@ def is_likely_digital_ndl_pid(value: Optional[str]) -> bool:
 
 
 def select_preferred_source_match(matches: Sequence[NDLSearchMatch]) -> Optional[NDLSearchMatch]:
+    top_match = next((match for match in matches if match.pdf_url), None)
+    if top_match is not None:
+        return top_match
+    top_match = next(
+        (
+            match
+            for match in matches
+            if is_likely_digital_ndl_pid(match.ndl_id)
+            and (match.metadata or {}).get("search_route") != "ndlsearch_html_fulltext"
+        ),
+        None,
+    )
+    if top_match is not None:
+        return top_match
     top_match = next((match for match in matches if is_likely_digital_ndl_pid(match.ndl_id)), None)
     if top_match is not None:
         return top_match

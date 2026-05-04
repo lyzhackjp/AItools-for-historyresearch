@@ -5,7 +5,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
-from types import MethodType
+from types import MethodType, SimpleNamespace
 import importlib.util
 from unittest.mock import patch
 
@@ -24,6 +24,7 @@ from modules.historical_citation.docx_parser import (
     build_footnote_contexts,
     parse_docx_document,
 )
+from modules.historical_citation.pdf_paper_parser import parse_pdf_paper
 from modules.historical_citation.cross_validation import (
     classify_fulltext_page_check,
     normalized_text_similarity,
@@ -33,12 +34,20 @@ from modules.historical_citation.cross_validation import (
 from modules.historical_citation.download_index import find_cached_range_pdf as find_cached_range_pdf_from_index
 from modules.historical_citation.download_index import refresh_download_range_index
 from modules.historical_citation.evidence_cues import load_evidence_cue_groups
-from modules.historical_citation.footnote_parser import extract_quotes, parse_footnote_text, pick_translation_text
+from modules.historical_citation.footnote_parser import (
+    extract_quotes,
+    extract_volume_terms,
+    parse_footnote_text,
+    pick_translation_text,
+)
 from modules.historical_citation.llm_review import (
+    DEFAULT_OLLAMA_REVIEW_TIMEOUT_SECONDS,
     OllamaChatClient,
     build_llm_review_prompt,
+    build_multi_context_review_prompt,
     evaluate_review_client,
     heuristic_review_alignment,
+    normalize_multi_context_review_payload,
     normalize_review_payload,
     parse_review_json_with_repair,
     review_alignment_with_llm,
@@ -54,6 +63,7 @@ from modules.historical_citation.ndl_search import (
     score_ndl_record,
     search_ndl_digital_fulltext,
     search_ndl_public_api,
+    title_query_variants,
 )
 from modules.historical_citation.ndl_fulltext_context import (
     NDLFulltextHit,
@@ -83,6 +93,15 @@ from modules.historical_citation.source_platforms import (
     is_plausible_source_match,
 )
 from modules.historical_citation.source_trials import source_trials_from_legacy
+from modules.historical_citation.source_graph import (
+    attach_source_graph_artifacts,
+    build_manual_search_recipe,
+    build_source_graph_node,
+    build_source_query_plan,
+    dedupe_result_dicts,
+)
+from modules.historical_citation.source_resolvers import resolve_source
+from modules.historical_citation.fullrun import finalize_partial_payload, partial_payload_is_complete
 from modules.historical_citation.models import CitationCandidate, NDLSearchMatch, ParsedFootnote, ParsedParagraph
 from modules.historical_citation.page_mapping import (
     build_scan_page_range,
@@ -387,6 +406,3781 @@ class TestHistoricalCitationVerifier(unittest.TestCase):
         self.assertEqual(footnote.year, "2001")
         self.assertEqual(footnote.page_numbers, [41])
 
+    def test_pdf_paper_parser_uses_ocr_fallback_when_text_layer_is_empty(self):
+        import fitz
+
+        tmpdir = Path(tempfile.mkdtemp())
+        pdf_path = tmpdir / "blank.pdf"
+        document = fitz.open()
+        document.new_page(width=595, height=842)
+        document.save(pdf_path)
+        document.close()
+
+        parsed = parse_pdf_paper(
+            str(pdf_path),
+            extract_quotes=extract_quotes,
+            parse_footnote=parse_footnote_text,
+            ocr_page_text_provider=lambda page_number: "正文说明①\n① 佐藤「史料」東京：出版社、2001年、1頁。",
+        )
+
+        self.assertEqual(parsed["document"]["input_format"], "pdf")
+        self.assertEqual(len(parsed["paragraphs"]), 1)
+        self.assertEqual(len(parsed["footnotes"]), 1)
+        self.assertIn("pdf_page_no_text_layer", parsed["quality_flags"])
+        self.assertIn("pdf_page_ocr_fallback_used", parsed["quality_flags"])
+        self.assertEqual(parsed["pdf_parse_debug"][0]["parser_mode"], "ocr_text_fallback")
+
+    def test_pdf_next_stage_rechecks_source_not_found_and_mismatch(self):
+        from scripts.refine_historical_citation_pdf_next_stage import select_recheck_items
+
+        selected = select_recheck_items(
+            [
+                {"candidate_id": "a", "verification_status": "source_found"},
+                {"candidate_id": "b", "verification_status": "source_mismatch"},
+                {"candidate_id": "c", "verification_status": "source_not_found"},
+            ]
+        )
+
+        self.assertEqual([item["candidate_id"] for _offset, item in selected], ["b", "c"])
+
+    def test_pdf_next_stage_filters_selection_by_candidate_and_footnote(self):
+        from scripts.refine_historical_citation_pdf_next_stage import (
+            apply_exact_selection,
+            normalize_selector_values,
+        )
+
+        selection = [
+            (0, {"candidate_id": "p1-fp1n1", "footnote_id": "p1n1"}),
+            (1, {"candidate_id": "p2-fp2n1", "footnote_id": "p2n1"}),
+            (2, {"candidate_id": "p2-fp2n8", "footnote_id": "p2n8"}),
+        ]
+
+        self.assertEqual(normalize_selector_values(["p2-fp2n1,p2-fp2n8", "p2-fp2n1"]), ["p2-fp2n1", "p2-fp2n8"])
+        by_candidate = apply_exact_selection(selection, candidate_ids=["p2-fp2n1"])
+        by_footnote = apply_exact_selection(selection, footnote_ids=["p2n8"])
+        by_both = apply_exact_selection(selection, candidate_ids=["p2-fp2n1"], footnote_ids=["p2n8"])
+
+        self.assertEqual([offset for offset, _item in by_candidate], [1])
+        self.assertEqual([offset for offset, _item in by_footnote], [2])
+        self.assertEqual(by_both, [])
+
+    def test_pdf_next_stage_dedupes_resume_results_by_offset(self):
+        from scripts.refine_historical_citation_pdf_next_stage import dedupe_by_offset, result_offsets
+
+        first = {"candidate_id": "old", "artifacts": {"refinement_offset": 2}}
+        second = {"candidate_id": "new", "artifacts": {"refinement_offset": 2}}
+        third = {"candidate_id": "tail", "artifacts": {"refinement_offset": 3}}
+
+        deduped = dedupe_by_offset([first, second, third])
+
+        self.assertEqual([item["candidate_id"] for item in deduped], ["new", "tail"])
+        self.assertEqual(result_offsets(deduped), {2, 3})
+
+    def test_pdf_next_stage_separates_rechecked_download_results(self):
+        from scripts.refine_historical_citation_pdf_next_stage import build_payload, split_rechecked_download_results
+
+        normal = {
+            "candidate_id": "normal",
+            "verification_status": "matched",
+            "notes": [],
+            "artifacts": {"refinement_offset": 1},
+        }
+        rechecked = {
+            "candidate_id": "rechecked",
+            "verification_status": "fulltext_only_partial_support",
+            "notes": ["download_after_source_recheck"],
+            "artifacts": {"refinement_offset": 2},
+        }
+
+        download_results, rechecked_download_results = split_rechecked_download_results([normal, rechecked], [])
+
+        self.assertEqual([item["candidate_id"] for item in download_results], ["normal"])
+        self.assertEqual([item["candidate_id"] for item in rechecked_download_results], ["rechecked"])
+
+        payload = build_payload(
+            args=SimpleNamespace(
+                label="sample",
+                restricted_download=False,
+                max_search_results=3,
+                page_window=4,
+                ocr_model="ndlocr_lite",
+                download_max_attempts=2,
+                download_timeout_seconds=900,
+                slow_event_threshold_seconds=240,
+                download_cache_dir="cache",
+                platform_names=["ndl"],
+                reparse_pdf=False,
+                download_start_index=0,
+                mismatch_start_index=0,
+                recheck_download_start_index=0,
+                max_recheck_downloads=None,
+                retry_download_timeouts=True,
+                no_force_ndl_fulltext=False,
+                skip_recheck_downloads=False,
+                prefer_ollama_review=True,
+                review_model="gemma4:e4b",
+                review_timeout_seconds=300,
+                no_resume=False,
+            ),
+            combined={"document": {}, "summary": {}},
+            download_selection_count=1,
+            mismatch_selection_count=1,
+            download_results=download_results,
+            rechecked_download_results=rechecked_download_results,
+            mismatch_results=[],
+            non_ndl_sources=[],
+            alias_audits=[],
+            timeout_events=[],
+            slow_events=[],
+            execution_runs=[{"download_timeout_seconds": 900, "review_model": "gemma4:e4b"}],
+        )
+
+        self.assertEqual(payload["summaries"]["download_ocr_alignment"]["total"], 1)
+        self.assertEqual(payload["summaries"]["rechecked_download_ocr_alignment"]["total"], 1)
+        self.assertEqual(len(payload["rechecked_download_ocr_alignment_results"]), 1)
+        self.assertEqual(payload["execution_runs"][0]["download_timeout_seconds"], 900)
+
+    def test_pdf_next_stage_records_slow_events_from_progress(self):
+        from scripts.refine_historical_citation_pdf_next_stage import build_slow_events_from_progress
+
+        progress_path = Path(tempfile.mkdtemp()) / "progress.jsonl"
+        events = [
+            {
+                "event": "candidate_started",
+                "timestamp": "2026-05-01T10:00:00",
+                "phase": "download_ocr_alignment",
+                "global_current": 3,
+                "global_total": 5,
+                "candidate_id": "p1-f1",
+                "footnote_id": "f1",
+            },
+            {
+                "event": "worker_stage_started",
+                "timestamp": "2026-05-01T10:01:00",
+                "phase": "download_ocr_alignment",
+                "global_current": 3,
+                "global_total": 5,
+                "candidate_id": "p1-f1",
+                "footnote_id": "f1",
+                "subphase": "snippet_context_expansion",
+            },
+            {
+                "event": "worker_stage_completed",
+                "timestamp": "2026-05-01T10:04:30",
+                "phase": "download_ocr_alignment",
+                "global_current": 3,
+                "global_total": 5,
+                "candidate_id": "p1-f1",
+                "footnote_id": "f1",
+                "subphase": "snippet_context_expansion",
+                "status": "contexts_found",
+                "metrics": {"context_count": 3},
+            },
+            {
+                "event": "worker_stage_started",
+                "timestamp": "2026-05-01T10:04:31",
+                "phase": "download_ocr_alignment",
+                "global_current": 3,
+                "global_total": 5,
+                "candidate_id": "p1-f1",
+                "footnote_id": "f1",
+                "subphase": "llm_context_review",
+            },
+            {
+                "event": "worker_stage_completed",
+                "timestamp": "2026-05-01T10:05:00",
+                "phase": "download_ocr_alignment",
+                "global_current": 3,
+                "global_total": 5,
+                "candidate_id": "p1-f1",
+                "footnote_id": "f1",
+                "subphase": "llm_context_review",
+                "status": "partial_support",
+                "metrics": {"model": "gemma4:e4b"},
+            },
+            {
+                "event": "candidate_completed",
+                "timestamp": "2026-05-01T10:05:01",
+                "phase": "download_ocr_alignment",
+                "global_current": 3,
+                "global_total": 5,
+                "candidate_id": "p1-f1",
+                "footnote_id": "f1",
+                "status": "fulltext_only_not_supported",
+                "metrics": {"match_count": 2},
+            },
+        ]
+        progress_path.write_text("\n".join(json.dumps(item) for item in events), encoding="utf-8")
+
+        slow_events = build_slow_events_from_progress(progress_path, threshold_seconds=240)
+
+        self.assertEqual(len(slow_events), 1)
+        self.assertEqual(slow_events[0]["candidate_id"], "p1-f1")
+        self.assertEqual(slow_events[0]["elapsed_seconds"], 301)
+        self.assertEqual(slow_events[0]["status"], "fulltext_only_not_supported")
+        self.assertEqual(slow_events[0]["last_subphase"], "llm_context_review")
+        self.assertEqual(slow_events[0]["longest_subphase"], "snippet_context_expansion")
+        self.assertEqual(slow_events[0]["longest_subphase_seconds"], 210)
+        self.assertEqual(slow_events[0]["subphase_durations"][0]["metrics"]["context_count"], 3)
+
+    def test_pdf_next_stage_slow_events_fallback_to_phase_total(self):
+        from scripts.refine_historical_citation_pdf_next_stage import build_slow_events_from_progress
+
+        progress_path = Path(tempfile.mkdtemp()) / "progress.jsonl"
+        events = [
+            {
+                "event": "candidate_started",
+                "timestamp": "2026-05-01T10:00:00",
+                "phase": "source_mismatch_recheck",
+                "global_current": 22,
+                "global_total": 43,
+                "candidate_id": "p4-fp4n5",
+                "footnote_id": "p4n5",
+            },
+            {
+                "event": "candidate_completed",
+                "timestamp": "2026-05-01T10:04:00",
+                "phase": "source_mismatch_recheck",
+                "global_current": 22,
+                "global_total": 43,
+                "candidate_id": "p4-fp4n5",
+                "footnote_id": "p4n5",
+                "status": "source_found",
+                "metrics": {"match_count": 15},
+            },
+        ]
+        progress_path.write_text("\n".join(json.dumps(item) for item in events), encoding="utf-8")
+
+        slow_events = build_slow_events_from_progress(progress_path, threshold_seconds=120)
+
+        self.assertEqual(len(slow_events), 1)
+        self.assertEqual(slow_events[0]["last_subphase"], "source_mismatch_recheck_total")
+        self.assertEqual(slow_events[0]["longest_subphase"], "source_mismatch_recheck_total")
+        self.assertEqual(slow_events[0]["longest_subphase_seconds"], 240)
+
+    def test_pdf_next_stage_bypasses_download_worker_when_dependency_missing(self):
+        from scripts import refine_historical_citation_pdf_next_stage as next_stage_script
+
+        candidate = CitationCandidate(
+            candidate_id="p2-f8",
+            paragraph_index=2,
+            paragraph_text="Yamagata opinion document.",
+            translation_text="Yamagata opinion document.",
+            footnote_id="p2n8",
+            footnote=ParsedFootnote(id="p2n8", text="山縣有朋意見書, p. 306.", title="山縣有朋意見書"),
+        )
+
+        class FakeVerifier:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def restricted_download_dependency_status(self):
+                return {
+                    "available": False,
+                    "reason": "download_dependency_missing",
+                    "dependency": "selenium",
+                }
+
+        def fake_run_download_ocr_alignment(**kwargs):
+            return {
+                "candidate_id": kwargs["candidate"].candidate_id,
+                "artifacts": {},
+                "verification_status": "download_failed",
+            }
+
+        with (
+            patch.object(next_stage_script, "HistoricalCitationVerifier", FakeVerifier),
+            patch.object(next_stage_script, "run_download_ocr_alignment", side_effect=fake_run_download_ocr_alignment),
+            patch.object(next_stage_script.subprocess, "Popen") as popen,
+        ):
+            result, timeout_event = next_stage_script.run_download_ocr_alignment_with_timeout(
+                candidate=candidate,
+                source_item={"ndl_matches": []},
+                output_dir=Path(tempfile.mkdtemp()),
+                restricted_download=True,
+                page_window=4,
+                ocr_model="ndlocr_lite",
+                download_max_attempts=1,
+                timeout_seconds=600,
+                allow_external_ndl_fallback=True,
+                prefer_ollama_review=False,
+            )
+
+        popen.assert_not_called()
+        self.assertIsNone(timeout_event)
+        self.assertEqual(result["artifacts"]["download_worker_bypassed"]["reason"], "download_dependency_missing")
+        self.assertEqual(result["artifacts"]["download_worker_bypassed"]["dependency"], "selenium")
+
+    def test_pdf_next_stage_keeps_worker_timeout_for_formal_review_when_dependency_missing(self):
+        from scripts import refine_historical_citation_pdf_next_stage as next_stage_script
+
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n5",
+            paragraph_index=4,
+            paragraph_text="Paris peace conference.",
+            translation_text="Paris peace conference.",
+            footnote_id="p4n5",
+            footnote=ParsedFootnote(id="p4n5", text="日本外交文書。", title="日本外交文書"),
+        )
+
+        class FakeVerifier:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def restricted_download_dependency_status(self):
+                return {
+                    "available": False,
+                    "reason": "download_dependency_missing",
+                    "dependency": "selenium",
+                }
+
+        class FakeProcess:
+            returncode = 0
+            pid = 12345
+
+            def __init__(self, args, **_kwargs):
+                self.args = args
+
+            def communicate(self, timeout=None):
+                payload_path = Path(self.args[-2])
+                result_path = Path(self.args[-1])
+                payload = json.loads(payload_path.read_text(encoding="utf-8"))
+                result = payload["candidate"]
+                result["verification_status"] = "download_failed"
+                result.setdefault("artifacts", {})["worker_timeout_guard_used"] = True
+                result_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+                return b"", b""
+
+        with (
+            patch.object(next_stage_script, "HistoricalCitationVerifier", FakeVerifier),
+            patch.object(next_stage_script.subprocess, "Popen", side_effect=FakeProcess) as popen,
+            patch.dict(os.environ, {"HISTORICAL_CITATION_REVIEW_TIMEOUT_SECONDS": "300"}, clear=False),
+        ):
+            result, timeout_event = next_stage_script.run_download_ocr_alignment_with_timeout(
+                candidate=candidate,
+                source_item={"ndl_matches": []},
+                output_dir=Path(tempfile.mkdtemp()),
+                restricted_download=True,
+                page_window=4,
+                ocr_model="ndlocr_lite",
+                download_max_attempts=1,
+                timeout_seconds=180,
+                allow_external_ndl_fallback=True,
+                prefer_ollama_review=True,
+            )
+
+        popen.assert_called_once()
+        self.assertIsNone(timeout_event)
+        self.assertTrue(result["artifacts"]["worker_timeout_guard_used"])
+        self.assertEqual(
+            result["artifacts"]["download_dependency_precheck"]["reason"],
+            "download_dependency_missing",
+        )
+        self.assertEqual(
+            result["artifacts"]["download_worker_timeout_policy"]["effective_timeout_seconds"],
+            600,
+        )
+        self.assertEqual(
+            result["artifacts"]["download_worker_timeout_policy"]["review_timeout_seconds"],
+            300,
+        )
+        self.assertEqual(
+            result["artifacts"]["download_worker_timeout_policy"]["worker_overhead_seconds"],
+            300,
+        )
+        self.assertNotIn("download_worker_bypassed", result["artifacts"])
+
+    def test_pdf_next_stage_uses_volume_series_fulltext_before_rechecked_download(self):
+        from scripts import refine_historical_citation_pdf_next_stage as next_stage_script
+
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n5",
+            paragraph_index=4,
+            paragraph_text="Japan explained its position on the South Sea Islands.",
+            translation_text="Japan explained its position on the South Sea Islands.",
+            footnote_id="p4n5",
+            footnote=ParsedFootnote(
+                id="p4n5",
+                text="日本外交文書 巴里講和会議経過概要, pp.58-59.",
+                title="日本外交文書",
+                page_numbers=[58, 59],
+                source_type="volume_series",
+            ),
+            notes=["download_after_source_recheck"],
+            artifacts={
+                "source_resolver_plan": {"source_type": "volume_series"},
+                "source_graph": {"source_type": "volume_series"},
+            },
+        )
+
+        class FakeVerifier:
+            enrich_called = False
+
+            def _mark_fulltext_only_hit_if_possible(self, marked_candidate, **kwargs):
+                self.fulltext_kwargs = dict(kwargs)
+                marked_candidate.verification_status = "fulltext_only_direct_support"
+                marked_candidate.support_status = "fulltext_only_direct_support"
+                marked_candidate.artifacts["fulltext_context_candidates"] = [
+                    {"context_id": "ctx1", "cleaned_context": "帝国主張説明 南洋群島"}
+                ]
+                return True
+
+            def _enrich_with_source_excerpt(self, *_args, **_kwargs):
+                self.enrich_called = True
+                raise AssertionError("download/OCR should not run after body-level fulltext review")
+
+        verifier = FakeVerifier()
+        result = next_stage_script.run_download_ocr_alignment(
+            verifier=verifier,
+            candidate=candidate,
+            source_item={
+                "ndl_matches": [
+                    {
+                        "title": "日本外交文書",
+                        "url": "https://dl.ndl.go.jp/pid/11923430",
+                        "ndl_id": "11923430",
+                        "platform": "ndl",
+                        "score": 1.0,
+                    }
+                ]
+            },
+            output_dir=Path(tempfile.mkdtemp()),
+            restricted_download=True,
+            page_window=4,
+            ocr_model="ndlocr_lite",
+            download_max_attempts=1,
+        )
+
+        self.assertFalse(verifier.enrich_called)
+        self.assertEqual(result["verification_status"], "fulltext_only_direct_support")
+        self.assertIn("volume_series_fulltext_review_before_download", result["notes"])
+        self.assertEqual(verifier.fulltext_kwargs["max_context_candidates"], 5)
+        self.assertEqual(verifier.fulltext_kwargs["max_hints_to_expand"], 3)
+        self.assertEqual(verifier.fulltext_kwargs["max_expand_rounds"], 1)
+        self.assertEqual(
+            result["artifacts"]["volume_series_fulltext_review_before_download"]["reason"],
+            "target_pid_fulltext_context_available_before_restricted_download",
+        )
+
+    def test_pdf_next_stage_worker_progress_reports_fulltext_subphases(self):
+        from scripts import refine_historical_citation_pdf_next_stage as next_stage_script
+
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n5",
+            paragraph_index=4,
+            paragraph_text="Japan explained its position.",
+            translation_text="Japan explained its position.",
+            footnote_id="p4n5",
+            footnote=ParsedFootnote(
+                id="p4n5",
+                text="日本外交文書 巴里講和会議経過概要, pp.58-59.",
+                title="日本外交文書",
+                page_numbers=[58, 59],
+                source_type="volume_series",
+            ),
+            artifacts={
+                "source_resolver_plan": {"source_type": "volume_series"},
+                "source_graph": {"source_type": "volume_series"},
+            },
+        )
+
+        class FakeVerifier:
+            def _mark_fulltext_only_hit_if_possible(self, marked_candidate, **_kwargs):
+                callback = getattr(self, "_progress_event_callback", None)
+                if callable(callback):
+                    callback(
+                        event="worker_stage_started",
+                        subphase="snippet_context_expansion",
+                        metrics={"hint_count": 1},
+                    )
+                marked_candidate.verification_status = "fulltext_only_partial_support"
+                marked_candidate.support_status = "fulltext_only_partial_support"
+                marked_candidate.artifacts["fulltext_context_candidates"] = [
+                    {"context_id": "ctx1", "cleaned_context": "牧野男 委任統治"}
+                ]
+                marked_candidate.artifacts["ndl_fulltext_probe"] = {"status": "direct_hit"}
+                if callable(callback):
+                    callback(
+                        event="worker_stage_completed",
+                        subphase="snippet_context_expansion",
+                        status="contexts_found",
+                        metrics={"context_count": 1},
+                    )
+                return True
+
+        stream = io.StringIO()
+        reporter = ProgressReporter(enabled=True, interval_seconds=0, stream=stream)
+        reporter.update(
+            phase="download_ocr_alignment",
+            current=1,
+            total=1,
+            candidate_id=candidate.candidate_id,
+            footnote_id=candidate.footnote_id,
+        )
+        try:
+            result = next_stage_script.run_download_ocr_alignment(
+                verifier=FakeVerifier(),
+                candidate=candidate,
+                source_item={
+                    "ndl_matches": [
+                        {
+                            "title": "日本外交文書",
+                            "url": "https://dl.ndl.go.jp/pid/11923430",
+                            "ndl_id": "11923430",
+                            "platform": "ndl",
+                            "score": 1.0,
+                        }
+                    ]
+                },
+                output_dir=Path(tempfile.mkdtemp()),
+                restricted_download=True,
+                page_window=4,
+                ocr_model="ndlocr_lite",
+                download_max_attempts=1,
+                progress_reporter=reporter,
+            )
+        finally:
+            reporter.close()
+
+        events = [json.loads(line) for line in stream.getvalue().splitlines() if line.strip()]
+        subphase_events = [(event["event"], event.get("subphase")) for event in events]
+        self.assertEqual(result["verification_status"], "fulltext_only_partial_support")
+        self.assertIn(("worker_stage_started", "source_graph_attach"), subphase_events)
+        self.assertIn(("worker_stage_completed", "source_graph_attach"), subphase_events)
+        self.assertIn(("worker_stage_started", "volume_series_fulltext_review"), subphase_events)
+        self.assertIn(("worker_stage_completed", "volume_series_fulltext_review"), subphase_events)
+        self.assertIn(("worker_stage_started", "snippet_context_expansion"), subphase_events)
+        self.assertIn(("worker_stage_completed", "snippet_context_expansion"), subphase_events)
+        fulltext_done = [
+            event
+            for event in events
+            if event["event"] == "worker_stage_completed"
+            and event.get("subphase") == "volume_series_fulltext_review"
+        ][0]
+        self.assertEqual(fulltext_done["metrics"]["context_count"], 1)
+        self.assertEqual(fulltext_done["metrics"]["target_probe_status"], "direct_hit")
+
+    def test_pdf_next_stage_stops_volume_series_lead_before_initial_download(self):
+        from scripts import refine_historical_citation_pdf_next_stage as next_stage_script
+
+        candidate = CitationCandidate(
+            candidate_id="p6-fp6n6",
+            paragraph_index=6,
+            paragraph_text="Washington conference claim.",
+            translation_text="Washington conference claim.",
+            footnote_id="p6n6",
+            footnote=ParsedFootnote(
+                id="p6n6",
+                text="日本外交文書, pp.170-171.",
+                title="日本外交文書",
+                page_numbers=[170, 171],
+                source_type="volume_series",
+            ),
+            artifacts={
+                "source_resolver_plan": {"source_type": "volume_series"},
+                "source_graph": {"source_type": "volume_series"},
+            },
+        )
+
+        class FakeVerifier:
+            enrich_called = False
+
+            def _mark_fulltext_only_hit_if_possible(self, marked_candidate, **kwargs):
+                marked_candidate.verification_status = "fulltext_lead_only"
+                marked_candidate.support_status = "fulltext_lead_only"
+                return True
+
+            def _enrich_with_source_excerpt(self, *_args, **_kwargs):
+                self.enrich_called = True
+                raise AssertionError("download/OCR should not run after volume-series lead stop")
+
+        verifier = FakeVerifier()
+        result = next_stage_script.run_download_ocr_alignment(
+            verifier=verifier,
+            candidate=candidate,
+            source_item={
+                "ndl_matches": [
+                    {
+                        "title": "日本外交文書",
+                        "url": "https://dl.ndl.go.jp/pid/11927523",
+                        "ndl_id": "11927523",
+                        "platform": "ndl",
+                        "score": 1.0,
+                    }
+                ]
+            },
+            output_dir=Path(tempfile.mkdtemp()),
+            restricted_download=True,
+            page_window=4,
+            ocr_model="ndlocr_lite",
+            download_max_attempts=1,
+        )
+
+        self.assertFalse(verifier.enrich_called)
+        self.assertEqual(result["verification_status"], "fulltext_lead_only")
+        self.assertIn("volume_series_fulltext_lead_before_download_stopped", result["notes"])
+        self.assertEqual(
+            result["artifacts"]["volume_series_fulltext_review_before_download"]["phase"],
+            "download_ocr_alignment",
+        )
+
+    def test_ndl_adapter_can_force_fulltext_even_when_metadata_has_download_hint(self):
+        footnote = ParsedFootnote(id="1", text="テスト史料、12頁。", title="テスト史料")
+        adapter = NDLSourcePlatformAdapter(lambda: None, allow_external_fallback=False)
+        adapter._search_public_api_cached = lambda _footnote, *, max_results: [  # type: ignore[method-assign]
+            {
+                "title": "テスト史料",
+                "url": "https://dl.ndl.go.jp/pid/111",
+                "ndl_id": "111",
+                "metadata": {},
+            }
+        ]
+        calls = []
+        adapter._search_via_ndlsearch_fulltext = lambda _footnote, *, max_results, claim_text="": calls.append(max_results) or [  # type: ignore[method-assign]
+            {
+                "title": "テスト史料",
+                "url": "https://dl.ndl.go.jp/pid/222",
+                "ndl_id": "222",
+                "metadata": {
+                    "search_route": "ndl_digital_fulltext_api",
+                    "fulltext_hints": [{"snippet": "テスト"}],
+                },
+            }
+        ]
+
+        with patch.dict(os.environ, {"HISTORICAL_CITATION_FORCE_NDL_FULLTEXT": "1"}, clear=False):
+            matches = adapter.search(footnote, max_results=3)
+
+        self.assertEqual(calls, [3])
+        self.assertTrue(any(match.metadata.get("fulltext_hints") for match in matches))
+
+    def test_ndl_adapter_injects_resolver_known_pid_candidates_before_public_results(self):
+        cases = [
+            (
+                "gaiko_volume_series",
+                ParsedFootnote(
+                    id="gaiko1",
+                    text="外务省编：《日本外交文书》第32卷，第216～221页。",
+                    title="日本外交文書",
+                    page_numbers=[216, 217, 218, 219, 220, 221],
+                ),
+                "3448049",
+                "3448126",
+            ),
+            (
+                "diary_date_volume",
+                ParsedFootnote(
+                    id="diary1",
+                    text="『原敬日記』1900年5月12日条，第84頁。",
+                    title="原敬日記",
+                    page_numbers=[84],
+                ),
+                "2982137",
+                "2982135",
+            ),
+            (
+                "contained_known_document",
+                ParsedFootnote(
+                    id="contained1",
+                    text="山縣有朋：《山縣有朋意見書》，第12頁。",
+                    title="山縣有朋意見書",
+                    author="山縣有朋",
+                    page_numbers=[12],
+                ),
+                "9999999",
+                "3025431",
+            ),
+        ]
+
+        for label, footnote, public_pid, expected_first_pid in cases:
+            with self.subTest(label=label):
+                adapter = NDLSourcePlatformAdapter(lambda: None, allow_external_fallback=False)
+
+                def fake_public_search(_footnote, *, max_results, pid=public_pid, title=footnote.title):
+                    return [
+                        {
+                            "title": title,
+                            "url": f"https://dl.ndl.go.jp/pid/{pid}",
+                            "ndl_id": pid,
+                            "metadata": {"search_route": "ndl_public_api"},
+                        }
+                    ]
+
+                adapter._search_public_api_cached = fake_public_search  # type: ignore[method-assign]
+
+                with patch.dict(os.environ, {"HISTORICAL_CITATION_SKIP_NDL_FULLTEXT": "1"}, clear=False):
+                    matches = adapter.search(footnote, max_results=5)
+
+                self.assertEqual(matches[0].ndl_id, expected_first_pid)
+                self.assertEqual(matches[0].metadata["search_route"], "resolver_config_known_pid")
+                self.assertTrue(matches[0].metadata["known_pid_candidate"])
+                self.assertIn(public_pid, [match.ndl_id for match in matches])
+
+    def test_diary_resolver_removes_publication_year_from_diary_dates(self):
+        footnote = ParsedFootnote(
+            id="diary_pub_year",
+            text="原奎一郎编：《原敬日记》第2卷，东京：福村出版1981年版，第325页。",
+            title="原敬日記",
+            publisher="福村出版",
+            publication_place="东京",
+            year="1981",
+            page_numbers=[325],
+        )
+
+        plan = resolve_source(footnote, claim_text="美国确是极有活力的国家。")
+
+        self.assertEqual(plan.resolver, "DiaryDateResolver")
+        self.assertEqual(plan.dates, [])
+        self.assertIn("publication_year_removed_from_diary_dates", plan.warnings)
+        self.assertIn("date_missing_for_diary_resolver", plan.warnings)
+        self.assertIn("2982135", plan.known_pid_candidates)
+        self.assertNotIn("1981年", plan.target_pid_queries)
+
+    def test_diary_bibliographic_terms_are_not_specific_fulltext_evidence(self):
+        verifier = HistoricalCitationVerifier()
+        footnote = ParsedFootnote(
+            id="diary_pub_year",
+            text="原奎一郎编：《原敬日记》第2卷，东京：福村出版1981年版，第325页。",
+            title="原敬日記",
+            year="1981",
+            page_numbers=[325],
+        )
+        plan = resolve_source(footnote, claim_text="美国确是极有活力的国家。")
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n1",
+            paragraph_index=4,
+            paragraph_text="美国确是极有活力的国家。",
+            translation_text="美国确是极有活力的国家。",
+            footnote_id="p4n1",
+            footnote=footnote,
+            artifacts={"source_resolver_plan": plan.to_dict()},
+        )
+        hint = {
+            "query": "原敬日記 第二巻 1981年",
+            "snippet": "第二卷政界進",
+            "expanded_context": "記第二卷政界進出",
+            "pdf_page": 216,
+            "pid": "2982135",
+            "book_id": "2982135",
+        }
+
+        self.assertFalse(verifier._hint_is_specific_fulltext_evidence(candidate, hint))
+        self.assertNotIn("1981年", verifier._fulltext_specific_terms(candidate))
+        self.assertNotIn("第2巻", verifier._fulltext_specific_terms(candidate))
+
+    def test_source_graph_uses_paragraph_event_year_for_diary_context(self):
+        footnote = ParsedFootnote(
+            id="diary_context_year",
+            text="原奎一郎编：《原敬日记》第2卷，东京：福村出版1981年版，第325页。",
+            title="原敬日記",
+            year="1981",
+            page_numbers=[325],
+        )
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n1",
+            paragraph_index=4,
+            paragraph_text=(
+                "1918年原敬组阁。1908年内阁辞职后，原敬赴欧美考察，并在美国停留一个月，"
+                "认为：美国确是极有活力的国家。此后1914年又讨论对美政策。"
+            ),
+            translation_text="美国确是极有活力的国家。",
+            footnote_id="diary_context_year",
+            footnote=footnote,
+        )
+
+        attach_source_graph_artifacts(candidate)
+
+        resolved = candidate.artifacts["source_resolver_plan"]
+        self.assertEqual(resolved["resolver"], "DiaryDateResolver")
+        self.assertIn("1908年", resolved["dates"])
+        self.assertNotIn("1981年", resolved["dates"])
+        self.assertNotIn("1914年", resolved["dates"])
+        self.assertEqual(candidate.artifacts["source_query_context_scope"], "translation_plus_paragraph_for_diary")
+
+    def test_ndl_adapter_uses_claim_text_to_order_configured_volume_pids(self):
+        footnote = ParsedFootnote(
+            id="gaiko1",
+            text="外务省编：《日本外交文书》第32卷，第216～221页。",
+            title="日本外交文書",
+            page_numbers=[216, 217, 218, 219, 220, 221],
+        )
+        adapter = NDLSourcePlatformAdapter(lambda: None, allow_external_fallback=False)
+        adapter._search_public_api_cached = lambda _footnote, *, max_results: [  # type: ignore[method-assign]
+            {
+                "title": "日本外交文書",
+                "url": "https://dl.ndl.go.jp/pid/3448049",
+                "ndl_id": "3448049",
+                "metadata": {"search_route": "ndl_public_api"},
+            }
+        ]
+
+        with patch.dict(os.environ, {"HISTORICAL_CITATION_SKIP_NDL_FULLTEXT": "1"}, clear=False):
+            matches = adapter.search(
+                footnote,
+                max_results=5,
+                claim_text="约翰·海伊提出在华门户开放和机会均等原则，日本政府随后作出回答。",
+            )
+
+        self.assertEqual(matches[0].ndl_id, "3448128")
+        self.assertEqual(matches[0].metadata["search_route"], "resolver_config_known_pid")
+        self.assertEqual(matches[0].metadata["configured_pid_rank"], 1)
+
+    def test_title_query_variants_cover_compound_imperial_constitution_title(self):
+        variants = title_query_variants("帝国憲法義解・皇室典範義解")
+
+        self.assertIn("帝国憲法義解 皇室典範義解", variants)
+        self.assertIn("帝国憲法義解", variants)
+        self.assertIn("皇室典範義解", variants)
+        self.assertIn("帝國憲法義解 皇室典範義解", variants)
+
+    def test_pdf_next_stage_refreshes_host_title_and_volume_hints(self):
+        from scripts.refine_historical_citation_pdf_next_stage import footnote_from_dict
+
+        religion = footnote_from_dict(
+            {
+                "id": "p2n3",
+                "text": "［日］田中頼庸：《神祇官を復し教導寮等設置につき建白》，《日本近代思想大系 5：宗教と国家》，第 40 页。",
+                "title": "神祇官を復し教導寮等設置につき建白",
+            }
+        )
+        diplomacy = footnote_from_dict(
+            {
+                "id": "p2n1",
+                "text": "外务省编：《日本外交文书》（外務省編：『日本外交文書』）第３２卷，东京：外务省１９５５年版，第２１６～２２１页。",
+                "title": "日本外交文書",
+            }
+        )
+        imperial = footnote_from_dict(
+            {
+                "id": "p3n1",
+                "text": "［日］伊藤博文：《 帝国憲法義解 · 皇室典範義解》，丸善 1935 年，第 52 页。",
+                "title": "帝国憲法義解 · 皇室典範義解",
+            }
+        )
+
+        self.assertEqual(religion.host_title, "日本近代思想大系 5：宗教と国家")
+        self.assertEqual(religion.contained_title, "神祇官を復し教導寮等設置につき建白")
+        self.assertIn("第32巻", diplomacy.ndl_keyword)
+        self.assertIn("明治32年", diplomacy.ndl_keyword)
+        self.assertEqual(imperial.publisher, "丸善")
+        self.assertEqual(imperial.year, "1935")
+
+    def test_pdf_next_stage_claim_fulltext_recheck_uses_volume_and_claim_terms(self):
+        from scripts.refine_historical_citation_pdf_next_stage import (
+            augment_candidate_matches_with_claim_fulltext,
+            build_claim_fulltext_global_queries,
+        )
+
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="论文句子。",
+            translation_text="约翰·海伊提出在华门户开放、机会均等原则。",
+            footnote_id="1",
+            footnote=ParsedFootnote(
+                id="1",
+                text="外务省编：《日本外交文书》第32卷，第51-52页。",
+                title="日本外交文書",
+                ndl_keyword="日本外交文書 第32卷 第32巻 第三十二巻 明治32年",
+            ),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="日本外交文書",
+                    url="https://dl.ndl.go.jp/pid/3448049",
+                    ndl_id="3448049",
+                    metadata={"search_route": "ndl_digital_fulltext_api"},
+                )
+            ],
+        )
+
+        queries = build_claim_fulltext_global_queries(verifier, candidate, max_queries=6)
+        self.assertIn("日本外交文書 第32巻 門戶開放", queries)
+        self.assertIn("門戶開放", queries)
+
+        seen_queries = []
+
+        def fake_search(keyword, *, max_results):
+            seen_queries.append(keyword)
+            if keyword == "日本外交文書 第32巻 門戶開放":
+                return [
+                    {
+                        "title": "日本外交文書",
+                        "url": "https://dl.ndl.go.jp/pid/3448128",
+                        "ndl_id": "3448128",
+                        "metadata": {
+                            "search_route": "ndl_digital_fulltext_api",
+                            "fulltext_hints": [
+                                {
+                                    "query": keyword,
+                                    "snippet": "及門戶開放ニ關スル件。",
+                                    "pdf_page": 32,
+                                    "pid": "3448128",
+                                }
+                            ],
+                        },
+                    }
+                ]
+            return []
+
+        added = augment_candidate_matches_with_claim_fulltext(
+            verifier,
+            candidate,
+            max_results=3,
+            search_fulltext=fake_search,
+        )
+
+        self.assertEqual(added, 1)
+        self.assertIn("日本外交文書 第32巻 門戶開放", seen_queries)
+        self.assertEqual(candidate.ndl_matches[-1].ndl_id, "3448128")
+        self.assertTrue(candidate.ndl_matches[-1].metadata["claim_fulltext_global_recheck"])
+
+    def test_gaiko_claim_fulltext_recheck_reaches_person_and_reply_queries(self):
+        from scripts.refine_historical_citation_pdf_next_stage import (
+            augment_candidate_matches_with_claim_fulltext,
+            build_claim_fulltext_global_queries,
+        )
+
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="论文句子。",
+            translation_text="约翰·海伊向各国提出在华门户开放、机会均等原则，得到了日本的赞同。",
+            footnote_id="1",
+            footnote=ParsedFootnote(
+                id="1",
+                text="外务省编：《日本外交文書》第32卷，第51-52页。",
+                title="日本外交文書",
+                ndl_keyword="日本外交文書 第32巻 明治32年",
+            ),
+        )
+        attach_source_graph_artifacts(candidate)
+
+        queries = build_claim_fulltext_global_queries(verifier, candidate, max_queries=16)
+        self.assertIn("日本外交文書 第32巻 ジョン・ヘイ", queries)
+        self.assertIn("日本外交文書 第32巻 帝國政府回答", queries)
+
+        seen_queries = []
+
+        def fake_search(keyword, *, max_results):
+            seen_queries.append(keyword)
+            if keyword == "日本外交文書 第32巻 ジョン・ヘイ":
+                return [
+                    {
+                        "title": "日本外交文書",
+                        "url": "https://dl.ndl.go.jp/pid/3448128",
+                        "ndl_id": "3448128",
+                        "metadata": {
+                            "search_route": "ndl_digital_fulltext_api",
+                            "fulltext_hints": [
+                                {
+                                    "query": keyword,
+                                    "snippet": "ヘイ國務卿ノ提議。",
+                                    "pdf_page": 32,
+                                    "pid": "3448128",
+                                }
+                            ],
+                        },
+                    }
+                ]
+            return []
+
+        added = augment_candidate_matches_with_claim_fulltext(
+            verifier,
+            candidate,
+            max_results=3,
+            search_fulltext=fake_search,
+        )
+
+        self.assertEqual(added, 1)
+        self.assertIn("日本外交文書 第32巻 ジョン・ヘイ", seen_queries)
+
+    def test_gaiko_claim_fulltext_recheck_translates_katsura_taft_harriman_terms(self):
+        from scripts.refine_historical_citation_pdf_next_stage import build_claim_fulltext_global_queries
+
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p2-fp2n3",
+            paragraph_index=2,
+            paragraph_text="论文句子。",
+            translation_text="桂太郎与美国陆军部长塔夫脱达成桂塔夫脱备忘录，随后哈里曼提出共同管理南满铁路。",
+            footnote_id="p2n3",
+            footnote=ParsedFootnote(
+                id="p2n3",
+                text="外务省编：《日本外交文書》第38卷第1册，东京：外务省1958年版，第450～452页。",
+                title="日本外交文書",
+                ndl_keyword="日本外交文書 第38卷 第38巻 第三十八巻 明治38年 第1册 第1巻 明治1年",
+            ),
+        )
+        attach_source_graph_artifacts(candidate)
+
+        queries = build_claim_fulltext_global_queries(verifier, candidate, max_queries=20)
+        joined = "\n".join(queries)
+
+        self.assertIn("日本外交文書 第38巻 タフト", joined)
+        self.assertIn("日本外交文書 第38巻 ハリマン", joined)
+        self.assertIn("日本外交文書 第38巻 南満洲鉄道", joined)
+        self.assertNotIn("日本外交文書 第1巻", joined)
+
+    def test_claim_fulltext_recheck_translates_shingu_taima_terms(self):
+        verifier = HistoricalCitationVerifier()
+        footnote = parse_footnote_text(
+            "p4n5",
+            "［日］《奈良県における大麻問題》，《日本近代思想大系 5：宗教と国家》，第 184 页。",
+        )
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n5",
+            paragraph_index=4,
+            paragraph_text="论文句子。",
+            translation_text="土真宗信徒不设神棚，不接受伊势神宫大麻。",
+            footnote_id="p4n5",
+            footnote=footnote,
+        )
+
+        queries = verifier._claim_fulltext_queries(candidate)
+        joined = "\n".join(queries)
+
+        self.assertIn("神棚ヲ不設", joined)
+        self.assertIn("伊勢皇大神宮大麻", joined)
+        self.assertIn("神宮大麻等", joined)
+
+    def test_claim_fulltext_recheck_keeps_taima_rumor_terms_distinct(self):
+        verifier = HistoricalCitationVerifier()
+        footnote = parse_footnote_text(
+            "p4n9",
+            "［日］《静岡県で大麻につき流言》，《日本近代思想大系 5：宗教と国家》，第 190 页。",
+        )
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n9",
+            paragraph_index=4,
+            paragraph_text="论文句子。",
+            translation_text="大麻的神符会化为蝴蝶，其时该户将遭时疫，故要在化蝶前焚毁、冲走大麻。",
+            footnote_id="p4n9",
+            footnote=footnote,
+        )
+
+        queries = verifier._claim_fulltext_queries(candidate)
+        joined = "\n".join(queries)
+        core_terms = verifier._fulltext_core_action_terms(candidate)
+
+        self.assertIn("大麻ノ神ノ字ガ蝶", joined)
+        self.assertIn("大麻ヲ水火ニ投ズ", joined)
+        self.assertIn("時疫", joined)
+        self.assertNotIn("神棚ヲ不設", joined)
+        self.assertIn("蝶", core_terms)
+        self.assertNotIn("神棚", core_terms)
+
+    def test_claim_fulltext_recheck_translates_imperial_gikai_boundary_terms(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p3-fp3n2",
+            paragraph_index=3,
+            paragraph_text="论文句子。",
+            translation_text="此乃宪法所裁定之准则，亦为政权与教权相互界定之疆域。",
+            footnote_id="p3n2",
+            footnote=ParsedFootnote(
+                id="p3n2",
+                text="［日］伊藤博文：《帝国憲法義解 · 皇室典範義解》，第 53 页。",
+                title="帝国憲法義解 · 皇室典範義解",
+                page_numbers=[53],
+            ),
+        )
+
+        queries = verifier._claim_fulltext_queries(candidate)
+        joined = "\n".join(queries)
+        core_terms = verifier._fulltext_core_action_terms(candidate)
+
+        self.assertIn("政權ト教權", joined)
+        self.assertIn("相分界スルノ域", joined)
+        self.assertIn("憲法ノ裁定スル所", joined)
+        self.assertIn("相分界", core_terms)
+
+    def test_source_collection_toc_hit_is_not_body_evidence(self):
+        verifier = HistoricalCitationVerifier()
+        footnote = parse_footnote_text(
+            "p4n5",
+            "［日］《奈良県における大麻問題》，《日本近代思想大系 5：宗教と国家》，第 184 页。",
+        )
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n5",
+            paragraph_index=4,
+            paragraph_text="论文句子。",
+            translation_text="土真宗信徒不设神棚，不接受伊势神宫大麻。",
+            footnote_id="p4n5",
+            footnote=footnote,
+        )
+        attach_source_graph_artifacts(candidate)
+        hint = {
+            "pid": "13260166",
+            "pdf_page": 5,
+            "query": "日本近代思想大系 5：宗教と国家 奈良県における大麻問題",
+            "snippet": "神祇局設置案(一〇二)神官有志神祇官設置陳情書(一〇三)弥彦神社本地仏焼却事件(一一三)",
+            "expanded_context": "神祇局設置案(一〇二)神官有志神祇官設置陳情書(一〇三)弥彦神社本地仏焼却事件(一一三)苗木藩葬祭処分(一一九)",
+        }
+
+        category = verifier._fulltext_hint_lead_category(candidate, hint)
+        score, reasons = verifier._score_fulltext_context_candidate(candidate, hint, hint["expanded_context"])
+
+        self.assertIn(category, {"toc_or_index", "title_or_series_only"})
+        self.assertTrue(
+            "toc_or_index_penalty" in reasons or "title_or_series_only_penalty" in reasons
+        )
+        self.assertLess(score, 10.0)
+
+    def test_source_collection_contained_title_with_body_text_is_expandable(self):
+        verifier = HistoricalCitationVerifier()
+        footnote = parse_footnote_text(
+            "p4n3",
+            "［日］《皇大神宮大麻之儀ニ付再伺書》，《日本近代思想大系 5：宗教と国家》，第 188 页。",
+        )
+        footnote.host_title = "日本近代思想大系 5：宗教と国家"
+        footnote.contained_title = "皇大神宮大麻之儀ニ付再伺書"
+        footnote.source_relation = "contained_in_host"
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n3",
+            paragraph_index=4,
+            paragraph_text="论文句子。",
+            translation_text="纳金没有定额，被戏称为敬神税。",
+            footnote_id="p4n3",
+            footnote=footnote,
+        )
+        attach_source_graph_artifacts(candidate)
+        hint = {
+            "pid": "13260166",
+            "pdf_page": 102,
+            "query": "皇大神宮大麻之儀ニ付再伺書",
+            "snippet": (
+                "神璽以下諸入費ニ被下金右之趣ヲ御一定奉願上、毎年壱ケ度御初穂取集各府県エ罷出可申事。"
+                "○皇大神宮大麻之儀ニ付再伺書皇大神宮大麻之儀ニ付先般相伺候処、"
+                "書面御霊代拝受之儀ハ即今難聞届旨御指令之趣、承知仕候。"
+            ),
+        }
+
+        category = verifier._fulltext_hint_lead_category(candidate, hint)
+
+        self.assertEqual(category, "body_candidate")
+
+    def test_pdf_next_stage_refresh_replaces_stale_ndl_keyword(self):
+        from scripts.refine_historical_citation_pdf_next_stage import refresh_footnote_structure
+
+        footnote = ParsedFootnote(
+            id="p2n3",
+            text="外务省编：《日本外交文书》第38卷第1册，东京：外务省1958年版，第450～452页。",
+            title="日本外交文書",
+            ndl_keyword="日本外交文書 第38卷 第38巻 第三十八巻 明治38年 第1册 第1巻 明治1年",
+        )
+
+        refreshed = refresh_footnote_structure(footnote)
+
+        self.assertIn("第38巻", refreshed.ndl_keyword)
+        self.assertIn("第1册", refreshed.ndl_keyword)
+        self.assertNotIn("第1巻", refreshed.ndl_keyword)
+        self.assertNotIn("明治1年", refreshed.ndl_keyword)
+        self.assertIn("pdf_next_stage_ndl_keyword_refreshed", refreshed.notes)
+
+    def test_pdf_next_stage_repairs_running_header_orphaned_claim(self):
+        from scripts.refine_historical_citation_pdf_next_stage import repair_pdf_running_header_claim
+
+        candidate = CitationCandidate(
+            candidate_id="p5-fp5n1",
+            paragraph_index=5,
+            paragraph_text="宗教世界 文化2026 年第 2 期THE WORLD RELIGIOUS CULTURES神，以秬凶清洗其地”。1874 年，平将门灵位迁入神田神社本殿左侧新设的祠堂之中，降级为摄社。",
+            translation_text="宗教世界 文化2026 年第 2 期THE WORLD RELIGIOUS CULTURES神，以秬凶清洗其地”",
+            footnote_id="p5n1",
+            footnote=ParsedFootnote(id="p5n1", text="《神田神社の祭神問題》。", title="神田神社の祭神問題"),
+            artifacts={
+                "citation_unit": {
+                    "text": "宗教世界 文化2026 年第 2 期THE WORLD RELIGIOUS CULTURES神，以秬凶清洗其地”",
+                    "unit_type": "nearest_sentence",
+                    "confidence": 0.82,
+                    "claim_candidates": ["宗教世界 文化2026 年第 2 期THE WORLD RELIGIOUS CULTURES神，以秬凶清洗其地”"],
+                    "following_unfootnoted_context": "1874 年，平将门灵位迁入神田神社本殿左侧新设的祠堂之中，降级为摄社。此年，神田祭因平将门缺位而未能举行。",
+                }
+            },
+        )
+
+        repair_pdf_running_header_claim(candidate)
+
+        self.assertNotIn("THE WORLD RELIGIOUS CULTURES", candidate.translation_text)
+        self.assertIn("1874 年，平将门灵位迁入神田神社", candidate.translation_text)
+        self.assertIn("pdf_next_stage_running_header_claim_cleaned", candidate.notes)
+        self.assertIn("pdf_next_stage_orphaned_quote_claim_expanded", candidate.notes)
+
+    def test_source_graph_models_host_contained_collection_as_reusable_type(self):
+        footnote = parse_footnote_text(
+            "1",
+            "［日］田中頼庸：《神祇官を復し教導寮等設置につき建白》，《日本近代思想大系 5：宗教と国家》，第 40 页。",
+        )
+
+        node = build_source_graph_node(footnote)
+        plan = build_source_query_plan(footnote)
+        recipe = build_manual_search_recipe(footnote, current_status="page_mapping_unavailable")
+
+        self.assertEqual(node.source_type, "source_collection")
+        self.assertEqual(node.resolver, "NihonKindaiShisoTaikeiResolver")
+        self.assertIn("13260166", node.known_pid_candidates)
+        self.assertIn("日本近代思想大系 5：宗教と国家", plan.host_bucket)
+        self.assertIn("神祇官を復し教導寮等設置につき建白", plan.contained_bucket)
+        self.assertEqual(recipe["suggested_pid_scope"], "13260166")
+
+    def test_source_graph_models_downloadable_imperial_gikai_as_reusable_type(self):
+        footnote = parse_footnote_text(
+            "2",
+            "［日］伊藤博文：《帝国憲法義解・皇室典範義解》，丸善 1935 年，第 52 页。",
+        )
+
+        node = build_source_graph_node(footnote)
+        plan = build_source_query_plan(footnote)
+
+        self.assertEqual(node.source_type, "downloadable_monograph")
+        self.assertEqual(node.resolver, "DownloadableMonographResolver")
+        self.assertIn("1272168", node.known_pid_candidates)
+        self.assertIn("帝国憲法義解 皇室典範義解", plan.title_bucket)
+        self.assertIn("帝國憲法義解・皇室典範義解", plan.title_bucket)
+
+    def test_verifier_records_iiif_image_ocr_availability_for_imperial_gikai(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p3-fp3n1",
+            paragraph_index=3,
+            paragraph_text="信教自由。",
+            translation_text="伊藤博文说明信教自由包含内部信仰与外部礼拜。",
+            footnote_id="p3n1",
+            footnote=ParsedFootnote(
+                id="p3n1",
+                text="伊藤博文：《帝国憲法義解・皇室典範義解》，丸善1935年，第52页。",
+                title="帝国憲法義解・皇室典範義解",
+                page_numbers=[52],
+            ),
+            artifacts={"source_resolver_plan": {"source_type": "downloadable_monograph", "known_pid_candidates": ["1272168"]}},
+        )
+        match = NDLSearchMatch(
+            title="帝国憲法義解・皇室典範義解",
+            url="https://dl.ndl.go.jp/pid/1272168",
+            ndl_id="1272168",
+        )
+
+        class FakeResponse:
+            def __init__(self, status_code, payload=None, headers=None):
+                self.status_code = status_code
+                self._payload = payload or {}
+                self.headers = headers or {}
+
+            def json(self):
+                return self._payload
+
+        def fake_get(url, **_kwargs):
+            if "manifest.json" in url:
+                return FakeResponse(200, {"label": "帝国憲法義解・皇室典範義解", "sequences": [{"canvases": [{}, {}]}]})
+            if "fulltext-json" in url:
+                return FakeResponse(200, {"text": "信仰歸依"}, {"content-type": "application/json"})
+            return FakeResponse(404)
+
+        with patch("modules.historical_citation_verifier.requests.get", side_effect=fake_get):
+            self.assertTrue(verifier._probe_ndl_iiif_or_fulltext_json_availability(candidate, match))
+
+        self.assertEqual(candidate.artifacts["iiif_image_ocr_available"]["ndl_id"], "1272168")
+        self.assertEqual(candidate.artifacts["iiif_image_ocr_available"]["canvas_count"], 2)
+        self.assertEqual(candidate.artifacts["ndl_fulltext_json_available"]["access_route"], "ndl_lab_fulltext_json")
+        self.assertIn("iiif_image_ocr_available", candidate.notes)
+
+    def test_source_graph_models_gaiko_bunsho_volume_series_with_document_queries(self):
+        footnote = parse_footnote_text(
+            "3",
+            "外务省编：《日本外交文书》（外務省編：『日本外交文書』）第32卷，东京：外务省1955年版，第216～221页。",
+        )
+
+        node = build_source_graph_node(
+            footnote,
+            claim_text="约翰·海伊提出在华门户开放和机会均等原则，日本政府随后作出回答。",
+        )
+        plan = build_source_query_plan(
+            footnote,
+            claim_text="约翰·海伊提出在华门户开放和机会均等原则，日本政府随后作出回答。",
+        )
+
+        self.assertEqual(node.source_type, "volume_series")
+        self.assertEqual(node.resolver, "NihonGaikoBunshoResolver")
+        self.assertIn("第32巻", node.volume_terms)
+        self.assertIn("3448126", node.known_pid_candidates)
+        self.assertIn("ジョン・ヘイ", plan.person_bucket)
+        self.assertIn("支那ニ於ケル商業上機會均等及門戸開放", plan.policy_bucket)
+        global_queries = plan.global_fulltext_queries(max_queries=8)
+        self.assertTrue(any("第32巻" in query for query in global_queries))
+        self.assertIn("門戶開放", global_queries)
+        self.assertIn("米國照會", global_queries)
+        self.assertLess(global_queries.index("門戶開放"), 6)
+
+    def test_source_resolver_uses_configured_gaiko_bunsho_volume_pid(self):
+        tmpdir = Path(tempfile.mkdtemp())
+        config_path = tmpdir / "source_resolvers.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "nihon_gaiko_bunsho": {
+                        "volumes": [
+                            {
+                                "volume": "第32巻",
+                                "year": "明治32年",
+                                "pid": "3448128",
+                            }
+                        ]
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        footnote = parse_footnote_text(
+            "3a",
+            "外务省编：《日本外交文书》（外務省編：『日本外交文書』）第32卷，东京：外务省1955年版，第216～221页。",
+        )
+
+        with patch.dict(os.environ, {"HISTORICAL_CITATION_SOURCE_RESOLVER_CONFIG": str(config_path)}):
+            resolved = resolve_source(
+                footnote,
+                claim_text="明治32年，约翰·海伊提出门户开放照会，日本政府回答。",
+            )
+
+        self.assertEqual(resolved.resolver, "NihonGaikoBunshoResolver")
+        self.assertEqual(resolved.pid_scope_strategy, "volume_pid_mapping_then_pid_snippet")
+        self.assertIn("3448128", resolved.known_pid_candidates)
+        self.assertNotIn("volume_pid_mapping_missing", resolved.warnings)
+        self.assertIn("支那ニ於ケル商業上機會均等及門戸開放", resolved.target_pid_queries)
+        self.assertTrue(resolved.target_pid_queries[0].startswith("支那ニ於ケル商業上"))
+        self.assertEqual(resolved.target_pid_queries[1:3], ["門戶開放", "門戸開放"])
+
+    def test_source_resolver_uses_configured_gaiko_claim_facets(self):
+        tmpdir = Path(tempfile.mkdtemp())
+        config_path = tmpdir / "source_resolvers.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "nihon_gaiko_bunsho": {
+                        "volumes": [
+                            {
+                                "volume": "特別巻",
+                                "terms": ["特別巻", "実験文書"],
+                                "pid": "999999",
+                            }
+                        ],
+                        "claim_facets": [
+                            {
+                                "id": "experimental_document",
+                                "trigger_terms": ["実験文書"],
+                                "buckets": {
+                                    "anchor": ["実験文書"],
+                                    "theme": ["実験主題"],
+                                    "action": ["実験回答"],
+                                    "page_near": ["実験頁近傍"],
+                                },
+                                "target_pid_required_terms": ["実験回答"],
+                                "pid_match_terms": ["実験文書"],
+                            }
+                        ],
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        footnote = ParsedFootnote(
+            id="gaiko-config",
+            text="外務省編：『日本外交文書 特別巻』，第12頁。",
+            title="日本外交文書",
+            ndl_keyword="日本外交文書 特別巻",
+            page_numbers=[12],
+        )
+
+        with patch.dict(os.environ, {"HISTORICAL_CITATION_SOURCE_RESOLVER_CONFIG": str(config_path)}):
+            resolved = resolve_source(
+                footnote,
+                claim_text="実験文書について実験主題を扱い、実験回答を行った。",
+            )
+
+        self.assertEqual(resolved.resolver, "NihonGaikoBunshoResolver")
+        self.assertIn("999999", resolved.known_pid_candidates)
+        self.assertIn("実験文書", resolved.query_buckets["anchor"])
+        self.assertIn("実験主題", resolved.query_buckets["theme"])
+        self.assertIn("実験回答", resolved.query_buckets["action"])
+        self.assertIn("実験頁近傍", resolved.query_buckets["page_near"])
+        self.assertIn("実験回答", resolved.target_pid_queries)
+        self.assertNotIn("volume_pid_mapping_missing", resolved.warnings)
+
+    def test_contained_document_resolver_adds_configured_claim_terms(self):
+        tmpdir = Path(tempfile.mkdtemp())
+        config_path = tmpdir / "source_resolvers.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "contained_documents": {
+                        "documents": [
+                            {
+                                "title": "山県有朋意見書",
+                                "aliases": ["山縣有朋意見書"],
+                                "pid": "3025431",
+                                "person_terms": ["山縣有朋", "露國", "日露"],
+                                "theme_terms": ["滿洲", "東三省"],
+                                "action_terms": ["共同經營", "親交", "復讐心"],
+                                "page_near_terms": ["外交政略"],
+                            }
+                        ]
+                    }
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        footnote = ParsedFootnote(
+            id="p2n8",
+            text="大山梓编：《山县有朋意见书》，第306页。",
+            title="山縣有朋意見書",
+            page_numbers=[306],
+        )
+
+        with patch.dict(os.environ, {"HISTORICAL_CITATION_SOURCE_RESOLVER_CONFIG": str(config_path)}):
+            resolved = resolve_source(
+                footnote,
+                claim_text="日本应与俄国共同经营中国东北，发展亲密交情，缓和复仇之心。",
+            )
+            recipe = build_manual_search_recipe(
+                footnote,
+                claim_text="日本应与俄国共同经营中国东北，发展亲密交情，缓和复仇之心。",
+                current_status="fulltext_lead_only",
+            )
+
+        self.assertEqual(resolved.resolver, "ContainedDocumentResolver")
+        self.assertIn("3025431", resolved.known_pid_candidates)
+        self.assertIn("露國", resolved.query_buckets["person"])
+        self.assertIn("滿洲", resolved.query_buckets["theme"])
+        self.assertIn("共同經營", resolved.query_buckets["action"])
+        self.assertIn("外交政略", resolved.query_buckets["page_near"])
+        self.assertIn("共同經營", resolved.target_pid_queries)
+        self.assertIn("復讐心", resolved.target_pid_queries)
+        self.assertIn("共同經營", recipe["target_pid_queries"])
+        self.assertIn("復讐心", recipe["target_pid_queries"])
+        self.assertIn("滿洲", recipe["query_buckets"]["theme"])
+        self.assertIn("共同經營", recipe["query_buckets"]["action"])
+        self.assertIn("外交政略", recipe["query_buckets"]["page_near"])
+
+    def test_source_resolver_maps_paris_peace_supplement_pid(self):
+        footnote = ParsedFootnote(
+            id="gaiko-paris",
+            text="外务省编：《日本外交文書 大正期追補 巴里講和会議経過概要》，1971年版，第67-68页。",
+            title="日本外交文書",
+            ndl_keyword="日本外交文書 大正期追補 巴里講和会議経過概要 1971年",
+            page_numbers=[67, 68],
+        )
+
+        resolved = resolve_source(
+            footnote,
+            claim_text="巴黎和会上，赤道以北德属太平洋群岛以委任统治划归日本，牧野决定接受会议决定。",
+        )
+
+        self.assertEqual(resolved.resolver, "NihonGaikoBunshoResolver")
+        self.assertIn("11923430", resolved.known_pid_candidates)
+        self.assertIn("巴里講和会議経過概要", resolved.query_buckets["document_title"])
+        self.assertIn("帝國主張説明", resolved.query_buckets["document_heading"])
+        self.assertIn("委任統治", resolved.query_buckets["document_heading"])
+        self.assertIn("赤道以北", resolved.query_buckets["document_heading"])
+        self.assertIn("巴里講和会議経過概要", resolved.query_buckets["anchor"])
+        self.assertIn("委任統治", resolved.query_buckets["theme"])
+        self.assertIn("決定ヲ受諾", resolved.query_buckets["action"])
+        self.assertIn("赤道以北", resolved.query_buckets["page_near"])
+        self.assertNotIn("山東", resolved.query_buckets["document_heading"])
+        self.assertNotIn("還附ノ決定", resolved.query_buckets["document_heading"])
+        self.assertNotIn("volume_pid_mapping_missing", resolved.warnings)
+
+    def test_source_resolver_maps_washington_conference_pid_before_fulltext_leads(self):
+        footnote = ParsedFootnote(
+            id="gaiko-washington",
+            text="外务省编：《日本外交文書 ワシントン会議 上》，1977年版，第120页。",
+            title="日本外交文書",
+            ndl_keyword="日本外交文書 ワシントン会議 上 軍備制限問題 1977年",
+            page_numbers=[120],
+        )
+
+        resolved = resolve_source(footnote, claim_text="华盛顿会议上围绕海军军备限制问题展开交涉。")
+
+        self.assertEqual(resolved.resolver, "NihonGaikoBunshoResolver")
+        self.assertIn("11927523", resolved.known_pid_candidates)
+        self.assertNotIn("3448160", resolved.known_pid_candidates)
+        self.assertTrue(any("ワシントン" in query or "軍備制限" in query for query in resolved.target_pid_queries))
+        self.assertIn("ワシントン会議", resolved.query_buckets["document_title"])
+        self.assertIn("海軍軍備制限", resolved.query_buckets["document_heading"])
+        self.assertIn("ワシントン会議", resolved.query_buckets["anchor"])
+        self.assertIn("海軍軍備制限", resolved.query_buckets["theme"])
+        self.assertIn("米国案ノ十対六", resolved.query_buckets["theme"])
+        self.assertIn("製艦ヲ協定程度ニ制限", resolved.query_buckets["action"])
+        self.assertIn("米国案ノ十対六", resolved.query_buckets["page_near"])
+        self.assertTrue(any("ヒューズ" in query for query in resolved.target_pid_queries))
+        self.assertTrue(any("比率" in query or "六割" in query or "十対" in query or "勢力比" in query or "主力艦" in query for query in resolved.target_pid_queries))
+
+    def test_source_resolver_diary_adds_configured_claim_facets_to_plan(self):
+        footnote = ParsedFootnote(
+            id="diary-facet",
+            text="『原敬日記』1908年，第325頁。",
+            title="原敬日記",
+            page_numbers=[325],
+        )
+
+        resolved = resolve_source(
+            footnote,
+            claim_text="美国受到经济不景气影响，但将来会对世界产生影响。",
+        )
+
+        self.assertEqual(resolved.resolver, "DiaryDateResolver")
+        self.assertIn("米国", resolved.query_buckets["anchor"])
+        self.assertIn("経済", resolved.query_buckets["theme"])
+        self.assertIn("将来", resolved.query_buckets["theme"])
+        self.assertIn("米国", resolved.target_pid_queries)
+        self.assertTrue(any(term in resolved.target_pid_queries for term in ("経済", "經濟")))
+        self.assertFalse(any("1981" in query for query in resolved.target_pid_queries))
+
+    def test_source_resolver_kindai_taima_uses_configured_facets(self):
+        footnote = parse_footnote_text(
+            "p4n9",
+            "［日］《静岡県で大麻につき流言》，《日本近代思想大系 5：宗教と国家》，第 190 页。",
+        )
+
+        resolved = resolve_source(
+            footnote,
+            claim_text="大麻的神符会化为蝴蝶，其时该户将遭时疫，故要在化蝶前焚毁、冲走大麻。",
+        )
+
+        self.assertEqual(resolved.resolver, "NihonKindaiShisoTaikeiResolver")
+        self.assertIn("13260166", resolved.known_pid_candidates)
+        self.assertIn("神宮大麻", resolved.query_buckets["theme"])
+        self.assertIn("水火ニ投ズ", resolved.query_buckets["action"])
+        self.assertIn("大麻ノ神ノ字ガ蝶", resolved.query_buckets["page_near"])
+        self.assertIn("大麻ノ神ノ字ガ蝶", resolved.target_pid_queries)
+        self.assertIn("水火ニ投ズ", resolved.target_pid_queries)
+
+    def test_volume_series_early_general_context_is_front_matter_body_lead(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p6-fp6n6",
+            paragraph_index=6,
+            paragraph_text="休斯提出海军军备限制，规定主力舰比例为10:10:6。",
+            translation_text="休斯提出海军军备限制，规定主力舰比例为10:10:6。",
+            footnote_id="p6n6",
+            footnote=ParsedFootnote(
+                id="p6n6",
+                text="外务省编：《日本外交文書 ワシントン会議 上》，1977年版。",
+                title="日本外交文書",
+            ),
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "volume_series",
+                    "known_pid_candidates": ["11927523"],
+                    "query_buckets": {
+                        "theme": ["米国案ノ十対六", "海軍勢力比"],
+                        "page_near": ["米国案ノ十対六"],
+                    },
+                }
+            },
+        )
+        hint = {
+            "pid": "11927523",
+            "book_id": "11927523",
+            "pdf_page": 8,
+            "query": "海軍軍備制限問題",
+            "snippet": (
+                "英両国ニ対シ一会議開催ニ至ルマデノ経緯 "
+                "日英米三国間ニ今後五ケ年間三国ノ製艦ヲ協定程度ニ制限スル一条約ヲ協定スルノ目的"
+            ),
+            "expanded_context": (
+                "英両国ニ対シ一会議開催ニ至ルマデノ経緯 "
+                "日英米三国間ニ今後五ケ年間三国ノ製艦ヲ協定程度ニ制限スル一条約ヲ協定スルノ目的"
+            ),
+        }
+
+        category = verifier._fulltext_hint_lead_category(candidate, hint)
+        _score, reasons = verifier._score_fulltext_context_candidate(
+            candidate,
+            hint,
+            hint["expanded_context"],
+        )
+
+        self.assertEqual(category, "front_matter_body_lead")
+        self.assertIn("front_matter_body_lead_penalty", reasons)
+
+    def test_fulltext_context_penalizes_early_gaiko_title_page_hit(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n5",
+            paragraph_index=4,
+            paragraph_text="巴黎和会。",
+            translation_text="牧野代表在巴黎和会上说明帝国主张。",
+            footnote_id="p4n5",
+            footnote=ParsedFootnote(
+                id="p4n5",
+                text="外务省编：《日本外交文书》巴黎讲和会议经过概要，1971年版。",
+                title="日本外交文書",
+                ndl_keyword="日本外交文書 巴里講和会議経過概要",
+            ),
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "volume_series",
+                    "known_pid_candidates": ["11923430"],
+                    "target_pid_queries": ["巴里講和会議経過概要", "帝國主張説明", "牧野"],
+                    "query_buckets": {
+                        "document_title": ["巴里講和会議経過概要"],
+                        "document_heading": ["帝國主張説明"],
+                        "person": ["牧野"],
+                    },
+                }
+            },
+        )
+        title_hint = {
+            "pid": "11923430",
+            "book_id": "11923430",
+            "query": "巴里講和会議経過概要",
+            "snippet": "巴里講和会議経過概要",
+            "pdf_page": 3,
+        }
+        body_hint = {
+            "pid": "11923430",
+            "book_id": "11923430",
+            "query": "牧野",
+            "snippet": "帝國主張説明(牧野男)",
+            "expanded_context": "帝國主張説明(牧野男) 二、聯盟委員管理。",
+            "pdf_page": 9,
+        }
+
+        self.assertEqual(verifier._fulltext_hint_lead_category(candidate, title_hint), "title_or_series_only")
+        self.assertEqual(verifier._fulltext_hint_lead_category(candidate, body_hint), "body_candidate")
+        candidate.artifacts["ndl_fulltext_hints"] = [title_hint, body_hint]
+        ordered = verifier._ordered_fulltext_hints_for_candidate(candidate, preferred_pid="11923430")
+        self.assertEqual(ordered[0]["query"], "牧野")
+        _score, reasons = verifier._score_fulltext_context_candidate(candidate, body_hint, body_hint["expanded_context"])
+        self.assertTrue(any("document_heading:帝国主張説明" in reason for reason in reasons))
+
+    def test_volume_series_context_missing_theme_is_demoted(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n5",
+            paragraph_index=4,
+            paragraph_text="巴黎和会上日本取得南洋委任统治。",
+            translation_text="牧野决定接受会议决定，达成赤道以北南洋委任统治目标。",
+            footnote_id="p4n5",
+            footnote=ParsedFootnote(id="p4n5", text="日本外交文書。", title="日本外交文書"),
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "volume_series",
+                    "query_buckets": {
+                        "person": ["牧野"],
+                        "action": ["決定ヲ受諾"],
+                        "theme": ["委任統治", "南洋群島"],
+                        "page_near": ["赤道以北"],
+                    },
+                }
+            },
+        )
+        wrong_theme_hint = {
+            "pid": "11923430",
+            "query": "牧野委員",
+            "snippet": "還附ノ決定ヲ講和會議ニ於テ見ムコトヲ希望フ。牧野委員日本ノ膠州灣ヲ攻略シタル趣旨ハ...",
+            "pdf_page": 35,
+        }
+        theme_hint = {
+            "pid": "11923430",
+            "query": "委任統治",
+            "snippet": "英國ノ委任統治案提出附委任統治案ニ關スル牧野男トロイドジョージトノ内談。",
+            "pdf_page": 39,
+        }
+
+        wrong_score, wrong_reasons = verifier._score_fulltext_context_candidate(
+            candidate,
+            wrong_theme_hint,
+            wrong_theme_hint["snippet"],
+        )
+        theme_score, theme_reasons = verifier._score_fulltext_context_candidate(
+            candidate,
+            theme_hint,
+            theme_hint["snippet"],
+        )
+
+        self.assertIn("missing_volume_series_theme", wrong_reasons)
+        self.assertNotIn("missing_volume_series_theme", theme_reasons)
+        self.assertGreater(theme_score, wrong_score)
+
+    def test_contained_document_title_only_fulltext_hit_is_lead(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p2-fp2n8",
+            paragraph_index=2,
+            paragraph_text="日本应与俄国发展亲密交情。",
+            translation_text="日本应与俄国发展亲密交情，缓和其复仇之心。",
+            footnote_id="p2n8",
+            footnote=ParsedFootnote(
+                id="p2n8",
+                text="大山梓编：《山县有朋意见书》，东京：原书房1965年版，第306页。",
+                title="山縣有朋意見書",
+                contained_title="山縣有朋意見書",
+                page_numbers=[306],
+            ),
+            artifacts={"source_resolver_plan": {"source_type": "contained_document"}},
+        )
+        title_only_hint = {
+            "pid": "3025431",
+            "book_id": "3025431",
+            "query": "山縣有朋意見書 山縣有朋意見書",
+            "snippet": "海軍々備の必要から扶桑、金剛、比叡の三艦が英国で起工される山縣有朋意見書",
+            "expanded_context": "海軍々備の必要から扶桑、金剛、比叡の三艦が英国で起工される山縣有朋意見書",
+            "pdf_page": 14,
+        }
+
+        category = verifier._fulltext_hint_lead_category(candidate, title_only_hint)
+        _score, reasons = verifier._score_fulltext_context_candidate(
+            candidate,
+            title_only_hint,
+            title_only_hint["expanded_context"],
+        )
+
+        self.assertEqual(category, "title_or_series_only")
+        self.assertIn("title_or_series_only_penalty", reasons)
+
+    def test_gaiko_open_door_compound_packet_groups_split_facets(self):
+        verifier = HistoricalCitationVerifier(
+            review_llm_client=DummyLLMClient(
+                json.dumps(
+                    {
+                        "decision": "partial_support",
+                        "best_context_id": "ctx2",
+                        "supporting_context_ids": ["ctx2"],
+                        "best_sentence_index": 0,
+                        "confidence": 0.7,
+                        "reason": "ctx2 covers the proposal but does not by itself cover Japan's reply.",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        )
+        candidate = CitationCandidate(
+            candidate_id="p2-fp2n1",
+            paragraph_index=2,
+            paragraph_text="海伊提出门户开放原则并得到日本赞同。",
+            translation_text="海伊提出门户开放原则并得到日本赞同。",
+            footnote_id="p2n1",
+            footnote=ParsedFootnote(
+                id="p2n1",
+                text="外务省编：《日本外交文書》第32巻，1955年，第32-34页。",
+                title="日本外交文書",
+                ndl_keyword="日本外交文書 第32巻",
+                page_numbers=[32, 34],
+            ),
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "volume_series",
+                    "known_pid_candidates": ["3448128"],
+                    "target_pid_queries": ["日本外交文書 第32巻 門戶開放"],
+                    "query_buckets": {
+                        "document_heading": ["合衆國ノ提議"],
+                        "policy": ["日本國政府ハ", "承諾シタル", "門戶開放"],
+                    },
+                }
+            },
+        )
+        contexts = [
+            {
+                "context_id": "ctx1",
+                "pid": "3448128",
+                "pdf_page": 34,
+                "query": "日本國政府ハ",
+                "cleaned_context": "日本國政府ハ右門戶開放ノ主義ヲ承諾シタル旨回答セリ。",
+                "lead_category": "body_candidate",
+                "score": 18.6,
+            },
+            {
+                "context_id": "ctx2",
+                "pid": "3448128",
+                "pdf_page": 32,
+                "query": "日本外交文書 第32巻 門戶開放",
+                "cleaned_context": "清國ニ於ケル門戶開放ニ關スル合衆國ノ提議。",
+                "lead_category": "body_candidate",
+                "score": 18.5,
+            },
+        ]
+
+        packet = verifier._build_fulltext_compound_evidence_packet(candidate, contexts)
+        selected = verifier._select_fulltext_context_candidate(candidate, contexts)
+
+        self.assertIsNotNone(packet)
+        self.assertTrue(packet["complete"])
+        self.assertEqual(selected["context_id"], "ctx2")
+        stored_packet = candidate.artifacts["fulltext_compound_evidence_packet"]
+        self.assertTrue(stored_packet["complete"])
+        self.assertEqual(
+            {facet["facet_id"] for facet in stored_packet["facets"] if facet["covered"]},
+            {"us_proposal", "open_door_principle", "japan_acceptance"},
+        )
+        self.assertEqual(candidate.artifacts["fulltext_compound_evidence_review_gap"]["decision"], "partial_support")
+        self.assertIn("fulltext_compound_evidence_requires_manual_review", candidate.notes)
+
+    def test_gaiko_open_door_direct_review_adds_missing_compound_contexts(self):
+        verifier = HistoricalCitationVerifier(
+            review_llm_client=DummyLLMClient(
+                json.dumps(
+                    {
+                        "decision": "direct_support",
+                        "best_context_id": "ctx1",
+                        "supporting_context_ids": ["ctx1"],
+                        "best_sentence_index": 1,
+                        "exact_sentence": "日本國政府ハ右門戶開放ノ主義ヲ承諾シタル旨回答セリ。",
+                        "confidence": 0.95,
+                        "reason": "ctx1 proves Japan accepted the principle.",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        )
+        candidate = CitationCandidate(
+            candidate_id="p2-fp2n1",
+            paragraph_index=2,
+            paragraph_text="海伊提出门户开放原则并得到日本赞同。",
+            translation_text="海伊提出门户开放原则并得到日本赞同。",
+            footnote_id="p2n1",
+            footnote=ParsedFootnote(
+                id="p2n1",
+                text="外务省编：《日本外交文書》第32巻，1955年，第32-34页。",
+                title="日本外交文書",
+                ndl_keyword="日本外交文書 第32巻",
+                page_numbers=[32, 34],
+            ),
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "volume_series",
+                    "query_buckets": {
+                        "document_heading": ["委任統治", "赤道以北", "獨領南洋", "牧野男", "決定ヲ受諾"],
+                        "document_title": ["巴里講和会議経過概要"],
+                    },
+                }
+            },
+        )
+        contexts = [
+            {
+                "context_id": "ctx1",
+                "pdf_page": 34,
+                "query": "日本國政府ハ",
+                "cleaned_context": "日本國政府ハ右門戶開放ノ主義ヲ承諾シタル旨回答セリ。",
+                "lead_category": "body_candidate",
+            },
+            {
+                "context_id": "ctx2",
+                "pdf_page": 32,
+                "query": "合衆國ノ提議",
+                "cleaned_context": "清國ニ於ケル門戶開放ニ關スル合衆國ノ提議。",
+                "lead_category": "body_candidate",
+            },
+        ]
+
+        verifier._select_fulltext_context_candidate(candidate, contexts)
+
+        review = candidate.artifacts["llm_review"]
+        self.assertEqual(review["decision"], "direct_support")
+        self.assertEqual(review["supporting_context_ids"], ["ctx1", "ctx2"])
+        self.assertTrue(review["compound_evidence_packet_used"])
+        self.assertEqual(
+            candidate.artifacts["fulltext_llm_review_basis"],
+            "ndl_expanded_snippet_context_candidates_plus_compound_packet",
+        )
+
+    def test_volume_series_generic_compound_packet_uses_query_buckets(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p5-fp5n1",
+            paragraph_index=5,
+            paragraph_text="陆奥在条约改正问题上提出意见。",
+            translation_text="陆奥在条约改正问题上提出意见。",
+            footnote_id="p5n1",
+            footnote=ParsedFootnote(
+                id="p5n1",
+                text="外务省编：《日本外交文書》，第120页。",
+                title="日本外交文書",
+                ndl_keyword="日本外交文書 条約改正",
+            ),
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "volume_series",
+                    "query_buckets": {
+                        "document_heading": ["条約改正意見"],
+                        "person": ["陸奥宗光"],
+                        "document_title": ["日本外交文書"],
+                    },
+                }
+            },
+        )
+        contexts = [
+            {
+                "context_id": "ctx1",
+                "pdf_page": 8,
+                "query": "条約改正意見",
+                "cleaned_context": "条約改正意見ニ關シ外務省内ニテ議ス。",
+                "lead_category": "body_candidate",
+            },
+            {
+                "context_id": "ctx2",
+                "pdf_page": 9,
+                "query": "陸奥宗光",
+                "cleaned_context": "陸奥宗光ハ右意見ヲ提出セリ。",
+                "lead_category": "body_candidate",
+            },
+        ]
+
+        packet = verifier._build_fulltext_compound_evidence_packet(candidate, contexts)
+
+        self.assertIsNotNone(packet)
+        self.assertEqual(packet["packet_type"], "volume_series_query_bucket_compound_claim")
+        self.assertTrue(packet["complete"])
+        self.assertEqual(packet["required_facet_ids"], ["bucket_document_heading", "bucket_person"])
+        self.assertEqual(packet["supporting_context_ids"], ["ctx1", "ctx2"])
+
+    def test_paris_mandate_packet_requires_acceptance_action_not_weak_decision_lead(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n5",
+            paragraph_index=4,
+            paragraph_text="日本代表牧野伸显决定接受会议决定，从而使日本达成了第一个既定目标。",
+            translation_text="日本代表牧野伸显决定接受会议决定，从而使日本达成了第一个既定目标",
+            footnote_id="p4n5",
+            footnote=ParsedFootnote(
+                id="p4n5",
+                text="外务省编：《日本外交文書》巴黎讲和会议经过概要。",
+                title="日本外交文書",
+            ),
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "volume_series",
+                    "query_buckets": {
+                        "document_heading": ["委任統治", "赤道以北", "獨領南洋", "牧野男", "決定ヲ受諾"],
+                        "document_title": ["巴里講和会議経過概要"],
+                    },
+                }
+            },
+        )
+        contexts = [
+            {
+                "context_id": "ctx1",
+                "pdf_page": 32,
+                "query": "獨領南洋",
+                "cleaned_context": "赤道以北ノ獨領南洋群島ニ關シ委任統治ノ形式ヲ議ス。",
+                "lead_category": "body_candidate",
+            },
+            {
+                "context_id": "ctx2",
+                "pdf_page": 39,
+                "query": "牧野男",
+                "cleaned_context": "英國ノ委任統治案ニ關シ會議終了後牧野男ト協議ス。",
+                "lead_category": "body_candidate",
+            },
+            {
+                "context_id": "ctx3",
+                "pdf_page": 255,
+                "query": "會議ノ決定",
+                "cleaned_context": "各國ノ投票權ニ付一國一票説出テシモ結局五國會議ノ決定ニ俟ツコトニ決ス。",
+                "lead_category": "body_candidate",
+            },
+        ]
+
+        packet = verifier._build_fulltext_compound_evidence_packet(candidate, contexts)
+
+        self.assertIsNotNone(packet)
+        self.assertEqual(packet["packet_type"], "volume_series_paris_mandate_compound_claim")
+        self.assertFalse(packet["complete"])
+        facets = {facet["facet_id"]: facet for facet in packet["facets"]}
+        self.assertTrue(facets["mandate_territory"]["covered"])
+        self.assertTrue(facets["mandate_system"]["covered"])
+        self.assertTrue(facets["japanese_actor_makino"]["covered"])
+        self.assertFalse(facets["decision_acceptance_action"]["covered"])
+        self.assertTrue(facets["weak_meeting_decision_lead"]["covered"])
+        self.assertIn("decision_acceptance_action", packet["required_facet_ids"])
+
+    def test_paris_mandate_packet_complete_when_acceptance_action_is_present(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n5",
+            paragraph_index=4,
+            paragraph_text="日本代表牧野伸显决定接受会议决定，从而使日本达成了第一个既定目标。",
+            translation_text="日本代表牧野伸显决定接受会议决定，从而使日本达成了第一个既定目标",
+            footnote_id="p4n5",
+            footnote=ParsedFootnote(
+                id="p4n5",
+                text="外务省编：《日本外交文書》巴黎讲和会议经过概要。",
+                title="日本外交文書",
+            ),
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "volume_series",
+                    "query_buckets": {
+                        "document_heading": ["委任統治", "赤道以北", "獨領南洋", "牧野男", "決定ヲ受諾"],
+                        "document_title": ["巴里講和会議経過概要"],
+                    },
+                }
+            },
+        )
+        contexts = [
+            {
+                "context_id": "ctx1",
+                "pdf_page": 32,
+                "query": "獨領南洋",
+                "cleaned_context": "赤道以北ノ獨領南洋群島ニ關シ委任統治ノ形式ヲ議ス。",
+                "lead_category": "body_candidate",
+            },
+            {
+                "context_id": "ctx2",
+                "pdf_page": 39,
+                "query": "牧野男",
+                "cleaned_context": "牧野男ハ右委任統治案ニ異議ナキ旨述ヘ決定ヲ受諾ス。",
+                "lead_category": "body_candidate",
+            },
+            {
+                "context_id": "ctx3",
+                "pdf_page": 40,
+                "query": "目的ヲ達成",
+                "cleaned_context": "帝國委員ハ南洋群島ニ關スル主張ヲ貫徹シ目的ヲ達成セリ。",
+                "lead_category": "body_candidate",
+            },
+        ]
+
+        packet = verifier._build_fulltext_compound_evidence_packet(candidate, contexts)
+
+        self.assertIsNotNone(packet)
+        self.assertTrue(packet["complete"])
+        self.assertEqual(
+            packet["required_facet_ids"],
+            [
+                "mandate_territory",
+                "mandate_system",
+                "japanese_actor_makino",
+                "decision_acceptance_action",
+                "goal_or_outcome",
+            ],
+        )
+        self.assertEqual(set(packet["supporting_context_ids"]), {"ctx1", "ctx2", "ctx3"})
+
+    def test_washington_naval_limitation_packet_groups_ratio_and_speaker(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p6-fp6n6",
+            paragraph_index=6,
+            paragraph_text="美国国务卿休斯提出限制海军军备，规定主力舰比例为10:10:6。",
+            translation_text="美国国务卿休斯提出限制海军军备，规定主力舰比例为10:10:6。",
+            footnote_id="p6n6",
+            footnote=ParsedFootnote(
+                id="p6n6",
+                text="外务省编：《日本外交文書 ワシントン会議 上》，1977年版。",
+                title="日本外交文書",
+            ),
+            artifacts={"source_resolver_plan": {"source_type": "volume_series"}},
+        )
+        contexts = [
+            {
+                "context_id": "ctx1",
+                "pdf_page": 8,
+                "query": "海軍軍備制限問題",
+                "cleaned_context": "日英米三国間ニ今後五ケ年間三国ノ製艦ヲ協定程度ニ制限スル一条約。",
+                "lead_category": "body_candidate",
+            },
+            {
+                "context_id": "ctx2",
+                "pdf_page": 164,
+                "query": "比率",
+                "cleaned_context": "加藤、ヒューズ及ビバルフォアト会合シ比率、太平洋防備制限各問題ニツキ討議。",
+                "lead_category": "body_candidate",
+            },
+            {
+                "context_id": "ctx3",
+                "pdf_page": 143,
+                "query": "米国案ノ十対六",
+                "cleaned_context": "報知米国案ノ十対六ノ比率ハ其根拠奈辺ニアルヤ了解ニ苦シム処ナリ。",
+                "lead_category": "body_candidate",
+            },
+        ]
+
+        packet = verifier._build_fulltext_compound_evidence_packet(candidate, contexts)
+
+        self.assertIsNotNone(packet)
+        self.assertEqual(packet["packet_type"], "volume_series_washington_naval_limitation_compound_claim")
+        self.assertTrue(packet["complete"])
+        self.assertEqual(
+            packet["required_facet_ids"],
+            ["naval_limitation_proposal", "hughes_or_us_speaker", "exact_ten_ten_six_ratio"],
+        )
+        self.assertEqual(packet["supporting_context_ids"], ["ctx1", "ctx2", "ctx3"])
+
+    def test_washington_exact_ratio_packet_incomplete_without_exact_ratio(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p6-fp6n6",
+            paragraph_index=6,
+            paragraph_text="美国国务卿休斯提出限制海军军备，规定主力舰比例为10:10:6。",
+            translation_text="美国国务卿休斯提出限制海军军备，规定主力舰比例为10:10:6。",
+            footnote_id="p6n6",
+            footnote=ParsedFootnote(
+                id="p6n6",
+                text="外务省编：《日本外交文書 ワシントン会議 上》，1977年版。",
+                title="日本外交文書",
+            ),
+            artifacts={"source_resolver_plan": {"source_type": "volume_series"}},
+        )
+        contexts = [
+            {
+                "context_id": "ctx1",
+                "pdf_page": 8,
+                "query": "海軍軍備制限問題",
+                "cleaned_context": "日英米三国間ニ今後五ケ年間三国ノ製艦ヲ協定程度ニ制限スル一条約。",
+                "lead_category": "body_candidate",
+            },
+            {
+                "context_id": "ctx2",
+                "pdf_page": 164,
+                "query": "比率",
+                "cleaned_context": "加藤、ヒューズ及ビバルフォアト会合シ比率、太平洋防備制限各問題ニツキ討議。",
+                "lead_category": "body_candidate",
+            },
+        ]
+
+        packet = verifier._build_fulltext_compound_evidence_packet(candidate, contexts)
+
+        self.assertIsNotNone(packet)
+        self.assertFalse(packet["complete"])
+        self.assertIn("exact_ten_ten_six_ratio", packet["required_facet_ids"])
+        exact_facet = next(facet for facet in packet["facets"] if facet["facet_id"] == "exact_ten_ten_six_ratio")
+        self.assertFalse(exact_facet["covered"])
+
+    def test_failed_formal_review_does_not_promote_heuristic_direct_support(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p6-fp6n6",
+            paragraph_index=6,
+            paragraph_text="休斯提出海军军备限制。",
+            translation_text="休斯提出海军军备限制。",
+            footnote_id="p6n6",
+            footnote=ParsedFootnote(id="p6n6", text="日本外交文書。", title="日本外交文書"),
+            artifacts={
+                "llm_review": {
+                    "decision": "direct_support",
+                    "confidence": 0.92,
+                    "reason": "heuristic direct",
+                    "provider": "heuristic_multi_context",
+                    "llm_review_failed": True,
+                    "llm_review_fallback_heuristic": True,
+                    "llm_error": "ReadTimeout",
+                }
+            },
+        )
+
+        verifier._apply_fulltext_only_review_status(candidate)
+
+        self.assertEqual(candidate.verification_status, "fulltext_only_partial_support")
+        self.assertEqual(candidate.support_status, "fulltext_only_partial_support")
+        self.assertIn("formal_review_failed_heuristic_direct_not_promoted", candidate.notes)
+        self.assertIn("formal_review_failed_direct_downgraded", candidate.artifacts)
+
+    def test_volume_series_generic_packet_does_not_require_publication_year(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n5",
+            paragraph_index=4,
+            paragraph_text="牧野代表接受会议决定。",
+            translation_text="牧野代表接受会议决定。",
+            footnote_id="p4n5",
+            footnote=ParsedFootnote(
+                id="p4n5",
+                text="外务省编：《日本外交文書 大正期追補 巴里講和会議経過概要》，1971年版。",
+                title="日本外交文書",
+            ),
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "volume_series",
+                    "query_buckets": {
+                        "document_heading": ["帝國主張説明", "牧野男"],
+                        "date": ["1971年"],
+                        "document_title": ["巴里講和会議経過概要"],
+                    },
+                }
+            },
+        )
+        contexts = [
+            {
+                "context_id": "ctx1",
+                "pdf_page": 9,
+                "query": "牧野男",
+                "cleaned_context": "帝國主張説明(牧野男) 二、聯盟委員管理。",
+                "lead_category": "body_candidate",
+            }
+        ]
+
+        packet = verifier._build_fulltext_compound_evidence_packet(candidate, contexts)
+
+        self.assertIsNone(packet)
+
+    def test_volume_series_hint_expansion_diversifies_queries(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p6-fp6n6",
+            paragraph_index=6,
+            paragraph_text="休斯提出海军军备限制，规定主力舰比例为10:10:6。",
+            translation_text="休斯提出海军军备限制，规定主力舰比例为10:10:6。",
+            footnote_id="p6n6",
+            footnote=ParsedFootnote(id="p6n6", text="日本外交文書 ワシントン会議 上", title="日本外交文書"),
+            artifacts={"source_resolver_plan": {"source_type": "volume_series"}},
+        )
+        hints = [
+            {"query": "日本外交文書 海軍軍備制限", "snippet": f"海軍軍備制限 {index}", "pdf_page": index}
+            for index in range(6)
+        ]
+        hints.extend(
+            [
+                {"query": "ヒューズ", "snippet": "ヒューズ国務長官", "pdf_page": 22},
+                {"query": "比率", "snippet": "主力艦比率", "pdf_page": 154},
+                {"query": "米国案ノ十対六", "snippet": "米国案ノ十対六ノ比率", "pdf_page": 143},
+            ]
+        )
+
+        selected = verifier._select_fulltext_hints_to_expand(candidate, hints, limit=4)
+
+        selected_queries = [hint["query"] for hint in selected]
+        self.assertEqual(selected_queries[0], "米国案ノ十対六")
+        self.assertIn("ヒューズ", selected_queries[:3])
+        self.assertIn("日本外交文書 海軍軍備制限", selected_queries)
+
+    def test_claim_query_hit_is_prioritized_over_contained_title_body_hit(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p6-fp6n5",
+            paragraph_index=6,
+            paragraph_text="日莲宗提出“只得中和，阴不害阳，恶不妨善”。",
+            translation_text="只得中和，阴不害阳，恶不妨善",
+            footnote_id="p6n5",
+            footnote=ParsedFootnote(
+                id="p6n5",
+                text="《諸宗説教要義》，《明治仏教思想資料集成：第二巻》，第264页。",
+                title="諸宗説教要義",
+                host_title="明治仏教思想資料集成：第二巻",
+                contained_title="諸宗説教要義",
+            ),
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "contained_document",
+                    "target_pid_queries": ["諸宗説教要義"],
+                    "query_buckets": {
+                        "contained": ["諸宗説教要義"],
+                        "host": ["明治仏教思想資料集成：第二巻"],
+                    },
+                },
+                "ndl_fulltext_hints": [
+                    {
+                        "pid": "12223083",
+                        "book_id": "12223083",
+                        "query": "諸宗説教要義",
+                        "snippet": "諸宗説教要義禪宗大徳寺妙心寺 恭ク惟ルニ聖運恢復ノ際ニ膺リ",
+                        "expanded_context": "諸宗説教要義禪宗大徳寺妙心寺 恭ク惟ルニ聖運恢復ノ際ニ膺リ、敬神愛國ノ旨ヲ體スヘシ。",
+                        "pdf_page": 138,
+                    },
+                    {
+                        "pid": "12223083",
+                        "book_id": "12223083",
+                        "query": "阴不害阳",
+                        "snippet": "天不能無陰人不能無惡、只中和ヲ得ハ陰不害陽惡不妨善",
+                        "expanded_context": "第二天理人道ヲ明ニスヘキ事曰ク、天不能無陰人不能無惡、只中和ヲ得ハ陰不害陽惡不妨善。",
+                        "pdf_page": 140,
+                    },
+                ],
+            },
+        )
+
+        ordered = verifier._ordered_fulltext_hints_for_candidate(candidate, preferred_pid="12223083")
+        self.assertEqual(ordered[0]["query"], "阴不害阳")
+        self.assertTrue(verifier._hint_has_claim_snippet_evidence(candidate, ordered[0]))
+
+        contexts = verifier._expand_fulltext_context_candidates(
+            candidate,
+            preferred_pid="12223083",
+            max_candidates=2,
+            max_hints_to_expand=2,
+        )
+        self.assertEqual(contexts[0]["query"], "阴不害阳")
+        self.assertTrue(contexts[0]["claim_evidence"])
+        self.assertGreater(contexts[0]["score"], contexts[1]["score"])
+
+    def test_generic_claim_query_is_not_strong_claim_evidence(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n5",
+            paragraph_index=4,
+            paragraph_text="牧野决定接受会议决定。",
+            translation_text="接受会议决定",
+            footnote_id="p4n5",
+            footnote=ParsedFootnote(
+                id="p4n5",
+                text="《日本外交文書》巴黎讲和会议经过概要。",
+                title="日本外交文書",
+            ),
+            artifacts={"source_resolver_plan": {"source_type": "volume_series"}},
+        )
+        generic_hint = {
+            "pid": "11923430",
+            "book_id": "11923430",
+            "query": "會議ノ決定",
+            "snippet": "各國ノ投票權ニ付一國一票説出テシモ結局五國會議ノ決定ニ俟ツコトニ決ス",
+            "expanded_context": "各國ノ投票權ニ付一國一票説出テシモ結局五國會議ノ決定ニ俟ツコトニ決ス。",
+            "pdf_page": 255,
+        }
+
+        self.assertFalse(verifier._hint_has_claim_snippet_evidence(candidate, generic_hint))
+        _score, reasons = verifier._score_fulltext_context_candidate(
+            candidate,
+            generic_hint,
+            generic_hint["expanded_context"],
+        )
+        self.assertFalse(any("core_terms=会議ノ決定" in reason for reason in reasons))
+
+    def test_fulltext_context_expansion_cache_reuses_same_pid_hit(self):
+        verifier = HistoricalCitationVerifier()
+
+        def build_candidate(candidate_id: str) -> CitationCandidate:
+            return CitationCandidate(
+                candidate_id=candidate_id,
+                paragraph_index=1,
+                paragraph_text="The claim needs source context.",
+                translation_text="The claim needs source context.",
+                footnote_id="fn1",
+                footnote=ParsedFootnote(
+                    id="fn1",
+                    text="Contained document, in Host collection, p. 12.",
+                    title="Contained document",
+                    host_title="Host collection",
+                    contained_title="Contained document",
+                    page_numbers=[12],
+                ),
+                artifacts={
+                    "source_resolver_plan": {
+                        "source_type": "source_collection",
+                        "known_pid_candidates": ["12345"],
+                        "target_pid_queries": ["Contained document"],
+                    },
+                    "ndl_fulltext_hints": [
+                        {
+                            "pid": "12345",
+                            "book_id": "12345",
+                            "query": "Contained document",
+                            "snippet": "Contained document lead text",
+                            "pdf_page": 12,
+                            "cid": "cid-12",
+                        }
+                    ],
+                },
+            )
+
+        expanded = SimpleNamespace(
+            context_text="Contained document body context. It gives enough evidence for the claim.",
+            status="snippet_expanded",
+            note="same-page expansion",
+            evidence_hits=[{"cid": "cid-12"}],
+        )
+        first_candidate = build_candidate("first")
+        second_candidate = build_candidate("second")
+
+        with patch(
+            "modules.historical_citation_verifier.expand_ndl_snippet_context",
+            return_value=expanded,
+        ) as expand_mock:
+            first_contexts = verifier._expand_fulltext_context_candidates(
+                first_candidate,
+                preferred_pid="12345",
+                max_hints_to_expand=1,
+            )
+            second_contexts = verifier._expand_fulltext_context_candidates(
+                second_candidate,
+                preferred_pid="12345",
+                max_hints_to_expand=1,
+            )
+
+        self.assertEqual(expand_mock.call_count, 1)
+        self.assertEqual(second_candidate.artifacts.get("fulltext_context_cache_hits"), 1)
+        self.assertEqual(first_contexts[0]["cleaned_context"], second_contexts[0]["cleaned_context"])
+
+    def test_fulltext_context_expansion_emits_progress_callback(self):
+        verifier = HistoricalCitationVerifier()
+        events = []
+        verifier._progress_event_callback = lambda **payload: events.append(payload)
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n5",
+            paragraph_index=4,
+            paragraph_text="Japan explained the mandate issue.",
+            translation_text="Japan explained the mandate issue.",
+            footnote_id="p4n5",
+            footnote=ParsedFootnote(
+                id="p4n5",
+                text="日本外交文書 巴里講和会議経過概要, pp.58-59.",
+                title="日本外交文書",
+                page_numbers=[58, 59],
+                source_type="volume_series",
+            ),
+            artifacts={
+                "source_resolver_plan": {"source_type": "volume_series"},
+                "ndl_fulltext_hints": [
+                    {
+                        "pid": "11923430",
+                        "book_id": "11923430",
+                        "query": "牧野男 委任統治",
+                        "snippet": "牧野男 委任統治",
+                        "expanded_context": "牧野男ハ委任統治問題ニ付帝國主張ヲ説明セリ。",
+                        "pdf_page": 39,
+                    }
+                ],
+            },
+        )
+
+        contexts = verifier._expand_fulltext_context_candidates(
+            candidate,
+            preferred_pid="11923430",
+            max_candidates=1,
+            max_hints_to_expand=1,
+        )
+
+        self.assertEqual(len(contexts), 1)
+        subphase_events = [(event["event"], event["subphase"]) for event in events]
+        self.assertIn(("worker_stage_started", "snippet_context_expansion"), subphase_events)
+        self.assertIn(("worker_stage_completed", "snippet_context_expansion"), subphase_events)
+        completed = [
+            event
+            for event in events
+            if event["event"] == "worker_stage_completed"
+            and event["subphase"] == "snippet_context_expansion"
+        ][0]
+        self.assertEqual(completed["status"], "contexts_found")
+        self.assertEqual(completed["metrics"]["context_count"], 1)
+
+    def test_fulltext_context_selection_emits_llm_review_progress(self):
+        class FakeReviewClient:
+            provider = "ollama"
+            model = "gemma4:e4b"
+
+            def health_check(self):
+                return {"provider": self.provider, "model": self.model}
+
+        verifier = HistoricalCitationVerifier(review_llm_client=FakeReviewClient())
+        events = []
+        verifier._progress_event_callback = lambda **payload: events.append(payload)
+        candidate = CitationCandidate(
+            candidate_id="p6-fp6n6",
+            paragraph_index=6,
+            paragraph_text="Washington conference claim.",
+            translation_text="Washington conference claim.",
+            footnote_id="p6n6",
+            footnote=ParsedFootnote(id="p6n6", text="日本外交文書, pp.170-171.", title="日本外交文書"),
+        )
+        contexts = [
+            {
+                "context_id": "ctx1",
+                "cleaned_context": "ワシントン會議ノ一般説明。",
+                "expanded_context": "ワシントン會議ノ一般説明。",
+                "lead_category": "body_candidate",
+            },
+            {
+                "context_id": "ctx2",
+                "cleaned_context": "米国案ノ十対六ニ関スル説明。",
+                "expanded_context": "米国案ノ十対六ニ関スル説明。",
+                "lead_category": "body_candidate",
+            },
+        ]
+        review_payload = {
+            "decision": "partial_support",
+            "confidence": 0.72,
+            "best_context_id": "ctx2",
+            "supporting_context_ids": ["ctx2"],
+            "provider": "ollama",
+            "model": "gemma4:e4b",
+            "reason": "ctx2 is closer to the claim.",
+        }
+
+        with patch(
+            "modules.historical_citation_verifier.review_context_candidates_with_llm",
+            return_value=review_payload,
+        ):
+            selected = verifier._select_fulltext_context_candidate(candidate, contexts)
+
+        self.assertEqual(selected["context_id"], "ctx2")
+        subphase_events = [(event["event"], event["subphase"]) for event in events]
+        self.assertIn(("worker_stage_started", "llm_context_review"), subphase_events)
+        self.assertIn(("worker_stage_completed", "llm_context_review"), subphase_events)
+        completed = [
+            event
+            for event in events
+            if event["event"] == "worker_stage_completed"
+            and event["subphase"] == "llm_context_review"
+        ][0]
+        self.assertEqual(completed["status"], "partial_support")
+        self.assertEqual(completed["metrics"]["model"], "gemma4:e4b")
+        self.assertEqual(completed["metrics"]["best_context_id"], "ctx2")
+
+    def test_fulltext_context_expansion_disk_cache_reuses_across_verifiers(self):
+        output_dir = Path(tempfile.mkdtemp())
+
+        def build_candidate(candidate_id: str) -> CitationCandidate:
+            return CitationCandidate(
+                candidate_id=candidate_id,
+                paragraph_index=1,
+                paragraph_text="The claim needs source context.",
+                translation_text="The claim needs source context.",
+                footnote_id="fn1",
+                footnote=ParsedFootnote(
+                    id="fn1",
+                    text="Contained document, in Host collection, p. 12.",
+                    title="Contained document",
+                    host_title="Host collection",
+                    contained_title="Contained document",
+                    page_numbers=[12],
+                ),
+                artifacts={
+                    "source_resolver_plan": {
+                        "source_type": "source_collection",
+                        "known_pid_candidates": ["12345"],
+                        "target_pid_queries": ["Contained document"],
+                    },
+                    "ndl_fulltext_hints": [
+                        {
+                            "pid": "12345",
+                            "book_id": "12345",
+                            "query": "Contained document",
+                            "snippet": "Contained document lead text",
+                            "pdf_page": 12,
+                            "cid": "cid-12",
+                        }
+                    ],
+                },
+            )
+
+        expanded = SimpleNamespace(
+            context_text="Contained document body context persisted to disk.",
+            status="snippet_expanded",
+            note="same-page expansion",
+            evidence_hits=[{"cid": "cid-12"}],
+        )
+        first_verifier = HistoricalCitationVerifier()
+        with patch(
+            "modules.historical_citation_verifier.expand_ndl_snippet_context",
+            return_value=expanded,
+        ) as expand_mock:
+            first_verifier._expand_fulltext_context_candidates(
+                build_candidate("first"),
+                preferred_pid="12345",
+                max_hints_to_expand=1,
+                cache_dir=output_dir,
+            )
+        self.assertEqual(expand_mock.call_count, 1)
+
+        cache_path = output_dir / HistoricalCitationVerifier.FULLTEXT_CONTEXT_EXPANSION_CACHE_FILENAME
+        cache_payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        self.assertEqual(cache_payload["schema_version"], "historical_citation.fulltext_context_expansion_cache.v1")
+        first_record = next(iter(cache_payload["records"].values()))
+        self.assertEqual(first_record["snippet_hash"], "4e701080c844323f")
+
+        second_candidate = build_candidate("second")
+        second_verifier = HistoricalCitationVerifier()
+        with patch("modules.historical_citation_verifier.expand_ndl_snippet_context") as expand_mock:
+            second_contexts = second_verifier._expand_fulltext_context_candidates(
+                second_candidate,
+                preferred_pid="12345",
+                max_hints_to_expand=1,
+                cache_dir=output_dir,
+            )
+
+        self.assertEqual(expand_mock.call_count, 0)
+        self.assertEqual(second_candidate.artifacts.get("fulltext_context_disk_cache_hits"), 1)
+        self.assertIn("persisted to disk", second_contexts[0]["cleaned_context"])
+
+    def test_source_resolver_models_hara_diary_as_date_first(self):
+        footnote = ParsedFootnote(
+            id="diary1",
+            text="『原敬日記』1900年5月12日条，第84頁。",
+            title="原敬日記",
+            page_numbers=[84],
+        )
+
+        resolved = resolve_source(footnote, claim_text="1900年5月12日，原敬在日记中记录了相关交涉。")
+        recipe = build_manual_search_recipe(
+            footnote,
+            claim_text="1900年5月12日，原敬在日记中记录了相关交涉。",
+            current_status="page_mapping_unavailable",
+        )
+
+        self.assertEqual(resolved.resolver, "DiaryDateResolver")
+        self.assertEqual(resolved.source_type, "diary")
+        self.assertEqual(resolved.pid_scope_strategy, "date_to_volume_then_pid_snippet")
+        self.assertIn("2982135", resolved.known_pid_candidates)
+        self.assertIn("1900年5月12日", resolved.dates)
+        self.assertIn("1900年5月12日", resolved.target_pid_queries)
+        self.assertNotIn("1900年5月12日", resolved.global_queries)
+        self.assertEqual(recipe["reason"], "diary_requires_date_first_lookup")
+
+    def test_source_resolver_models_yamagata_opinion_as_contained_document(self):
+        footnote = ParsedFootnote(
+            id="contained1",
+            text="山縣有朋：《山縣有朋意見書》，第12頁。",
+            title="山縣有朋意見書",
+            author="山縣有朋",
+            page_numbers=[12],
+        )
+
+        resolved = resolve_source(footnote, claim_text="山縣有朋在意见书中提出了相关政策主张。")
+        recipe = build_manual_search_recipe(
+            footnote,
+            claim_text="山縣有朋在意见书中提出了相关政策主张。",
+            current_status="source_unavailable",
+        )
+
+        self.assertEqual(resolved.resolver, "ContainedDocumentResolver")
+        self.assertEqual(resolved.source_type, "contained_document")
+        self.assertEqual(resolved.pid_scope_strategy, "known_document_pid_then_host_fallback")
+        self.assertIn("3025431", resolved.known_pid_candidates)
+        self.assertNotIn("host_title_missing_for_contained_document", resolved.warnings)
+        self.assertIn("山縣有朋意見書", resolved.target_pid_queries)
+        self.assertEqual(recipe["reason"], "contained_document_requires_host_discovery")
+        self.assertEqual(recipe["suggested_pid_scope"], "3025431")
+
+    def test_source_graph_special_term_bucket_blocks_bare_ooasa_query(self):
+        footnote = parse_footnote_text(
+            "4",
+            "［日］《静岡県で大麻につき流言》，《日本近代思想大系 5：宗教と国家》，第 121 页。",
+        )
+        plan = build_source_query_plan(footnote, claim_text="神宮大麻の配布をめぐって流言が生じた。")
+
+        self.assertIn("大麻", plan.blocked_standalone_terms)
+        self.assertNotIn("大麻", plan.global_fulltext_queries(max_queries=8))
+        self.assertTrue(any("神宮大麻" in query for query in plan.special_term_bucket))
+
+    def test_dedupe_result_dicts_uses_candidate_footnote_paragraph_and_source_key(self):
+        item = {
+            "candidate_id": "p4-fp4n1",
+            "paragraph_index": 4,
+            "translation_text": "同一论文句子。",
+            "footnote_id": "p4n1",
+            "footnote": {"id": "p4n1", "title": "日本外交文書", "text": "日本外交文書第32卷，第51页。"},
+        }
+        duplicate = dict(item)
+
+        self.assertEqual(len(dedupe_result_dicts([item, duplicate])), 1)
+
+    def test_partial_finalizer_writes_canonical_json_and_report(self):
+        tmpdir = Path(tempfile.mkdtemp())
+        payload = {
+            "document": {"title": "PDF 论文", "paragraph_count": 1, "footnote_count": 1},
+            "candidate_batch": {"total_candidates": 1, "processed_candidates": 1},
+            "results": [
+                {
+                    "candidate_id": "p1-f1",
+                    "paragraph_index": 1,
+                    "paragraph_text": "论文句子。",
+                    "translation_text": "论文句子。",
+                    "footnote_id": "1",
+                    "footnote": {"id": "1", "text": "脚注。", "title": "测试史料"},
+                    "verification_status": "source_found",
+                    "artifacts": {},
+                }
+            ],
+        }
+
+        self.assertTrue(partial_payload_is_complete(payload))
+        finalized = finalize_partial_payload(payload, output_dir=tmpdir, require_complete=True)
+
+        self.assertTrue((tmpdir / "verification_results.json").exists())
+        self.assertTrue((tmpdir / "verification_report.md").exists())
+        self.assertEqual(finalized["summary"]["total_candidates"], 1)
+
+    def test_fullrun_next_stage_respects_restricted_download_flag(self):
+        from scripts import run_historical_citation_pdf_fullrun as fullrun_script
+
+        tmpdir = Path(tempfile.mkdtemp())
+        calls = []
+
+        def fake_run(cmd):
+            calls.append(cmd)
+
+        args = SimpleNamespace(
+            no_next_stage=False,
+            restricted_download=False,
+            max_search_results=3,
+            page_window=4,
+            ocr_model="ndlocr_lite",
+            next_stage_timeout=600,
+            retry_timeout=900,
+            review_model="gemma4:e4b",
+            review_timeout_seconds=300,
+            platform=["ndl"],
+            candidate_id=["p2-fp2n1"],
+            footnote_id=["p2n1"],
+        )
+        with patch.object(fullrun_script, "_run", side_effect=fake_run):
+            fullrun_script._run_next_stage("paper.pdf", tmpdir / "combined.json", tmpdir, args)
+
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("--restricted-download", calls[0])
+        self.assertNotIn("--restricted-download", calls[1])
+        self.assertIn("--review-model", calls[0])
+        self.assertIn("gemma4:e4b", calls[0])
+        self.assertIn("--review-timeout-seconds", calls[0])
+        self.assertIn("300", calls[0])
+        self.assertIn("--candidate-id", calls[0])
+        self.assertIn("p2-fp2n1", calls[0])
+        self.assertIn("--footnote-id", calls[0])
+        self.assertIn("p2n1", calls[0])
+        self.assertIn("--retry-download-timeouts", calls[1])
+        self.assertIn("900", calls[1])
+
+        calls.clear()
+        args.restricted_download = True
+        with patch.object(fullrun_script, "_run", side_effect=fake_run):
+            fullrun_script._run_next_stage("paper.pdf", tmpdir / "combined.json", tmpdir, args)
+
+        self.assertIn("--restricted-download", calls[0])
+        self.assertIn("--restricted-download", calls[1])
+
+    def test_pdf_next_stage_defaults_to_formal_gemma_review(self):
+        from scripts import refine_historical_citation_pdf_next_stage as next_stage_script
+        from scripts import run_historical_citation_pdf_fullrun as fullrun_script
+
+        next_stage_args = next_stage_script.build_parser().parse_args(
+            ["paper.pdf", "--combined-json", "combined.json", "--output-dir", "out"]
+        )
+        fullrun_args = fullrun_script.build_parser().parse_args(["paper.pdf"])
+
+        self.assertTrue(next_stage_args.prefer_ollama_review)
+        self.assertEqual(next_stage_args.review_model, "gemma4:e4b")
+        self.assertNotIn("qwen", next_stage_args.review_model.lower())
+        self.assertEqual(fullrun_args.review_model, "gemma4:e4b")
+        self.assertEqual(next_stage_args.review_timeout_seconds, 300)
+        self.assertEqual(fullrun_args.review_timeout_seconds, 300)
+        self.assertEqual(fullrun_args.next_stage_timeout, 600)
+        self.assertEqual(fullrun_args.retry_timeout, 900)
+        self.assertEqual(next_stage_args.slow_event_threshold_seconds, 240)
+        self.assertEqual(next_stage_args.candidate_id, [])
+        self.assertEqual(next_stage_args.footnote_id, [])
+        self.assertEqual(fullrun_args.candidate_id, [])
+        self.assertEqual(fullrun_args.footnote_id, [])
+
+    def test_page_mapping_reuses_source_level_cache_alias(self):
+        tmpdir = Path(tempfile.mkdtemp())
+        source_cache_key = "日本外交文書|第32巻|明治32年"
+        alias_key = f"source:{source_cache_key}"
+        (tmpdir / "page_mapping_cache.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "mappings": {
+                        alias_key: {
+                            "anchor_scan_page": 12,
+                            "anchor_book_page": 20,
+                            "pages_per_scan": 2,
+                            "ndl_id": "3448126",
+                            "source_level_cache_key": source_cache_key,
+                        }
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="论文句子。",
+            translation_text="论文句子。",
+            footnote_id="1",
+            footnote=ParsedFootnote(
+                id="1",
+                text="日本外交文書第32巻，24頁。",
+                title="日本外交文書",
+                page_numbers=[24],
+            ),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="日本外交文書",
+                    url="https://dl.ndl.go.jp/pid/3448126",
+                    ndl_id="3448126",
+                )
+            ],
+            artifacts={"source_level_cache_key": source_cache_key},
+        )
+        verifier._resolve_ndlsearch_matches = lambda _candidate: None  # type: ignore[method-assign]
+
+        mapping = verifier._estimate_scan_page_range(
+            candidate,
+            output_dir=tmpdir,
+            restricted_download=True,
+            page_window=2,
+            top_match=candidate.ndl_matches[0],
+        )
+
+        self.assertIsNotNone(mapping)
+        self.assertEqual(mapping["start_scan_page"], 13)
+        self.assertEqual(mapping["end_scan_page"], 15)
+        self.assertIn("source_level_page_mapping_cache_hit", candidate.notes)
+        cache_payload = json.loads((tmpdir / "page_mapping_cache.json").read_text(encoding="utf-8"))
+        self.assertIn("3448126", cache_payload["mappings"])
+
+    def test_source_level_ocr_cache_reuses_matching_pid_pages(self):
+        tmpdir = Path(tempfile.mkdtemp())
+        source_cache_key = "日本外交文書|第32巻|明治32年"
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="论文句子。",
+            translation_text="论文句子。",
+            footnote_id="1",
+            footnote=ParsedFootnote(id="1", text="日本外交文書第32巻，24頁。", title="日本外交文書"),
+            artifacts={"source_level_cache_key": source_cache_key},
+        )
+
+        verifier._save_source_level_ocr_pages(
+            candidate,
+            output_dir=tmpdir,
+            ndl_id="3448126",
+            ocr_model="ndlocr_lite",
+            extracted_pages=[(24, "門戸開放ニ関スル本文。")],
+            page_label_mode="scan",
+        )
+        cached = verifier._load_source_level_ocr_pages(
+            candidate,
+            output_dir=tmpdir,
+            ndl_id="3448126",
+            target_pages=[24],
+            ocr_model="ndlocr_lite",
+            page_mapping=None,
+        )
+
+        self.assertIsNotNone(cached)
+        pages, page_label_mode = cached
+        self.assertEqual(page_label_mode, "scan")
+        self.assertEqual(pages, [(24, "門戸開放ニ関スル本文。")])
+        self.assertIn("source_level_ocr_cache_hit", candidate.notes)
+
+        mismatch = CitationCandidate(
+            candidate_id="p1-f2",
+            paragraph_index=1,
+            paragraph_text="论文句子。",
+            translation_text="论文句子。",
+            footnote_id="2",
+            footnote=ParsedFootnote(id="2", text="日本外交文書第32巻，25頁。", title="日本外交文書"),
+            artifacts={"source_level_cache_key": source_cache_key},
+        )
+        self.assertIsNone(
+            verifier._load_source_level_ocr_pages(
+                mismatch,
+                output_dir=tmpdir,
+                ndl_id="2530174",
+                target_pages=[24],
+                ocr_model="ndlocr_lite",
+                page_mapping=None,
+            )
+        )
+
+    def test_claim_fulltext_queries_expand_john_hay_to_japanese_terms(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="论文句子。",
+            translation_text="约翰·海伊向各国提出在华门户开放、机会均等原则，得到了日本的赞同。",
+            footnote_id="1",
+            footnote=ParsedFootnote(id="1", text="日本外交文書第32卷。", title="日本外交文書"),
+        )
+
+        queries = verifier._claim_fulltext_queries(candidate)
+
+        self.assertIn("ジョン・ヘイ", queries)
+        self.assertIn("米國國務長官", queries)
+        self.assertIn("門戶開放", queries)
+        self.assertIn("機會均等", queries)
+        self.assertIn("帝國政府回答", queries)
+
+    def test_fulltext_only_status_reflects_gemma_decision(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="论文句子。",
+            translation_text="论文句子。",
+            footnote_id="1",
+            footnote=ParsedFootnote(id="1", text="脚注。", title="测试史料"),
+            verification_status="fulltext_only_hit",
+            support_status="fulltext_only_hit",
+            artifacts={
+                "llm_review": {
+                    "decision": "partial_support",
+                    "reason": "只证明主题相关，尚不能作直接出处。",
+                    "confidence": 0.8,
+                }
+            },
+        )
+
+        verifier._apply_fulltext_only_review_status(candidate)
+
+        self.assertEqual(candidate.verification_status, "fulltext_only_partial_support")
+        self.assertEqual(candidate.support_status, "fulltext_only_partial_support")
+        self.assertEqual(candidate.support_reason, "只证明主题相关，尚不能作直接出处。")
+        self.assertEqual(candidate.confidence, 0.8)
+
+    def test_target_pid_fulltext_probe_records_no_hit_diagnostics(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="1900年5月12日，原敬在日记中记录了相关交涉。",
+            translation_text="1900年5月12日，原敬在日记中记录了相关交涉。",
+            footnote_id="1",
+            footnote=ParsedFootnote(
+                id="1",
+                text="『原敬日記』1900年5月12日条，第84頁。",
+                title="原敬日記",
+                page_numbers=[84],
+            ),
+        )
+        match = NDLSearchMatch(
+            title="原敬日記",
+            url="https://dl.ndl.go.jp/pid/2982135",
+            ndl_id="2982135",
+            score=0.9,
+            metadata={"search_route": "resolver_config_known_pid", "known_pid_candidate": True},
+        )
+
+        with patch(
+            "modules.historical_citation_verifier.probe_ndl_fulltext_context",
+            return_value=SimpleNamespace(
+                pid="2982135",
+                title="原敬日記",
+                status="no_direct_hit",
+                hits=[],
+                queries_tried=["1900年5月12日"],
+                note="no direct hit",
+            ),
+        ):
+            verifier._probe_target_pid_fulltext_hints(candidate, match)
+
+        probe = candidate.artifacts["ndl_fulltext_probe"]
+        self.assertEqual(probe["pid"], "2982135")
+        self.assertEqual(probe["status"], "no_direct_hit")
+        self.assertEqual(probe["hit_count"], 0)
+        self.assertEqual(probe["pdf_page_hit_count"], 0)
+        self.assertFalse(candidate.artifacts.get("ndl_fulltext_hints"))
+
+    def test_diary_target_pid_probe_records_date_lookup_diagnostic(self):
+        from modules.historical_citation.reporting import _format_diary_date_lookup_diagnostic
+
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="1900年5月12日，原敬在日记中记录了相关交涉。",
+            translation_text="1900年5月12日，原敬在日记中记录了相关交涉。",
+            footnote_id="1",
+            footnote=ParsedFootnote(
+                id="1",
+                text="『原敬日記』1900年5月12日条，第84頁。",
+                title="原敬日記",
+                page_numbers=[84],
+            ),
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "diary",
+                    "known_pid_candidates": ["2982135"],
+                    "dates": ["1900年5月12日", "1900年"],
+                    "target_pid_queries": ["1900年5月12日", "1900年", "原敬日記"],
+                },
+                "source_graph": {
+                    "source_type": "diary",
+                    "known_pid_candidates": ["2982135"],
+                },
+            },
+        )
+        match = NDLSearchMatch(title="原敬日記", url="https://dl.ndl.go.jp/pid/2982135", ndl_id="2982135")
+        fake_probe = SimpleNamespace(
+            pid="2982135",
+            title="原敬日記",
+            status="direct_hit",
+            note="",
+            queries_tried=["1900年5月12日", "1900年", "原敬日記"],
+            hits=[
+                SimpleNamespace(
+                    query="原敬日記",
+                    snippet="原敬日記の声価については今さら吹聴する必要はない。",
+                    pdf_page=7,
+                    pid="2982135",
+                    cid="",
+                    content_index=1,
+                    page_basis="dl_ndl_fulltext_content_index",
+                )
+            ],
+        )
+
+        with patch("modules.historical_citation_verifier.probe_ndl_fulltext_context", return_value=fake_probe):
+            verifier._probe_target_pid_fulltext_hints(candidate, match)
+
+        diagnostic = candidate.artifacts["diary_date_lookup_diagnostic"]
+        self.assertEqual(diagnostic["date_hit_count"], 0)
+        self.assertEqual(diagnostic["title_hit_count"], 1)
+        self.assertEqual(diagnostic["recommended_action"], "toc_index_then_small_page_window_ocr")
+        self.assertEqual(diagnostic["small_page_window"]["start_page"], 82)
+        self.assertEqual(diagnostic["small_page_window"]["end_page"], 86)
+        self.assertIn("diary_date_lookup_needs_index_or_page_window_ocr", candidate.notes)
+        diagnostic_line = _format_diary_date_lookup_diagnostic(candidate.artifacts)
+        self.assertIn("Diary date lookup diagnostic", diagnostic_line)
+        self.assertIn("scan_window=82-86", diagnostic_line)
+
+    def test_contained_document_target_pid_probe_records_known_pid_diagnostic(self):
+        from modules.historical_citation.reporting import (
+            _format_contained_document_lookup_diagnostic,
+            _format_source_type_diagnostic_summary,
+        )
+
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="山縣有朋在意见书中提出了相关政策主张。",
+            translation_text="山縣有朋在意见书中提出了相关政策主张。",
+            footnote_id="1",
+            footnote=ParsedFootnote(
+                id="1",
+                text="山縣有朋：《山縣有朋意見書》，第12頁。",
+                title="山縣有朋意見書",
+                author="山縣有朋",
+                page_numbers=[12],
+            ),
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "contained_document",
+                    "known_pid_candidates": ["3025431"],
+                    "target_pid_queries": ["山縣有朋意見書"],
+                },
+                "source_graph": {
+                    "source_type": "contained_document",
+                    "known_pid_candidates": ["3025431"],
+                    "contained_title": "山縣有朋意見書",
+                    "host_title": "",
+                },
+            },
+        )
+        match = NDLSearchMatch(title="山県有朋意見書", url="https://dl.ndl.go.jp/pid/3025431", ndl_id="3025431")
+        fake_probe = SimpleNamespace(
+            pid="3025431",
+            title="山県有朋意見書",
+            status="direct_hit",
+            note="",
+            queries_tried=["山縣有朋意見書"],
+            hits=[
+                SimpleNamespace(
+                    query="山縣有朋意見書",
+                    snippet="山縣有朋意見書",
+                    pdf_page=3,
+                    pid="3025431",
+                    cid="",
+                    content_index=1,
+                    page_basis="dl_ndl_fulltext_content_index",
+                )
+            ],
+        )
+
+        with patch("modules.historical_citation_verifier.probe_ndl_fulltext_context", return_value=fake_probe):
+            verifier._probe_target_pid_fulltext_hints(candidate, match)
+
+        diagnostic = candidate.artifacts["contained_document_lookup_diagnostic"]
+        self.assertEqual(diagnostic["title_hit_count"], 1)
+        self.assertTrue(diagnostic["host_missing"])
+        self.assertEqual(diagnostic["recommended_action"], "known_document_pid_first_then_host_fallback")
+        self.assertIn("contained_document_known_pid_first_then_host_fallback", candidate.notes)
+        diagnostic_line = _format_contained_document_lookup_diagnostic(candidate.artifacts)
+        self.assertIn("Contained document lookup diagnostic", diagnostic_line)
+        self.assertIn("host=missing", diagnostic_line)
+        summary_line = _format_source_type_diagnostic_summary(candidate.to_dict())
+        self.assertIn("source_type=contained_document", summary_line)
+        self.assertIn("contained=山縣有朋意見書", summary_line)
+        self.assertIn("host=missing", summary_line)
+        self.assertIn("next=known PID first, then host fallback", summary_line)
+
+    def test_strict_resolver_forces_known_pid_probe_even_when_fulltext_hints_exist(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="约翰·海伊提出门户开放。",
+            translation_text="约翰·海伊提出门户开放、机会均等。",
+            footnote_id="1",
+            footnote=ParsedFootnote(
+                id="1",
+                text="外務省編『日本外交文書』第32巻、216頁。",
+                title="日本外交文書",
+                page_numbers=[216],
+            ),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="日本外交文書",
+                    url="https://dl.ndl.go.jp/pid/3448126",
+                    ndl_id="3448126",
+                    metadata={"search_route": "resolver_config_known_pid", "known_pid_candidate": True},
+                ),
+                NDLSearchMatch(
+                    title="日本外交文書",
+                    url="https://dl.ndl.go.jp/pid/3448128",
+                    ndl_id="3448128",
+                    metadata={
+                        "search_route": "resolver_config_known_pid",
+                        "known_pid_candidate": True,
+                        "fulltext_hints": [
+                            {
+                                "query": "門戶開放",
+                                "snippet": "門戶開放",
+                                "pdf_page": 32,
+                                "pid": "3448128",
+                            }
+                        ],
+                    },
+                ),
+                NDLSearchMatch(
+                    title="日本外交文書",
+                    url="https://dl.ndl.go.jp/pid/14000000",
+                    ndl_id="14000000",
+                    metadata={
+                        "search_route": "ndl_digital_fulltext_api",
+                        "fulltext_hints": [
+                            {
+                                "query": "門戶開放",
+                                "snippet": "別巻の門戶開放。",
+                                "pdf_page": 5,
+                                "pid": "14000000",
+                            }
+                        ],
+                    },
+                ),
+            ],
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "volume_series",
+                    "known_pid_candidates": ["3448128", "3448126"],
+                    "target_pid_queries": ["門戶開放"],
+                },
+                "source_graph": {
+                    "source_type": "volume_series",
+                    "known_pid_candidates": ["3448128", "3448126"],
+                },
+            },
+        )
+        calls = []
+
+        def fake_probe(pid, keywords):
+            calls.append((pid, list(keywords)))
+            return SimpleNamespace(
+                pid=pid,
+                title="日本外交文書",
+                status="direct_hit",
+                note="",
+                queries_tried=["門戶開放"],
+                hits=[
+                    SimpleNamespace(
+                        query="門戶開放",
+                        snippet="支那ニ於ケル門戶開放。",
+                        pdf_page=32,
+                        pid=pid,
+                        cid="",
+                        content_index=1,
+                        page_basis="dl_ndl_fulltext_content_index",
+                    )
+                ],
+            )
+
+        with patch("modules.historical_citation_verifier.probe_ndl_fulltext_context", side_effect=fake_probe):
+            verifier._rerank_matches_for_candidate_fulltext(candidate)
+
+        self.assertEqual([pid for pid, _keywords in calls], ["3448128"])
+        self.assertEqual(candidate.artifacts["ndl_fulltext_probe"]["pid"], "3448128")
+        self.assertEqual(candidate.artifacts["ndl_fulltext_probe"]["status"], "direct_hit")
+        self.assertEqual(candidate.artifacts["target_pid_fulltext_probes"][0]["pid"], "3448128")
+        self.assertNotIn("non_equivalent_fulltext_probes", candidate.artifacts)
+        self.assertNotIn("14000000", {hint.get("pid") for hint in candidate.artifacts["ndl_fulltext_hints"]})
+
+    def test_strict_resolver_does_not_let_fulltext_lead_overwrite_target_probe(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="原敬日记相关说明。",
+            translation_text="1900年5月12日，原敬在日记中记录了相关交涉。",
+            footnote_id="1",
+            footnote=ParsedFootnote(
+                id="1",
+                text="『原敬日記』1900年5月12日条，第84頁。",
+                title="原敬日記",
+                page_numbers=[84],
+            ),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="影印原敬日記",
+                    url="https://dl.ndl.go.jp/pid/14077924",
+                    ndl_id="14077924",
+                    metadata={
+                        "search_route": "ndl_digital_fulltext_api",
+                        "fulltext_hints": [
+                            {
+                                "query": "原敬日記",
+                                "snippet": "影印原敬日記",
+                                "pdf_page": 9,
+                                "pid": "14077924",
+                            }
+                        ],
+                    },
+                ),
+                NDLSearchMatch(
+                    title="原敬日記",
+                    url="https://dl.ndl.go.jp/pid/2982135",
+                    ndl_id="2982135",
+                    metadata={"search_route": "resolver_config_known_pid", "known_pid_candidate": True},
+                ),
+            ],
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "diary",
+                    "known_pid_candidates": ["2982135"],
+                    "dates": ["1900年5月12日", "1900年"],
+                    "target_pid_queries": ["1900年5月12日", "1900年", "原敬日記"],
+                },
+                "source_graph": {
+                    "source_type": "diary",
+                    "known_pid_candidates": ["2982135"],
+                },
+            },
+        )
+        calls = []
+
+        def fake_probe(pid, keywords):
+            calls.append((pid, list(keywords)))
+            return SimpleNamespace(
+                pid=pid,
+                title="原敬日記",
+                status="direct_hit",
+                note="",
+                queries_tried=["1900年5月12日", "1900年", "原敬日記"],
+                hits=[
+                    SimpleNamespace(
+                        query="原敬日記",
+                        snippet="原敬日記の目次。",
+                        pdf_page=7,
+                        pid=pid,
+                        cid="",
+                        content_index=1,
+                        page_basis="dl_ndl_fulltext_content_index",
+                    )
+                ],
+            )
+
+        with patch("modules.historical_citation_verifier.probe_ndl_fulltext_context", side_effect=fake_probe):
+            verifier._rerank_matches_for_candidate_fulltext(candidate)
+
+        self.assertEqual([pid for pid, _keywords in calls], ["2982135"])
+        self.assertEqual(candidate.artifacts["ndl_fulltext_probe"]["pid"], "2982135")
+        self.assertEqual(candidate.artifacts["diary_date_lookup_diagnostic"]["ndl_id"], "2982135")
+        self.assertNotIn("14077924", {hint.get("pid") for hint in candidate.artifacts.get("ndl_fulltext_hints", [])})
+
+    def test_strict_resolver_injects_known_pid_when_only_fulltext_lead_exists(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p6-fp6n6",
+            paragraph_index=6,
+            paragraph_text="休斯提出海军军备限制，规定主力舰比例为10:10:6。",
+            translation_text="休斯提出海军军备限制，规定主力舰比例为10:10:6。",
+            footnote_id="p6n6",
+            footnote=ParsedFootnote(
+                id="p6n6",
+                text="外务省编：《日本外交文書 ワシントン会議 上》，1974年版。",
+                title="日本外交文書",
+            ),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="日本外交文書に関する別資料",
+                    url="https://dl.ndl.go.jp/pid/14000000",
+                    ndl_id="14000000",
+                    metadata={
+                        "search_route": "ndl_digital_fulltext_api",
+                        "claim_fulltext_global_recheck": True,
+                        "fulltext_hints": [
+                            {
+                                "query": "日本外交文書 1974年",
+                                "snippet": "別資料中の日本外交文書。",
+                                "pdf_page": 23,
+                                "pid": "14000000",
+                            }
+                        ],
+                    },
+                )
+            ],
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "volume_series",
+                    "known_pid_candidates": ["11927523"],
+                    "target_pid_queries": ["米国案ノ十対六", "ヒューズ国務長官", "海軍軍備制限問題"],
+                },
+                "source_graph": {
+                    "source_type": "volume_series",
+                    "known_pid_candidates": ["11927523"],
+                },
+            },
+        )
+        calls = []
+
+        def fake_probe(pid, keywords):
+            calls.append((pid, list(keywords)))
+            return SimpleNamespace(
+                pid=pid,
+                title="日本外交文書 ワシントン会議 上",
+                status="direct_hit",
+                note="",
+                queries_tried=["米国案ノ十対六"],
+                hits=[
+                    SimpleNamespace(
+                        query="米国案ノ十対六",
+                        snippet="報知米国案ノ十対六ノ比率ハ其根拠奈辺ニアルヤ。",
+                        pdf_page=143,
+                        pid=pid,
+                        cid="",
+                        content_index=143,
+                        page_basis="dl_ndl_fulltext_content_index",
+                    )
+                ],
+            )
+
+        with patch("modules.historical_citation_verifier.probe_ndl_fulltext_context", side_effect=fake_probe):
+            verifier._rerank_matches_for_candidate_fulltext(candidate)
+
+        self.assertEqual([pid for pid, _keywords in calls], ["11927523"])
+        self.assertIn("strict_resolver_pid_candidate_injected", candidate.notes)
+        self.assertEqual(candidate.artifacts["strict_resolver_pid_candidates_injected"], ["11927523"])
+        self.assertEqual(candidate.ndl_matches[0].ndl_id, "11927523")
+        self.assertEqual(candidate.artifacts["ndl_fulltext_probe"]["pid"], "11927523")
+        self.assertIn("11927523", {hint.get("pid") for hint in candidate.artifacts["ndl_fulltext_hints"]})
+        self.assertNotIn("14000000", {hint.get("pid") for hint in candidate.artifacts["ndl_fulltext_hints"]})
+
+    def test_pdf_next_stage_records_equivalent_pid_group(self):
+        from scripts.refine_historical_citation_pdf_next_stage import record_equivalent_pid_group
+
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="论文句子。",
+            translation_text="论文句子。",
+            footnote_id="1",
+            footnote=ParsedFootnote(id="1", text="日本外交文書第32卷。", title="日本外交文書"),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="日本外交文書",
+                    url="https://dl.ndl.go.jp/pid/3448126",
+                    ndl_id="3448126",
+                    score=0.95,
+                    metadata={"claim_fulltext_global_recheck": True, "claim_fulltext_global_query": "日本外交文書 門戶開放"},
+                ),
+                NDLSearchMatch(
+                    title="日本外交文書",
+                    url="https://dl.ndl.go.jp/pid/3448128",
+                    ndl_id="3448128",
+                    score=0.9,
+                    metadata={"search_route": "ndl_digital_fulltext_api"},
+                ),
+                NDLSearchMatch(
+                    title="別資料",
+                    url="https://dl.ndl.go.jp/pid/9999999",
+                    ndl_id="9999999",
+                    score=0.7,
+                ),
+            ],
+        )
+
+        group = record_equivalent_pid_group(candidate)
+
+        self.assertEqual([item["ndl_id"] for item in group], ["3448126", "3448128"])
+        self.assertEqual(candidate.artifacts["equivalent_pid_group"][0]["fulltext_query"], "日本外交文書 門戶開放")
+        self.assertIn("equivalent_pid_group_recorded", candidate.notes)
+
+    def test_pdf_next_stage_equivalent_pid_group_includes_resolver_config_siblings(self):
+        from scripts.refine_historical_citation_pdf_next_stage import record_equivalent_pid_group
+
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="论文句子。",
+            translation_text="论文句子。",
+            footnote_id="1",
+            footnote=ParsedFootnote(id="1", text="日本外交文書第32巻。", title="日本外交文書"),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="日本外交文書",
+                    url="https://dl.ndl.go.jp/pid/3448126",
+                    ndl_id="3448126",
+                    score=0.95,
+                )
+            ],
+            artifacts={
+                "source_resolver_plan": {
+                    "known_pid_candidates": ["3448126", "2530174", "3448128"]
+                }
+            },
+        )
+
+        group = record_equivalent_pid_group(candidate)
+
+        self.assertEqual([item["ndl_id"] for item in group], ["3448126", "2530174", "3448128"])
+        self.assertTrue(group[1]["configured_pid_candidate"])
+        self.assertEqual(group[1]["search_route"], "resolver_config")
+
+    def test_pdf_next_stage_separates_configured_equivalents_from_fulltext_leads(self):
+        from scripts.refine_historical_citation_pdf_next_stage import record_equivalent_pid_group
+
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="论文句子。",
+            translation_text="论文句子。",
+            footnote_id="1",
+            footnote=ParsedFootnote(id="1", text="日本外交文書第32巻。", title="日本外交文書"),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="日本外交文書",
+                    url="https://dl.ndl.go.jp/pid/3448128",
+                    ndl_id="3448128",
+                    score=0.95,
+                    metadata={"search_route": "resolver_config_known_pid", "known_pid_candidate": True},
+                ),
+                NDLSearchMatch(
+                    title="日本外交文書",
+                    url="https://dl.ndl.go.jp/pid/3448132",
+                    ndl_id="3448132",
+                    score=0.7,
+                    metadata={"search_route": "ndl_digital_fulltext_api"},
+                ),
+            ],
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "volume_series",
+                    "known_pid_candidates": ["3448128", "3448126", "2530174"],
+                }
+            },
+        )
+
+        group = record_equivalent_pid_group(candidate)
+
+        self.assertEqual([item["ndl_id"] for item in group], ["3448128", "3448126", "2530174"])
+        self.assertNotIn("3448132", [item["ndl_id"] for item in group])
+        self.assertEqual(candidate.artifacts["fulltext_lead_pid_group"][0]["ndl_id"], "3448132")
+        self.assertEqual(
+            candidate.artifacts["fulltext_lead_pid_group"][0]["scope"],
+            "global_fulltext_lead_not_equivalent",
+        )
+
+    def test_fulltext_lead_manual_hint_uses_source_type_templates(self):
+        from modules.historical_citation.reporting import _format_fulltext_lead_manual_hint
+
+        volume_hint = _format_fulltext_lead_manual_hint(
+            {
+                "source_resolver_plan": {
+                    "source_type": "volume_series",
+                    "known_pid_candidates": ["3448128"],
+                    "target_pid_queries": ["門戶開放"],
+                },
+                "fulltext_lead_pid_group": [{"ndl_id": "3448132"}],
+            }
+        )
+        diary_hint = _format_fulltext_lead_manual_hint(
+            {
+                "source_resolver_plan": {
+                    "source_type": "diary",
+                    "known_pid_candidates": ["2982135"],
+                    "target_pid_queries": ["1900年5月12日"],
+                },
+                "fulltext_lead_pid_group": [{"ndl_id": "2982137"}],
+            }
+        )
+        contained_hint = _format_fulltext_lead_manual_hint(
+            {
+                "source_resolver_plan": {
+                    "source_type": "contained_document",
+                    "known_pid_candidates": ["3025431"],
+                    "target_pid_queries": ["山縣有朋意見書"],
+                },
+                "source_graph": {
+                    "host_title": "山縣有朋関係文書",
+                    "contained_title": "山縣有朋意見書",
+                },
+                "fulltext_lead_pid_group": [{"ndl_id": "3363125"}],
+            }
+        )
+
+        self.assertIn("volume_series: 先核对卷册/年份/文书题名", volume_hint)
+        self.assertIn("diary: 先确认日期对应卷册", diary_hint)
+        self.assertIn("目录/索引和小页窗 OCR", diary_hint)
+        self.assertIn("contained_document: 先确认 host=山縣有朋関係文書", contained_hint)
+        self.assertIn("contained=山縣有朋意見書", contained_hint)
+
+    def test_pdf_next_stage_equivalent_pid_group_ignores_secondary_title_mismatch(self):
+        from scripts.refine_historical_citation_pdf_next_stage import record_equivalent_pid_group
+
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="论文句子。",
+            translation_text="论文句子。",
+            footnote_id="1",
+            footnote=ParsedFootnote(id="1", text="原敬日記1900年5月12日。", title="原敬日記"),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="立憲国家と日露戦争 : 外交と内政 : 1898～1905",
+                    url="https://dl.ndl.go.jp/pid/14016039",
+                    ndl_id="14016039",
+                    score=0.9,
+                )
+            ],
+            artifacts={"source_resolver_plan": {"known_pid_candidates": ["2982135"]}},
+        )
+
+        group = record_equivalent_pid_group(candidate)
+
+        self.assertEqual(group, [])
+        self.assertNotIn("equivalent_pid_group", candidate.artifacts)
+
+    def test_pdf_next_stage_equivalent_pid_group_ignores_wrong_diary_volume(self):
+        from scripts.refine_historical_citation_pdf_next_stage import record_equivalent_pid_group
+
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="论文句子。",
+            translation_text="论文句子。",
+            footnote_id="1",
+            footnote=ParsedFootnote(id="1", text="原敬日記1900年5月12日。", title="原敬日記"),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="原敬日記",
+                    url="https://dl.ndl.go.jp/pid/2982137",
+                    ndl_id="2982137",
+                    score=0.9,
+                )
+            ],
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "diary",
+                    "known_pid_candidates": ["2982135"],
+                }
+            },
+        )
+
+        group = record_equivalent_pid_group(candidate)
+
+        self.assertEqual(group, [])
+        self.assertNotIn("equivalent_pid_group", candidate.artifacts)
+
+    def test_fulltext_only_hit_promotes_unavailable_ndl_source_to_weak_evidence(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="论文句子。",
+            translation_text="论文句子。",
+            footnote_id="1",
+            footnote=ParsedFootnote(
+                id="1",
+                text="田中頼庸「神祇官を復し教導寮等設置につき建白」『宗教と国家』40頁。",
+                title="神祇官を復し教導寮等設置につき建白",
+                host_title="日本近代思想大系 5：宗教と国家",
+                contained_title="神祇官を復し教導寮等設置につき建白",
+                source_relation="contained_in_host",
+                page_numbers=[40],
+            ),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="日本近代思想大系",
+                    url="https://dl.ndl.go.jp/pid/13260166",
+                    ndl_id="13260166",
+                    metadata={},
+                )
+            ],
+            verification_status="download_failed",
+        )
+
+        def fake_probe(_candidate, _match):
+            _candidate.artifacts["ndl_fulltext_hints"] = [
+                {
+                    "pid": "13260166",
+                    "book_id": "13260166",
+                    "pdf_page": 28,
+                    "cid": "cid-4",
+                    "query": "神祇官を復し教導寮等設置につき建白",
+                    "snippet": "田中頼庸神祇官を復し教導寮等設置につき建白。",
+                    "expanded_context": "前文。田中頼庸神祇官を復し教導寮等設置につき建白。後文。",
+                    "page_basis": "dl_ndl_fulltext_content_index",
+                }
+            ]
+
+        verifier._probe_target_pid_fulltext_hints = fake_probe  # type: ignore[method-assign]
+        verifier._expand_first_fulltext_hint = lambda _candidate, **_kwargs: None  # type: ignore[method-assign]
+
+        self.assertTrue(verifier._mark_fulltext_only_hit_if_possible(candidate))
+        self.assertEqual(candidate.verification_status, "fulltext_only_hit")
+        self.assertEqual(candidate.support_status, "fulltext_only_hit")
+        self.assertEqual(candidate.artifacts["evidence_level"], "weak")
+
+    def test_title_only_fulltext_hint_is_lead_not_hit(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="论文句子。",
+            translation_text="约翰·海伊提出门户开放、机会均等。",
+            footnote_id="1",
+            footnote=ParsedFootnote(id="1", text="日本外交文書第32卷、216頁。", title="日本外交文書", page_numbers=[216]),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="日本外交文書",
+                    url="https://dl.ndl.go.jp/pid/3448055",
+                    ndl_id="3448055",
+                    metadata={},
+                )
+            ],
+            verification_status="download_failed",
+        )
+
+        def fake_probe(_candidate, _match):
+            _candidate.artifacts["ndl_fulltext_hints"] = [
+                {
+                    "pid": "3448055",
+                    "book_id": "3448055",
+                    "pdf_page": 4,
+                    "cid": "cid-4",
+                    "query": "日本外交文書",
+                    "snippet": "日本外交文書目次。",
+                    "expanded_context": "日本外交文書目次。",
+                    "page_basis": "dl_ndl_fulltext_content_index",
+                }
+            ]
+
+        verifier._probe_target_pid_fulltext_hints = fake_probe  # type: ignore[method-assign]
+        verifier._expand_first_fulltext_hint = lambda _candidate, **_kwargs: None  # type: ignore[method-assign]
+
+        self.assertTrue(verifier._mark_fulltext_only_hit_if_possible(candidate))
+        self.assertEqual(candidate.verification_status, "fulltext_lead_only")
+        self.assertEqual(candidate.support_status, "fulltext_lead_only")
+        self.assertEqual(candidate.artifacts["evidence_level"], "lead")
+
+    def test_fulltext_only_hit_scores_parallel_contexts_before_selecting_best(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n9",
+            paragraph_index=4,
+            paragraph_text="围绕神宫大麻，地方上出现流言并有人把大麻投入水火。",
+            translation_text="静冈县关于神宫大麻的流言称，有人把大麻投入水火或河流。",
+            footnote_id="p4n9",
+            footnote=ParsedFootnote(
+                id="p4n9",
+                text="《静岡県で大麻につき流言》，《日本近代思想大系 5：宗教と国家》，第103页。",
+                title="静岡県で大麻につき流言",
+                host_title="日本近代思想大系 5：宗教と国家",
+                contained_title="静岡県で大麻につき流言",
+                page_numbers=[103],
+            ),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="日本近代思想大系 5：宗教と国家",
+                    url="https://dl.ndl.go.jp/pid/13260166",
+                    ndl_id="13260166",
+                    metadata={},
+                )
+            ],
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "source_collection",
+                    "known_pid_candidates": ["13260166"],
+                    "target_pid_queries": ["静岡県で大麻につき流言", "神宮大麻 流言"],
+                }
+            },
+            verification_status="download_failed",
+        )
+
+        def fake_probe(_candidate, _match):
+            _candidate.artifacts["ndl_fulltext_hints"] = [
+                {
+                    "pid": "13260166",
+                    "book_id": "13260166",
+                    "pdf_page": 103,
+                    "cid": "bad",
+                    "query": "神宮大麻 流言",
+                    "snippet": "神宮大麻等に関する流言。",
+                    "expanded_context": "神宮大麻等に関する流言。伊勢皇太神ノ大麻ヲ。",
+                    "expanded_context_evidence_count": 1,
+                },
+                {
+                    "pid": "13260166",
+                    "book_id": "13260166",
+                    "pdf_page": 103,
+                    "cid": "good",
+                    "query": "静岡県で大麻につき流言",
+                    "snippet": "静岡県で大麻につき流言。",
+                    "expanded_context": "静岡県で大麻につき流言。玉串ヲ焼捨或ハ河流ニ投ジ、水火ニ投ズルヲ禁ジ候。",
+                    "expanded_context_evidence_count": 3,
+                },
+            ]
+
+        verifier._probe_target_pid_fulltext_hints = fake_probe  # type: ignore[method-assign]
+
+        self.assertTrue(verifier._mark_fulltext_only_hit_if_possible(candidate))
+        self.assertEqual(candidate.verification_status, "fulltext_only_hit")
+        self.assertEqual(candidate.artifacts["fulltext_selected_context_id"], "ctx1")
+        self.assertIn("水火", candidate.matched_japanese)
+        self.assertIn("河流", candidate.matched_japanese)
+        self.assertGreaterEqual(len(candidate.artifacts["fulltext_context_candidates"]), 2)
+        self.assertEqual(candidate.artifacts["fulltext_context_candidates"][0]["query"], "静岡県で大麻につき流言")
+
+    def test_pdf_word_style_report_uses_resume_report_structure(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="论文句子。",
+            translation_text="论文句子。",
+            footnote_id="1",
+            footnote=ParsedFootnote(id="1", text="脚注。", title="测试史料"),
+            verification_status="fulltext_only_hit",
+            support_status="fulltext_only_hit",
+            artifacts={
+                "fulltext_only_hit": True,
+                "fulltext_selected_context_id": "ctx1",
+                "fulltext_context_candidates": [
+                    {
+                        "context_id": "ctx1",
+                        "score": 5.5,
+                        "lead_category": "body_candidate",
+                        "pdf_page": 12,
+                        "query": "测试 查询",
+                        "cleaned_context": "清洗后的 OCR 或全文上下文。",
+                        "score_reasons": ["body_candidate"],
+                    }
+                ],
+            },
+        )
+
+        report = verifier._render_word_style_report(
+            {"title": "PDF 论文", "paragraph_count": 1, "footnote_count": 1},
+            [candidate],
+            total_candidates=1,
+            output_dir=Path(tempfile.mkdtemp()),
+        )
+
+        self.assertIn("历史引文核对中断点报告", report)
+        self.assertIn("已处理候选详情", report)
+        self.assertIn("fulltext_only_hit", report)
+        self.assertIn("全文上下文候选 Top N", report)
+        self.assertIn("清洗后的 OCR 或全文上下文", report)
+
     def test_docx_parser_module_extracts_document_with_callbacks(self):
         verifier = HistoricalCitationVerifier()
         docx_path = self._make_docx()
@@ -467,6 +4261,57 @@ class TestHistoricalCitationVerifier(unittest.TestCase):
         self.assertEqual(parsed.year, "2001")
         self.assertEqual(parsed.page_numbers, [41, 42])
 
+    def test_footnote_parser_prefers_parenthetical_original_title(self):
+        parsed = parse_footnote_text(
+            "10",
+            "外务省编：《日本外交文书》（外務省編：『日本外交文書』）第32卷，东京：外务省1955年版，第216～221页。",
+        )
+
+        self.assertEqual(parsed.title, "日本外交文書")
+        self.assertEqual(parsed.page_numbers, [216, 217, 218, 219, 220, 221])
+
+    def test_footnote_parser_keeps_gaiko_volume_ahead_of_fascicle(self):
+        text = (
+            "外务省编：《日本外交文书》第38卷第1册，东京：外务省1958年版，第450～452页。"
+            " 日本外交文書 第38卷 第38巻 第三十八巻 明治38年 第1册 第1巻 明治1年"
+        )
+
+        terms = extract_volume_terms(text)
+        parsed = ParsedFootnote(
+            id="11",
+            text="外务省编：《日本外交文书》第38卷第1册，东京：外务省1958年版，第450～452页。",
+            title="日本外交文書",
+            ndl_keyword="日本外交文書 第38卷 第38巻 第三十八巻 明治38年 第1册 第1巻 明治1年",
+        )
+        resolved = resolve_source(parsed)
+
+        self.assertIn("第38巻", terms)
+        self.assertIn("第1冊", terms)
+        self.assertNotIn("第1巻", terms)
+        self.assertNotIn("明治1年", terms)
+        self.assertTrue(resolved.global_queries)
+        self.assertEqual(resolved.known_pid_candidates[:2], ["3448160", "2530367"])
+        self.assertIn("第38巻", resolved.global_queries[0])
+        self.assertNotIn("第1巻", resolved.global_queries[0])
+
+    def test_parse_docx_propagates_repeated_original_title_alias(self):
+        verifier = HistoricalCitationVerifier()
+        first = verifier.parse_footnote(
+            "1",
+            "外务省编：《日本外交文书》（外務省編：『日本外交文書』）第32卷，东京：外务省1955年版，第216～221页。",
+        )
+        second = verifier.parse_footnote(
+            "2",
+            "外务省编：《日本外交文书》第38卷第1册，东京：外务省1958年版，第450～452页。",
+        )
+
+        from modules.historical_citation.footnote_parser import apply_footnote_title_aliases
+
+        apply_footnote_title_aliases([first, second])
+
+        self.assertEqual(second.title, "日本外交文書")
+        self.assertIn("title_alias_resolved:日本外交文书->日本外交文書", second.notes)
+
     def test_footnote_parser_module_extracts_quotes_and_translation_tail(self):
         quotes = extract_quotes("作者称“为了完成制度维护的示范行动”，并继续论述。")
         paragraph = type("Paragraph", (), {"quotes": [], "text": "说明：这是一段没有引号但可回退的译文内容"})()
@@ -524,6 +4369,34 @@ class TestHistoricalCitationVerifier(unittest.TestCase):
         self.assertEqual(matches[0].ndl_id, "12345678")
         self.assertEqual(matches[0].metadata["source_match_warning"], "ndl_relevance_low_metadata_score_fallback")
         self.assertFalse(matches[0].metadata.get("source_mismatch", False))
+
+    def test_ndl_platform_caches_public_metadata_search(self):
+        adapter = NDLSourcePlatformAdapter(
+            download_module_getter=lambda: DummyCountingNDLModule(),
+            prefer_external_module=False,
+            allow_external_fallback=False,
+        )
+        footnote = ParsedFootnote(id="1", text="source", title="架空史料", page_numbers=[1])
+        calls = []
+
+        def fake_public_api(input_footnote, *, max_results):
+            calls.append((input_footnote.title, max_results))
+            return [
+                {
+                    "title": "架空史料",
+                    "url": "https://dl.ndl.go.jp/pid/123456",
+                    "ndl_id": "123456",
+                    "metadata": {},
+                }
+            ]
+
+        with patch("modules.historical_citation.source_platforms.search_ndl_public_api", fake_public_api):
+            first = adapter.search(footnote, max_results=2)
+            second = adapter.search(footnote, max_results=2)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(first[0].title, "架空史料")
+        self.assertEqual(second[0].title, "架空史料")
 
     def test_verify_docx_marks_all_rejected_platform_results_as_source_mismatch(self):
         verifier = HistoricalCitationVerifier(ndl_download_module=DummyMismatchNDLModule())
@@ -883,6 +4756,52 @@ class TestHistoricalCitationVerifier(unittest.TestCase):
         self.assertEqual(review["confidence"], 0.91)
         self.assertTrue(review["llm_review_success"])
 
+    def test_multi_context_review_allows_combined_direct_support(self):
+        contexts = [
+            {
+                "context_id": "ctx1",
+                "cleaned_context": "合衆國ノ提議ニ對スル返翰。清國ニ於ケル門戶開放ノ事。",
+                "lead_category": "body_candidate",
+            },
+            {
+                "context_id": "ctx2",
+                "cleaned_context": "日本國政府ハ該主義ヲ承諾シタル旨回答セリ。",
+                "lead_category": "body_candidate",
+            },
+        ]
+        compound_packet = {
+            "packet_type": "volume_series_open_door_compound_claim",
+            "complete": True,
+            "supporting_context_ids": ["ctx1", "ctx2"],
+            "facets": [
+                {"facet_id": "us_proposal", "covered": True, "hits": [{"context_id": "ctx1"}]},
+                {"facet_id": "japan_acceptance", "covered": True, "hits": [{"context_id": "ctx2"}]},
+            ],
+        }
+        prompt = build_multi_context_review_prompt(
+            "海伊提出门户开放原则并得到日本赞同。",
+            contexts,
+            compound_evidence_packet=compound_packet,
+        )
+        review = normalize_multi_context_review_payload(
+            {
+                "decision": "direct_support",
+                "best_context_id": "ctx1",
+                "supporting_context_ids": ["ctx1", "ctx2"],
+                "best_sentence_index": 0,
+                "exact_sentence": "",
+                "confidence": 0.86,
+                "reason": "ctx1 covers the US proposal and ctx2 covers Japan's acceptance.",
+            },
+            contexts,
+        )
+
+        self.assertIn("supporting_context_ids", prompt["output_schema"])
+        self.assertEqual(prompt["compound_evidence_packet"]["packet_type"], "volume_series_open_door_compound_claim")
+        self.assertEqual(review["decision"], "direct_support")
+        self.assertEqual(review["supporting_context_ids"], ["ctx1", "ctx2"])
+        self.assertEqual(review["exact_sentence"], "")
+
     def test_llm_review_repairs_wrapped_json_and_records_coverage_flags(self):
         parsed, repaired = parse_review_json_with_repair(
             "模型说明：\n```json\n{\"decision\":\"partial_support\",\"best_index\":0,\"confidence\":0.4}\n```"
@@ -900,6 +4819,39 @@ class TestHistoricalCitationVerifier(unittest.TestCase):
         self.assertTrue(review["llm_review_success"])
         self.assertTrue(review["llm_review_json_repaired"])
         self.assertFalse(review["llm_review_fallback_heuristic"])
+
+    def test_ollama_default_formal_review_model_prefers_gemma_policy(self):
+        class TagsResponse:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "models": [
+                        {"name": "qwen2.5:7b"},
+                        {"name": "gemma4:e4b"},
+                    ]
+                }
+
+        with patch("modules.historical_citation.llm_review.requests.get", return_value=TagsResponse()):
+            client = OllamaChatClient()
+
+        self.assertEqual(client.model, "gemma4:e4b")
+        self.assertEqual(client.timeout, DEFAULT_OLLAMA_REVIEW_TIMEOUT_SECONDS)
+        self.assertTrue(client.is_formal_review_allowed())
+        health = client.health_check()
+        self.assertTrue(health["preferred_model_family"])
+        self.assertEqual(health["timeout_seconds"], DEFAULT_OLLAMA_REVIEW_TIMEOUT_SECONDS)
+
+    def test_ollama_review_timeout_reads_env_and_allows_explicit_override(self):
+        with patch.dict(os.environ, {"HISTORICAL_CITATION_REVIEW_TIMEOUT_SECONDS": "456"}, clear=False):
+            client = OllamaChatClient(model="gemma4:e4b")
+            override = OllamaChatClient(model="gemma4:e4b", timeout=12)
+
+        self.assertEqual(client.timeout, 456)
+        self.assertEqual(override.timeout, 12)
 
     def test_ollama_model_policy_uses_explicit_allowlist_for_formal_review(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1355,6 +5307,18 @@ class TestHistoricalCitationVerifier(unittest.TestCase):
         self.assertTrue(any('title any "華族同方会演説集"' in query for query in queries))
         self.assertGreaterEqual(host_score, 0.80)
         self.assertGreater(host_score, article_only_score)
+
+    def test_footnote_parser_infers_second_quoted_title_as_host_volume(self):
+        footnote = parse_footnote_text(
+            "x1",
+            "［日］《宗教関係法令一覧》，安丸良夫、宮地正人編：《日本近代思想大系 5：宗教と国家》，岩波書店 1996 年，第 425 页。",
+        )
+
+        self.assertEqual(footnote.title, "宗教関係法令一覧")
+        self.assertEqual(footnote.host_title, "日本近代思想大系 5：宗教と国家")
+        self.assertEqual(footnote.contained_title, "宗教関係法令一覧")
+        self.assertEqual(footnote.source_relation, "contained_in_host")
+        self.assertTrue(footnote.ndl_keyword.startswith("日本近代思想大系 5：宗教と国家"))
 
     def test_ndl_search_module_extracts_html_fulltext_hints(self):
         html_text = """
@@ -2079,6 +6043,52 @@ class TestHistoricalCitationVerifier(unittest.TestCase):
 
         self.assertTrue(verifier._should_try_alternate_source(candidate))
 
+    def test_verifier_blocks_non_equivalent_fulltext_lead_from_alternate_retry(self):
+        output_dir = Path(tempfile.mkdtemp())
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="translated text",
+            translation_text="translated text",
+            footnote_id="1",
+            footnote=ParsedFootnote(id="1", text="日本外交文書第32巻。", title="日本外交文書", page_numbers=[216]),
+            ndl_matches=[
+                NDLSearchMatch(title="日本外交文書", url="https://dl.ndl.go.jp/pid/3448128", ndl_id="3448128", score=0.95),
+                NDLSearchMatch(
+                    title="日本外交文書",
+                    url="https://dl.ndl.go.jp/pid/3448132",
+                    ndl_id="3448132",
+                    score=0.7,
+                    metadata={"search_route": "ndl_digital_fulltext_api"},
+                ),
+            ],
+        )
+        candidate.support_status = "needs_manual_review"
+        candidate.confidence = 0.02
+        candidate.artifacts = {
+            "source_pdf": str(output_dir / "ndl_3448128_p32-p34.pdf"),
+            "selected_source_match": {"ndl_id": "3448128", "platform": "ndl", "title": "日本外交文書"},
+            "downloaded_page_range": [32, 34],
+            "mapped_footnote_pages": [32],
+            "source_resolver_plan": {
+                "source_type": "volume_series",
+                "known_pid_candidates": ["3448128", "3448126", "2530174"],
+            },
+            "equivalent_pid_group": [
+                {"ndl_id": "3448128", "scope": "configured_or_same_source_equivalent"},
+                {"ndl_id": "3448126", "scope": "configured_or_same_source_equivalent"},
+                {"ndl_id": "2530174", "scope": "configured_or_same_source_equivalent"},
+            ],
+            "fulltext_lead_pid_group": [
+                {"ndl_id": "3448132", "scope": "global_fulltext_lead_not_equivalent"}
+            ],
+        }
+
+        self.assertFalse(verifier._should_try_alternate_source(candidate))
+        self.assertIn("3448132", candidate.artifacts["non_equivalent_fulltext_lead_skipped_ids"])
+        self.assertIn("alternate_source_retry_skipped_non_equivalent_fulltext_lead", candidate.notes)
+
     def test_verifier_preserves_source_when_only_wrong_volume_alternate_exists(self):
         output_dir = Path(tempfile.mkdtemp())
         verifier = HistoricalCitationVerifier()
@@ -2233,6 +6243,109 @@ class TestHistoricalCitationVerifier(unittest.TestCase):
         self.assertEqual(candidate.artifacts["source_match_order"], ["22222222"])
         self.assertIn("source_match_metadata_mismatch_filtered", candidate.notes)
 
+    def test_verifier_does_not_download_non_equivalent_fulltext_lead(self):
+        output_dir = Path(tempfile.mkdtemp())
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="translated text",
+            translation_text="translated text",
+            footnote_id="1",
+            footnote=ParsedFootnote(id="1", text="日本外交文書第32巻、216頁。", title="日本外交文書", page_numbers=[216]),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="日本外交文書",
+                    url="https://dl.ndl.go.jp/pid/3448128",
+                    ndl_id="3448128",
+                    score=0.95,
+                    metadata={"search_route": "resolver_config_known_pid", "known_pid_candidate": True},
+                ),
+                NDLSearchMatch(
+                    title="日本外交文書",
+                    url="https://dl.ndl.go.jp/pid/3448132",
+                    ndl_id="3448132",
+                    score=0.7,
+                    metadata={"search_route": "ndl_digital_fulltext_api"},
+                ),
+            ],
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "volume_series",
+                    "known_pid_candidates": ["3448128", "3448126", "2530174"],
+                },
+                "equivalent_pid_group": [
+                    {"ndl_id": "3448128", "scope": "configured_or_same_source_equivalent"},
+                    {"ndl_id": "3448126", "scope": "configured_or_same_source_equivalent"},
+                    {"ndl_id": "2530174", "scope": "configured_or_same_source_equivalent"},
+                ],
+                "fulltext_lead_pid_group": [
+                    {"ndl_id": "3448132", "scope": "global_fulltext_lead_not_equivalent"}
+                ],
+            },
+        )
+
+        class DummyDownloadModule:
+            def __init__(self):
+                self.ndl_ids = []
+
+            def download_first_match(self, **kwargs):
+                self.ndl_ids.append(kwargs.get("ndl_id"))
+                if kwargs.get("ndl_id") == "3448132":
+                    raise AssertionError("fulltext lead PID must not be downloaded automatically")
+                return NDLDownloadOutcome(
+                    success=False,
+                    mode="restricted",
+                    status="failed",
+                    keyword=kwargs["keyword"],
+                    output_dir=str(output_dir),
+                )
+
+        class FakeNDLPlatform:
+            name = "ndl"
+
+            def download_public_pdf(self, *_args, **_kwargs):
+                return None
+
+            def build_restricted_download_requests(self, **kwargs):
+                return [
+                    {
+                        "keyword": "日本外交文書",
+                        "ndl_id": kwargs["top_match"].ndl_id,
+                        "output_dir": str(kwargs["output_dir"]),
+                        "start_page": kwargs["start_page"],
+                        "end_page": kwargs["end_page"],
+                    }
+                ]
+
+        dummy_module = DummyDownloadModule()
+        fake_platform = FakeNDLPlatform()
+        verifier._resolve_ndlsearch_matches = lambda _candidate: None  # type: ignore[method-assign]
+        verifier._get_platform_for_match = lambda _match: fake_platform  # type: ignore[method-assign]
+        verifier._get_ndl_download_module = lambda: dummy_module  # type: ignore[method-assign]
+        verifier._estimate_scan_page_range = lambda *_args, **_kwargs: {  # type: ignore[method-assign]
+            "anchor_scan_page": 32,
+            "anchor_book_page": 216,
+            "start_scan_page": 32,
+            "end_scan_page": 32,
+        }
+        verifier._fulltext_pdf_page_fallback_plan = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        verifier._get_ndl_total_pages_quick = lambda _ndl_id: None  # type: ignore[method-assign]
+
+        pdf_path = verifier._obtain_source_pdf(
+            candidate,
+            output_dir=output_dir,
+            restricted_download=True,
+            page_window=0,
+            download_max_attempts=1,
+        )
+
+        self.assertIsNone(pdf_path)
+        self.assertEqual(dummy_module.ndl_ids, ["3448128"])
+        self.assertEqual(candidate.artifacts["source_match_order"], ["3448128"])
+        self.assertIn("3448132", candidate.artifacts["non_equivalent_fulltext_lead_skipped_ids"])
+        self.assertIn("source_match_non_equivalent_fulltext_lead_filtered", candidate.notes)
+
     def test_verifier_restores_prior_attempt_when_alternate_source_fails(self):
         verifier = HistoricalCitationVerifier()
         candidate = CitationCandidate(
@@ -2264,6 +6377,12 @@ class TestHistoricalCitationVerifier(unittest.TestCase):
                     "support_reason": "weak but usable",
                     "evidence_scope": "cited_pages",
                     "alignment_scope": "cited_pages",
+                    "llm_review": {
+                        "provider": "ollama",
+                        "decision": "not_supported",
+                        "reason": "weak",
+                    },
+                    "llm_review_runtime": {"provider": "ollama", "available": True},
                 }
             ]
         }
@@ -2277,6 +6396,8 @@ class TestHistoricalCitationVerifier(unittest.TestCase):
         self.assertEqual(candidate.matched_japanese, "prior japanese text")
         self.assertEqual(candidate.artifacts["source_pdf"], "prior.pdf")
         self.assertEqual(candidate.artifacts["selected_source_match"]["ndl_id"], "12095138")
+        self.assertEqual(candidate.artifacts["llm_review"]["provider"], "ollama")
+        self.assertTrue(candidate.artifacts["llm_review_runtime"]["available"])
         self.assertIn("alternate_source_retry_failed_restored_prior_attempt", candidate.notes)
 
     def test_verifier_allows_alternate_source_when_selected_title_differs(self):
@@ -2461,6 +6582,984 @@ class TestHistoricalCitationVerifier(unittest.TestCase):
         self.assertIsNone(pdf_path)
         self.assertTrue(candidate.artifacts["page_mapping_required_but_unavailable"])
         self.assertIn("12345678", candidate.artifacts["page_mapping_unavailable_ndl_ids"])
+
+    def test_verifier_uses_diary_known_pid_page_window_when_mapping_and_snippet_missing(self):
+        output_dir = Path(tempfile.mkdtemp())
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="1900年5月12日，原敬在日记中记录了相关交涉。",
+            translation_text="1900年5月12日，原敬在日记中记录了相关交涉。",
+            footnote_id="1",
+            footnote=ParsedFootnote(
+                id="1",
+                text="『原敬日記』1900年5月12日条，第84頁。",
+                title="原敬日記",
+                page_numbers=[84],
+            ),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="原敬日記",
+                    url="https://dl.ndl.go.jp/pid/2982135",
+                    ndl_id="2982135",
+                    score=0.9,
+                    metadata={
+                        "search_route": "resolver_config_known_pid",
+                        "known_pid_candidate": True,
+                    },
+                )
+            ],
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "diary",
+                    "known_pid_candidates": ["2982135"],
+                    "source_level_cache_key": "原敬日記|原敬日記|1900年5月12日|1900年",
+                }
+            },
+        )
+
+        class DummyDownloadModule:
+            def __init__(self):
+                self.requests = []
+
+            def download_first_match(self, **kwargs):
+                self.requests.append(kwargs)
+                return NDLDownloadOutcome(
+                    success=True,
+                    mode="restricted",
+                    status="success",
+                    keyword=kwargs["keyword"],
+                    output_dir=str(output_dir),
+                    file_path=str(output_dir / "diary.pdf"),
+                )
+
+        class FakeNDLPlatform:
+            name = "ndl"
+
+            def download_public_pdf(self, *_args, **_kwargs):
+                return None
+
+            def build_restricted_download_requests(self, **kwargs):
+                return [
+                    {
+                        "keyword": "原敬日記",
+                        "ndl_id": kwargs["top_match"].ndl_id,
+                        "output_dir": str(kwargs["output_dir"]),
+                        "start_page": kwargs["start_page"],
+                        "end_page": kwargs["end_page"],
+                    }
+                ]
+
+        dummy_module = DummyDownloadModule()
+        fake_platform = FakeNDLPlatform()
+        verifier._resolve_ndlsearch_matches = lambda _candidate: None  # type: ignore[method-assign]
+        verifier._get_platform_for_match = lambda _match: fake_platform  # type: ignore[method-assign]
+        verifier._get_ndl_download_module = lambda: dummy_module  # type: ignore[method-assign]
+        verifier._download_public_pdf = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        verifier._estimate_scan_page_range = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        verifier._fulltext_pdf_page_fallback_plan = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        verifier._get_ndl_total_pages_quick = lambda _ndl_id: None  # type: ignore[method-assign]
+
+        pdf_path = verifier._obtain_source_pdf(
+            candidate,
+            output_dir=output_dir,
+            restricted_download=True,
+            page_window=4,
+            download_max_attempts=1,
+        )
+
+        self.assertEqual(pdf_path, str(output_dir / "diary.pdf"))
+        self.assertEqual(dummy_module.requests[0]["start_page"], 82)
+        self.assertEqual(dummy_module.requests[0]["end_page"], 86)
+        self.assertEqual(candidate.artifacts["downloaded_page_range"], [82, 86])
+        self.assertEqual(candidate.artifacts["known_pid_page_window_fallback"]["ndl_id"], "2982135")
+        self.assertEqual(candidate.artifacts["known_pid_page_window_fallback"]["page_window"], 2)
+        self.assertFalse(candidate.artifacts.get("page_mapping_required_but_unavailable"))
+        self.assertIn("diary_known_pid_page_window_fallback_used:book_pages=84", candidate.notes)
+
+    def test_contained_document_known_pid_page_window_fallback_uses_cited_page(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p2-f8",
+            paragraph_index=2,
+            paragraph_text="Yamagata opinion document.",
+            translation_text="Yamagata opinion document.",
+            footnote_id="p2n8",
+            footnote=ParsedFootnote(
+                id="p2n8",
+                text="山縣有朋意見書, p. 306.",
+                title="山縣有朋意見書",
+                page_numbers=[306],
+            ),
+            ndl_matches=[],
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "contained_document",
+                    "known_pid_candidates": ["3025431"],
+                }
+            },
+        )
+        top_match = NDLSearchMatch(
+            title="山縣有朋意見書",
+            url="https://dl.ndl.go.jp/pid/3025431",
+            ndl_id="3025431",
+            score=0.9,
+            metadata={"search_route": "resolver_config_known_pid"},
+        )
+
+        plan = verifier._known_pid_page_window_fallback_plan(candidate, top_match, page_window=4)
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan["start_page"], 304)
+        self.assertEqual(plan["end_page"], 308)
+        self.assertEqual(
+            plan["note"],
+            "contained_document_known_pid_page_window_fallback_used:book_pages=306",
+        )
+        artifact = candidate.artifacts["known_pid_page_window_fallback"]
+        self.assertEqual(artifact["ndl_id"], "3025431")
+        self.assertEqual(artifact["source_type"], "contained_document")
+        self.assertEqual(artifact["basis"], "known_document_pid_without_snippet_or_page_mapping")
+        self.assertEqual(artifact["page_window"], 2)
+
+    def test_known_pid_page_window_precedes_title_only_fulltext_page_hint(self):
+        output_dir = Path(tempfile.mkdtemp())
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p2-f8",
+            paragraph_index=2,
+            paragraph_text="Yamagata opinion document.",
+            translation_text="Yamagata opinion document.",
+            footnote_id="p2n8",
+            footnote=ParsedFootnote(
+                id="p2n8",
+                text="山縣有朋意見書, p. 306.",
+                title="山縣有朋意見書",
+                page_numbers=[306],
+            ),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="山縣有朋意見書",
+                    url="https://dl.ndl.go.jp/pid/3025431",
+                    ndl_id="3025431",
+                    score=0.9,
+                    metadata={
+                        "search_route": "resolver_config_known_pid",
+                        "fulltext_hints": [
+                            {
+                                "query": "山縣有朋意見書",
+                                "snippet": "山縣有朋意見書",
+                                "pdf_page": 3,
+                                "book_id": "3025431",
+                            }
+                        ],
+                    },
+                )
+            ],
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "contained_document",
+                    "known_pid_candidates": ["3025431"],
+                }
+            },
+        )
+
+        class DummyDownloadModule:
+            def __init__(self):
+                self.requests = []
+
+            def download_first_match(self, **kwargs):
+                self.requests.append(kwargs)
+                return NDLDownloadOutcome(
+                    success=True,
+                    mode="restricted",
+                    status="success",
+                    keyword=kwargs["keyword"],
+                    output_dir=str(output_dir),
+                    file_path=str(output_dir / "contained.pdf"),
+                )
+
+        class FakeNDLPlatform:
+            name = "ndl"
+
+            def download_public_pdf(self, *_args, **_kwargs):
+                return None
+
+            def build_restricted_download_requests(self, **kwargs):
+                return [
+                    {
+                        "keyword": "山縣有朋意見書",
+                        "ndl_id": kwargs["top_match"].ndl_id,
+                        "output_dir": str(kwargs["output_dir"]),
+                        "start_page": kwargs["start_page"],
+                        "end_page": kwargs["end_page"],
+                    }
+                ]
+
+        dummy_module = DummyDownloadModule()
+        fake_platform = FakeNDLPlatform()
+        verifier._resolve_ndlsearch_matches = lambda _candidate: None  # type: ignore[method-assign]
+        verifier._get_platform_for_match = lambda _match: fake_platform  # type: ignore[method-assign]
+        verifier._get_ndl_download_module = lambda: dummy_module  # type: ignore[method-assign]
+        verifier._download_public_pdf = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        verifier._estimate_scan_page_range = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        verifier._probe_target_pid_fulltext_hints = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        verifier._get_ndl_total_pages_quick = lambda _ndl_id: None  # type: ignore[method-assign]
+
+        pdf_path = verifier._obtain_source_pdf(
+            candidate,
+            output_dir=output_dir,
+            restricted_download=True,
+            page_window=4,
+            download_max_attempts=1,
+        )
+
+        self.assertEqual(pdf_path, str(output_dir / "contained.pdf"))
+        self.assertEqual(dummy_module.requests[0]["start_page"], 304)
+        self.assertEqual(dummy_module.requests[0]["end_page"], 308)
+        self.assertEqual(candidate.artifacts["downloaded_page_range"], [304, 308])
+        self.assertEqual(candidate.artifacts["known_pid_page_window_fallback"]["ndl_id"], "3025431")
+        self.assertNotIn("fulltext_pdf_page_fallback", candidate.artifacts)
+        self.assertIn("contained_document_known_pid_page_window_fallback_used:book_pages=306", candidate.notes)
+
+    def test_known_pid_page_window_fallback_skips_wide_distributed_pages(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p4-f2",
+            paragraph_index=4,
+            paragraph_text="Hara diary cites distributed pages.",
+            translation_text="Hara diary cites distributed pages.",
+            footnote_id="p4n2",
+            footnote=ParsedFootnote(
+                id="p4n2",
+                text="原敬日記, pp. 51, 163, 287.",
+                title="原敬日記",
+                page_numbers=[51, 163, 287],
+            ),
+            ndl_matches=[],
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "diary",
+                    "known_pid_candidates": ["2982137"],
+                }
+            },
+        )
+        top_match = NDLSearchMatch(
+            title="原敬日記",
+            url="https://dl.ndl.go.jp/pid/2982137",
+            ndl_id="2982137",
+            score=0.9,
+            metadata={"search_route": "resolver_config_known_pid"},
+        )
+
+        plan = verifier._known_pid_page_window_fallback_plan(candidate, top_match, page_window=4)
+
+        self.assertIsNone(plan)
+        self.assertNotIn("known_pid_page_window_fallback", candidate.artifacts)
+        skipped = candidate.artifacts["known_pid_page_window_fallback_skipped"]
+        self.assertEqual(skipped["reason"], "distributed_pages_would_make_large_window")
+        self.assertEqual(skipped["source_type"], "diary")
+        self.assertEqual(skipped["page_span"], 236)
+        self.assertIn(
+            "known_pid_page_window_fallback_skipped[2982137]:distributed_pages_would_make_large_window",
+            candidate.notes,
+        )
+
+    def test_download_dependency_missing_is_structured_when_selenium_unavailable(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p2-f8",
+            paragraph_index=2,
+            paragraph_text="Yamagata opinion document.",
+            translation_text="Yamagata opinion document.",
+            footnote_id="p2n8",
+            footnote=ParsedFootnote(id="p2n8", text="山縣有朋意見書, p. 306.", title="山縣有朋意見書"),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="山縣有朋意見書",
+                    url="https://dl.ndl.go.jp/pid/3025431",
+                    ndl_id="3025431",
+                    score=0.9,
+                )
+            ],
+        )
+
+        def fail_download(*_args, **_kwargs):
+            candidate.artifacts["downloaded_page_range"] = [304, 308]
+            raise ModuleNotFoundError("No module named 'selenium'")
+
+        verifier._obtain_source_pdf = fail_download  # type: ignore[method-assign]
+        verifier._mark_fulltext_only_hit_if_possible = lambda *_args, **_kwargs: False  # type: ignore[method-assign]
+
+        verifier._enrich_with_source_excerpt(
+            candidate,
+            output_dir=Path(tempfile.mkdtemp()),
+            restricted_download=True,
+            page_window=4,
+            ocr_model="ndlocr_lite",
+            download_max_attempts=1,
+        )
+
+        self.assertEqual(candidate.verification_status, "download_failed")
+        self.assertEqual(candidate.artifacts["download_exception"]["reason"], "download_dependency_missing")
+        self.assertEqual(candidate.artifacts["download_planned_page_range"], [304, 308])
+        self.assertNotIn("downloaded_page_range", candidate.artifacts)
+        self.assertEqual(candidate.artifacts["source_availability"]["reason"], "download_dependency_missing")
+        self.assertIn("source_unavailable:download_dependency_missing[3025431]:No module named 'selenium'", candidate.notes)
+
+    def test_restricted_download_dependency_precheck_skips_browser_request(self):
+        output_dir = Path(tempfile.mkdtemp())
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p2-f8",
+            paragraph_index=2,
+            paragraph_text="Yamagata opinion document.",
+            translation_text="Yamagata opinion document.",
+            footnote_id="p2n8",
+            footnote=ParsedFootnote(id="p2n8", text="山縣有朋意見書, p. 306.", title="山縣有朋意見書", page_numbers=[306]),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="山縣有朋意見書",
+                    url="https://dl.ndl.go.jp/pid/3025431",
+                    ndl_id="3025431",
+                    score=0.9,
+                    metadata={"known_pid_candidate": True},
+                )
+            ],
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "contained_document",
+                    "known_pid_candidates": ["3025431"],
+                }
+            },
+        )
+
+        class FakeNDLPlatform:
+            name = "ndl"
+
+            def download_public_pdf(self, *_args, **_kwargs):
+                return None
+
+            def build_restricted_download_requests(self, *_args, **_kwargs):
+                raise AssertionError("browser request should be skipped when dependency is missing")
+
+        verifier._resolve_ndlsearch_matches = lambda _candidate: None  # type: ignore[method-assign]
+        verifier._get_platform_for_match = lambda _match: FakeNDLPlatform()  # type: ignore[method-assign]
+        verifier._download_public_pdf = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        verifier._estimate_scan_page_range = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        verifier._fulltext_pdf_page_fallback_plan = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        verifier._get_ndl_total_pages_quick = lambda _ndl_id: 500  # type: ignore[method-assign]
+        verifier._restricted_download_dependency_status = lambda _module=None: {  # type: ignore[method-assign]
+            "available": False,
+            "reason": "download_dependency_missing",
+            "dependency": "selenium",
+            "message": "No module named 'selenium'",
+        }
+
+        pdf_path = verifier._obtain_source_pdf(
+            candidate,
+            output_dir=output_dir,
+            restricted_download=True,
+            page_window=4,
+            download_max_attempts=1,
+        )
+
+        self.assertIsNone(pdf_path)
+        self.assertEqual(candidate.artifacts["download_dependency_check"]["reason"], "download_dependency_missing")
+        self.assertEqual(candidate.artifacts["download_planned_page_range"], [304, 308])
+        self.assertNotIn("downloaded_page_range", candidate.artifacts)
+        self.assertEqual(candidate.artifacts["source_availability"]["reason"], "download_dependency_missing")
+        self.assertIn("restricted_download_dependency_missing:selenium", candidate.notes)
+
+    def test_known_pid_page_window_out_of_scan_range_requires_page_mapping(self):
+        output_dir = Path(tempfile.mkdtemp())
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p4-f1",
+            paragraph_index=4,
+            paragraph_text="Hara diary citation without date.",
+            translation_text="Hara diary citation without date.",
+            footnote_id="p4n1",
+            footnote=ParsedFootnote(
+                id="p4n1",
+                text="原敬日記 第2巻, p. 325.",
+                title="原敬日記",
+                page_numbers=[325],
+            ),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="原敬日記",
+                    url="https://dl.ndl.go.jp/pid/2982135",
+                    ndl_id="2982135",
+                    score=0.9,
+                    metadata={"known_pid_candidate": True},
+                )
+            ],
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "diary",
+                    "known_pid_candidates": ["2982135"],
+                }
+            },
+        )
+
+        class FakeNDLPlatform:
+            name = "ndl"
+
+            def download_public_pdf(self, *_args, **_kwargs):
+                return None
+
+        verifier._resolve_ndlsearch_matches = lambda _candidate: None  # type: ignore[method-assign]
+        verifier._get_platform_for_match = lambda _match: FakeNDLPlatform()  # type: ignore[method-assign]
+        verifier._get_ndl_download_module = lambda: None  # type: ignore[method-assign]
+        verifier._download_public_pdf = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        verifier._estimate_scan_page_range = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        verifier._fulltext_pdf_page_fallback_plan = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        verifier._get_ndl_total_pages_quick = lambda _ndl_id: 219  # type: ignore[method-assign]
+
+        pdf_path = verifier._obtain_source_pdf(
+            candidate,
+            output_dir=output_dir,
+            restricted_download=True,
+            page_window=4,
+            download_max_attempts=1,
+        )
+
+        self.assertIsNone(pdf_path)
+        self.assertTrue(candidate.artifacts["page_mapping_required_but_unavailable"])
+        self.assertEqual(
+            candidate.artifacts["known_pid_page_window_requires_page_mapping"]["reason"],
+            "book_page_scan_page_assumption_out_of_range",
+        )
+        self.assertEqual(candidate.artifacts["source_availability"]["reason"], "mapped_page_out_of_scan_range")
+        self.assertIn("known_pid_page_window_requires_page_mapping[2982135]", candidate.notes)
+
+    def test_diary_date_queries_add_japanese_era_year_variants(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n1",
+            paragraph_index=4,
+            paragraph_text="In 1908 Hara discussed America.",
+            translation_text="In 1908 Hara discussed America.",
+            footnote_id="p4n1",
+            footnote=ParsedFootnote(
+                id="p4n1",
+                text="Hara diary volume 2, 1981 reprint, p. 325.",
+                title="\u539f\u656c\u65e5\u8a18",
+                year="1981",
+                page_numbers=[325],
+            ),
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "diary",
+                    "dates": ["1908\u5e74"],
+                    "target_pid_queries": ["1908\u5e74", "\u539f\u656c\u65e5\u8a18"],
+                    "query_buckets": {"date": ["1908\u5e74"]},
+                }
+            },
+        )
+
+        queries = verifier._diary_date_queries(candidate)
+
+        self.assertIn("1908\u5e74", queries)
+        self.assertIn("\u660e\u6cbb41\u5e74", queries)
+        self.assertIn("\u660e\u6cbb\u56db\u5341\u4e00\u5e74", queries)
+        self.assertNotIn("1981\u5e74", queries)
+
+    def test_diary_target_pid_probe_filters_publication_year_keywords(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n1",
+            paragraph_index=4,
+            paragraph_text="In 1908 Hara discussed America.",
+            translation_text="In 1908 Hara discussed America.",
+            footnote_id="p4n1",
+            footnote=ParsedFootnote(
+                id="p4n1",
+                text="Hara diary volume 2, 1981 reprint, p. 325.",
+                title="\u539f\u656c\u65e5\u8a18",
+                year="1981",
+                page_numbers=[325],
+            ),
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "diary",
+                    "known_pid_candidates": ["2982135"],
+                    "dates": ["1908\u5e74"],
+                    "target_pid_queries": ["1908\u5e74", "\u539f\u656c\u65e5\u8a18"],
+                    "query_buckets": {"date": ["1908\u5e74"]},
+                }
+            },
+        )
+        match = NDLSearchMatch(
+            title="\u539f\u656c\u65e5\u8a18",
+            url="https://dl.ndl.go.jp/pid/2982135",
+            ndl_id="2982135",
+            platform="ndl",
+        )
+        captured = {}
+
+        class Probe:
+            pid = "2982135"
+            title = "\u539f\u656c\u65e5\u8a18"
+            status = "no_direct_hit"
+            hits = []
+            queries_tried = []
+            note = ""
+
+        def fake_probe(pid, keywords):
+            captured["pid"] = pid
+            captured["keywords"] = list(keywords)
+            return Probe()
+
+        with patch("modules.historical_citation_verifier.probe_ndl_fulltext_context", fake_probe):
+            verifier._probe_target_pid_fulltext_hints(candidate, match)
+
+        self.assertEqual(captured["pid"], "2982135")
+        self.assertIn("\u660e\u6cbb41\u5e74", captured["keywords"])
+        self.assertIn("\u660e\u6cbb\u56db\u5341\u4e00\u5e74", captured["keywords"])
+        self.assertFalse(any("1981" in keyword for keyword in captured["keywords"]))
+
+    def test_diary_claim_queries_add_us_economy_future_terms(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n1",
+            paragraph_index=4,
+            paragraph_text="1908\u5e74\uff0c\u7f8e\u56fd\u786e\u662f\u6781\u6709\u6d3b\u529b\u7684\u56fd\u5bb6\u3002",
+            translation_text="\u7f8e\u56fd\u53d7\u5230\u7ecf\u6d4e\u4e0d\u666f\u6c14\u5f71\u54cd\uff0c\u4f46\u5c06\u6765\u4f1a\u5bf9\u4e16\u754c\u4ea7\u751f\u5f71\u54cd\u3002",
+            footnote_id="p4n1",
+            footnote=ParsedFootnote(
+                id="p4n1",
+                text="Hara diary volume 2, 1981 reprint, p. 325.",
+                title="\u539f\u656c\u65e5\u8a18",
+                year="1981",
+                page_numbers=[325],
+            ),
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "diary",
+                    "dates": ["1908\u5e74"],
+                    "query_buckets": {"date": ["1908\u5e74"]},
+                }
+            },
+        )
+
+        queries = verifier._diary_claim_fulltext_queries(candidate)
+
+        self.assertTrue(any("\u660e\u6cbb\u56db\u5341\u4e00\u5e74" in query for query in queries))
+        self.assertTrue(any("\u7c73\u570b" in query or "\u7c73\u56fd" in query for query in queries))
+        self.assertTrue(any("\u4e0d\u666f\u6c23" in query or "\u4e0d\u666f\u6c17" in query for query in queries))
+        self.assertTrue(any("\u5c07\u4f86" in query or "\u5c06\u6765" in query for query in queries))
+        self.assertFalse(any("1981" in query for query in queries))
+
+    def test_diary_claim_facets_can_be_loaded_from_resolver_config(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p7-f1",
+            paragraph_index=7,
+            paragraph_text="China policy discussions shaped the diary entry.",
+            translation_text="\u4e2d\u56fd\u653f\u7b56\u5f71\u54cd\u4e86\u539f\u656c\u7684\u5224\u65ad\u3002",
+            footnote_id="p7n1",
+            footnote=ParsedFootnote(
+                id="p7n1",
+                text="\u300e\u539f\u656c\u65e5\u8a18\u300f\u7b2c2\u5dfb\u3002",
+                title="\u539f\u656c\u65e5\u8a18",
+                page_numbers=[120],
+            ),
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "diary",
+                    "dates": ["1908\u5e74"],
+                    "query_buckets": {"date": ["1908\u5e74"]},
+                }
+            },
+        )
+        fake_config = {
+            "hara_takashi_diary": {
+                "claim_facets": [
+                    {
+                        "id": "china",
+                        "role": "anchor",
+                        "trigger_terms": ["\u4e2d\u56fd", "China"],
+                        "terms": ["\u6e05\u570b", "\u652f\u90a3"],
+                    },
+                    {
+                        "id": "policy",
+                        "role": "theme",
+                        "trigger_terms": ["\u653f\u7b56", "policy"],
+                        "terms": ["\u653f\u7b56", "\u5916\u4ea4"],
+                    },
+                    {
+                        "id": "influence",
+                        "role": "theme",
+                        "trigger_terms": ["\u5f71\u54cd", "influence"],
+                        "terms": ["\u5f71\u97ff"],
+                    },
+                ]
+            }
+        }
+
+        with patch("modules.historical_citation_verifier._load_resolver_config", return_value=fake_config):
+            buckets = verifier._diary_claim_term_buckets(candidate)
+            queries = verifier._diary_claim_fulltext_queries(candidate)
+            packet = verifier._diary_claim_facet_packet(
+                candidate,
+                "\u660e\u6cbb\u56db\u5341\u4e00\u5e74 \u6e05\u570b\u306b\u5c0d\u3059\u308b\u653f\u7b56\u306f\u5927\u304d\u306a\u5f71\u97ff",
+            )
+
+        self.assertEqual(set(buckets), {"china", "policy", "influence"})
+        self.assertTrue(any("\u6e05\u570b \u653f\u7b56" in query for query in queries))
+        self.assertIn("china", packet["covered_facets"])
+        self.assertIn("policy", packet["covered_facets"])
+        self.assertIn("influence", packet["covered_facets"])
+        self.assertGreaterEqual(packet["score_bonus"], 3.0)
+
+    def test_diary_claim_facets_ignore_broad_paragraph_background(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n1",
+            paragraph_index=4,
+            paragraph_text=(
+                "\u5916\u4ea4\u653f\u7b56\u3001\u82f1\u56fd\u3001\u4fc4\u56fd\u3001\u5185\u9601\u306e\u80cc\u666f\u8aac\u660e\u3002"
+                "\u7f8e\u56fd\u306f\u7d4c\u6e08\u4e0d\u666f\u6c17\u306e\u5f71\u97ff\u3092\u53d7\u3051\u305f\u304c\u3001\u5c06\u6765\u306e\u5f71\u97ff\u304c\u5927\u304d\u3044\u3002"
+            ),
+            translation_text=(
+                "\u7f8e\u56fd\u306f\u7d4c\u6e08\u4e0d\u666f\u6c14\u306e\u5f71\u54cd\u3092\u53d7\u3051\u305f\u304c\u3001"
+                "\u5c06\u6765\u306e\u4e16\u754c\u3078\u306e\u5f71\u54cd\u304c\u5927\u304d\u3044\u3002"
+            ),
+            footnote_id="p4n1",
+            footnote=ParsedFootnote(
+                id="p4n1",
+                text="\u300e\u539f\u656c\u65e5\u8a18\u300f\u7b2c2\u5dfb\u3002",
+                title="\u539f\u656c\u65e5\u8a18",
+                page_numbers=[325],
+            ),
+            artifacts={"source_resolver_plan": {"source_type": "diary", "dates": ["1908\u5e74"]}},
+        )
+
+        buckets = verifier._diary_claim_term_buckets(candidate)
+
+        self.assertIn("us", buckets)
+        self.assertIn("economy", buckets)
+        self.assertIn("future_influence", buckets)
+        self.assertNotIn("russia", buckets)
+        self.assertNotIn("britain", buckets)
+        self.assertNotIn("diplomacy_policy", buckets)
+        self.assertEqual(candidate.artifacts["diary_claim_facet_trigger_scope"], "translation_text")
+
+    def test_diary_claim_facets_prioritize_claim_hint_over_date_only(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n1",
+            paragraph_index=4,
+            paragraph_text="1908\u5e74\uff0c\u7f8e\u56fd\u786e\u662f\u6781\u6709\u6d3b\u529b\u7684\u56fd\u5bb6\u3002",
+            translation_text="\u7f8e\u56fd\u53d7\u5230\u7ecf\u6d4e\u4e0d\u666f\u6c14\u5f71\u54cd\uff0c\u4f46\u5c06\u6765\u4f1a\u5bf9\u4e16\u754c\u4ea7\u751f\u5f71\u54cd\u3002",
+            footnote_id="p4n1",
+            footnote=ParsedFootnote(
+                id="p4n1",
+                text="Hara diary volume 2, 1981 reprint, p. 325.",
+                title="\u539f\u656c\u65e5\u8a18",
+                year="1981",
+                page_numbers=[325],
+            ),
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "diary",
+                    "dates": ["1908\u5e74"],
+                    "query_buckets": {"date": ["1908\u5e74"]},
+                },
+                "ndl_fulltext_hints": [
+                    {
+                        "query": "\u660e\u6cbb\u56db\u5341\u4e00\u5e74",
+                        "snippet": "\u660e\u6cbb\u56db\u5341\u4e00\u5e74 \u4e00\u6708\u5341\u56db\u65e5 \u5185\u52d9\u5927\u81e3\u539f\u656c",
+                        "pdf_page": 148,
+                        "pid": "2982135",
+                        "book_id": "2982135",
+                    },
+                    {
+                        "query": "\u660e\u6cbb\u56db\u5341\u4e00\u5e74 \u7c73\u570b \u5c07\u4f86",
+                        "snippet": "\u7c73\u570b\u8cc7\u672c\u5bb6\u3001\u4e0d\u666f\u6c23\u3001\u5c07\u4f86\u65e5\u672c\u306b\u6295\u8cc7\u3059\u308b\u3053\u3068\u306b\u5927\u5f71\u97ff\u3042\u308b",
+                        "expanded_context": "\u7c73\u570b\u8cc7\u672c\u5bb6\u306e\u4e0d\u666f\u6c23\u3068\u5c07\u4f86\u65e5\u672c\u306b\u6295\u8cc7\u3059\u308b\u3053\u3068\u306b\u5927\u5f71\u97ff\u3042\u308b\u3079\u3057",
+                        "pdf_page": 30,
+                        "pid": "2982135",
+                        "book_id": "2982135",
+                    },
+                ],
+            },
+        )
+
+        selected = verifier._select_fulltext_hints_to_expand(
+            candidate,
+            verifier._ordered_fulltext_hints_for_candidate(candidate, preferred_pid="2982135"),
+            limit=2,
+        )
+        score, reasons = verifier._score_fulltext_context_candidate(
+            candidate,
+            selected[0],
+            selected[0].get("expanded_context") or selected[0].get("snippet") or "",
+        )
+
+        self.assertEqual(selected[0]["pdf_page"], 30)
+        self.assertGreater(score, 4.0)
+        self.assertTrue(any(reason.startswith("diary_claim_facets=") for reason in reasons))
+
+    def test_diary_date_pdf_page_route_prefers_claim_facets(self):
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n1",
+            paragraph_index=4,
+            paragraph_text="1908\u5e74\uff0c\u7f8e\u56fd\u786e\u662f\u6781\u6709\u6d3b\u529b\u7684\u56fd\u5bb6\u3002",
+            translation_text="\u7f8e\u56fd\u53d7\u5230\u7ecf\u6d4e\u4e0d\u666f\u6c14\u5f71\u54cd\uff0c\u4f46\u5c06\u6765\u4f1a\u5bf9\u4e16\u754c\u4ea7\u751f\u5f71\u54cd\u3002",
+            footnote_id="p4n1",
+            footnote=ParsedFootnote(
+                id="p4n1",
+                text="Hara diary volume 2, 1981 reprint, p. 325.",
+                title="\u539f\u656c\u65e5\u8a18",
+                year="1981",
+                page_numbers=[325],
+            ),
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "diary",
+                    "dates": ["1908\u5e74"],
+                    "query_buckets": {"date": ["1908\u5e74"]},
+                }
+            },
+        )
+        match = NDLSearchMatch(
+            title="\u539f\u656c\u65e5\u8a18",
+            url="https://dl.ndl.go.jp/pid/2982135",
+            ndl_id="2982135",
+            platform="ndl",
+            metadata={
+                "fulltext_hints": [
+                    {
+                        "query": "\u660e\u6cbb41\u5e74 \u7c73\u56fd \u4e0d\u666f\u6c17",
+                        "snippet": "\u7c73\u570b\u306b\u884c\u304f\u306a\u3089\u3070\u6b50\u6d32\u307e\u3067\u8d74\u304d\u3066\u306f\u5982\u4f55",
+                        "pdf_page": 16,
+                        "cid": "cid-16",
+                        "book_id": "2982135",
+                    },
+                    {
+                        "query": "\u660e\u6cbb41\u5e74 \u7c73\u56fd \u5c06\u6765",
+                        "snippet": "\u7c73\u570b\u8cc7\u672c\u5bb6\u306f\u5c07\u4f86\u65e5\u672c\u306b\u6295\u8cc7\u3059\u308b\u3053\u3068\u306b\u5927\u5f71\u97ff\u3042\u308b",
+                        "pdf_page": 30,
+                        "cid": "cid-30",
+                        "book_id": "2982135",
+                    },
+                ]
+            },
+        )
+        verifier._probe_target_pid_fulltext_hints = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+
+        plan = verifier._diary_date_pdf_page_fallback_plan(candidate, match, page_window=4)
+
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan["mapped_footnote_pages"], [30])
+        self.assertEqual(candidate.artifacts["diary_date_pdf_page_fallback"]["selected_pdf_page"], 30)
+        top = candidate.artifacts["diary_date_pdf_page_fallback"]["top_candidates"][0]
+        self.assertIn("future_influence", top["claim_facets"])
+        self.assertEqual(top["pdf_page"], 30)
+
+    def test_diary_date_pdf_page_hint_routes_before_book_page_window(self):
+        output_dir = Path(tempfile.mkdtemp())
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p4-fp4n1",
+            paragraph_index=4,
+            paragraph_text="In 1908 Hara thought America was energetic.",
+            translation_text="America was energetic.",
+            footnote_id="p4n1",
+            footnote=ParsedFootnote(
+                id="p4n1",
+                text="Hara diary volume 2, 1981 reprint, p. 325.",
+                title="\u539f\u656c\u65e5\u8a18",
+                year="1981",
+                page_numbers=[325],
+            ),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="\u539f\u656c\u65e5\u8a18",
+                    url="https://dl.ndl.go.jp/pid/2982135",
+                    ndl_id="2982135",
+                    platform="ndl",
+                    score=0.9,
+                    metadata={
+                        "known_pid_candidate": True,
+                        "fulltext_hints": [
+                            {
+                                "query": "\u660e\u6cbb\u56db\u5341\u4e00\u5e74",
+                                "snippet": "\u660e\u6cbb\u56db\u5341\u4e00\u5e74 \u539f\u656c\u65e5\u8a18",
+                                "expanded_context": "\u660e\u6cbb\u56db\u5341\u4e00\u5e74 \u7c73\u56fd",
+                                "pdf_page": 120,
+                                "cid": "cid-120",
+                                "book_id": "2982135",
+                            }
+                        ],
+                    },
+                )
+            ],
+            artifacts={
+                "source_resolver_plan": {
+                    "source_type": "diary",
+                    "known_pid_candidates": ["2982135"],
+                    "dates": ["1908\u5e74"],
+                    "target_pid_queries": ["1908\u5e74", "\u539f\u656c\u65e5\u8a18"],
+                    "query_buckets": {"date": ["1908\u5e74"]},
+                }
+            },
+        )
+
+        class DummyDownloadModule:
+            def __init__(self):
+                self.requests = []
+
+            def download_first_match(self, **kwargs):
+                self.requests.append(kwargs)
+                return NDLDownloadOutcome(
+                    success=True,
+                    mode="restricted",
+                    status="success",
+                    keyword=kwargs["keyword"],
+                    output_dir=str(output_dir),
+                    file_path=str(output_dir / "diary.pdf"),
+                )
+
+        class FakeNDLPlatform:
+            name = "ndl"
+
+            def download_public_pdf(self, *_args, **_kwargs):
+                return None
+
+            def build_restricted_download_requests(self, **kwargs):
+                return [
+                    {
+                        "keyword": "diary",
+                        "ndl_id": kwargs["top_match"].ndl_id,
+                        "output_dir": str(kwargs["output_dir"]),
+                        "start_page": kwargs["start_page"],
+                        "end_page": kwargs["end_page"],
+                    }
+                ]
+
+        dummy_module = DummyDownloadModule()
+        fake_platform = FakeNDLPlatform()
+        verifier._resolve_ndlsearch_matches = lambda _candidate: None  # type: ignore[method-assign]
+        verifier._get_platform_for_match = lambda _match: fake_platform  # type: ignore[method-assign]
+        verifier._get_ndl_download_module = lambda: dummy_module  # type: ignore[method-assign]
+        verifier._download_public_pdf = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        verifier._probe_target_pid_fulltext_hints = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        verifier._estimate_scan_page_range = lambda *_args, **_kwargs: (_ for _ in ()).throw(  # type: ignore[method-assign]
+            AssertionError("date route should run before OCR page mapping")
+        )
+        verifier._get_ndl_total_pages_quick = lambda _ndl_id: 219  # type: ignore[method-assign]
+
+        pdf_path = verifier._obtain_source_pdf(
+            candidate,
+            output_dir=output_dir,
+            restricted_download=True,
+            page_window=4,
+            download_max_attempts=1,
+        )
+
+        self.assertEqual(pdf_path, str(output_dir / "diary.pdf"))
+        self.assertEqual(dummy_module.requests[0]["start_page"], 116)
+        self.assertEqual(dummy_module.requests[0]["end_page"], 124)
+        self.assertEqual(candidate.artifacts["mapped_footnote_pages"], [120])
+        self.assertEqual(candidate.artifacts["downloaded_page_range"], [116, 124])
+        self.assertEqual(candidate.artifacts["diary_date_pdf_page_fallback"]["selected_pdf_page"], 120)
+        self.assertNotIn("known_pid_page_window_requires_page_mapping", candidate.artifacts)
+        self.assertIn("diary_date_pdf_page_fallback_used:pdf_page=120", candidate.notes)
+
+    def test_verifier_uses_ndl_fulltext_pdf_page_hint_when_page_mapping_missing(self):
+        output_dir = Path(tempfile.mkdtemp())
+        verifier = HistoricalCitationVerifier()
+        candidate = CitationCandidate(
+            candidate_id="p1-f1",
+            paragraph_index=1,
+            paragraph_text="translated text",
+            translation_text="translated text",
+            footnote_id="1",
+            footnote=ParsedFootnote(id="1", text="source", title="source", page_numbers=[216]),
+            ndl_matches=[
+                NDLSearchMatch(
+                    title="source",
+                    url="https://dl.ndl.go.jp/pid/12345678",
+                    ndl_id="12345678",
+                    score=0.9,
+                    metadata={
+                        "fulltext_hints": [
+                            {
+                                "query": "source",
+                                "snippet": "source snippet",
+                                "pdf_page": 10,
+                                "cid": "cid-10",
+                                "book_id": "12345678",
+                            }
+                        ]
+                    },
+                ),
+            ],
+        )
+
+        class DummyDownloadModule:
+            def __init__(self):
+                self.requests = []
+
+            def download_first_match(self, **kwargs):
+                self.requests.append(kwargs)
+                return NDLDownloadOutcome(
+                    success=True,
+                    mode="restricted",
+                    status="success",
+                    keyword=kwargs["keyword"],
+                    output_dir=str(output_dir),
+                    file_path=str(output_dir / "ok.pdf"),
+                )
+
+        class FakeNDLPlatform:
+            name = "ndl"
+
+            def download_public_pdf(self, *_args, **_kwargs):
+                return None
+
+            def build_restricted_download_requests(self, **kwargs):
+                return [
+                    {
+                        "keyword": "source",
+                        "ndl_id": kwargs["top_match"].ndl_id,
+                        "output_dir": str(kwargs["output_dir"]),
+                        "start_page": kwargs["start_page"],
+                        "end_page": kwargs["end_page"],
+                    }
+                ]
+
+        dummy_module = DummyDownloadModule()
+        fake_platform = FakeNDLPlatform()
+        verifier._resolve_ndlsearch_matches = lambda _candidate: None  # type: ignore[method-assign]
+        verifier._get_platform_for_match = lambda _match: fake_platform  # type: ignore[method-assign]
+        verifier._get_ndl_download_module = lambda: dummy_module  # type: ignore[method-assign]
+        verifier._estimate_scan_page_range = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
+        verifier._get_ndl_total_pages_quick = lambda _ndl_id: None  # type: ignore[method-assign]
+
+        pdf_path = verifier._obtain_source_pdf(
+            candidate,
+            output_dir=output_dir,
+            restricted_download=True,
+            page_window=2,
+            download_max_attempts=1,
+        )
+
+        self.assertEqual(pdf_path, str(output_dir / "ok.pdf"))
+        self.assertEqual(dummy_module.requests[0]["start_page"], 8)
+        self.assertEqual(dummy_module.requests[0]["end_page"], 12)
+        self.assertEqual(candidate.artifacts["downloaded_page_range"], [8, 12])
+        self.assertEqual(candidate.artifacts["mapped_footnote_pages"], [10])
+        self.assertEqual(candidate.artifacts["fulltext_pdf_page_fallback"]["pdf_page"], 10)
+        self.assertFalse(candidate.artifacts.get("page_mapping_required_but_unavailable"))
+        self.assertIn("fulltext_pdf_page_fallback_used:pdf_page=10", candidate.notes)
 
     def test_verifier_does_not_downgrade_page_mapping_block_to_no_pid(self):
         verifier = HistoricalCitationVerifier()
@@ -3632,6 +8731,7 @@ class TestHistoricalCitationVerifier(unittest.TestCase):
         reporter.close()
 
         payload = json.loads(stream.getvalue().strip())
+        self.assertEqual(payload["schema_version"], "historical_citation.progress.v1")
         self.assertEqual(payload["event"], "candidate_started")
         self.assertEqual(payload["phase"], "ocr")
         self.assertEqual(payload["candidate_id"], "p1-f1")
@@ -3768,6 +8868,319 @@ class TestHistoricalCitationVerifier(unittest.TestCase):
         self.assertIn("下载或处理超时 (`download_timeout`): 1", report)
         self.assertIn("download_failed / download_timeout", report)
         self.assertIn("状态说明: 下载或处理超时", report)
+
+
+    def test_resume_report_renders_adapter_probe_and_known_pid_fallback_diagnostics(self):
+        checkpoint = {
+            "results": {
+                "p1-f1": {
+                    "candidate_id": "p1-f1",
+                    "footnote_id": "1",
+                    "translation_text": "1900年5月12日，原敬在日记中记录了相关交涉。",
+                    "verification_status": "source_found",
+                    "support_status": "needs_manual_review",
+                    "matched_page": None,
+                    "matched_japanese": "",
+                    "notes": [
+                        "diary_known_pid_page_window_fallback_used:book_pages=84",
+                        "diary_date_pdf_page_fallback_used:pdf_page=84",
+                    ],
+                    "ndl_matches": [
+                        {
+                            "title": "原敬日記",
+                            "url": "https://dl.ndl.go.jp/pid/2982135",
+                            "ndl_id": "2982135",
+                            "score": 0.9,
+                            "metadata": {
+                                "search_route": "resolver_config_known_pid",
+                                "known_pid_candidate": True,
+                            },
+                        },
+                        {
+                            "title": "原敬関係文書",
+                            "url": "https://dl.ndl.go.jp/pid/14077946",
+                            "ndl_id": "14077946",
+                            "score": 0.4,
+                            "metadata": {"search_route": "ndl_digital_fulltext_api"},
+                        },
+                    ],
+                    "footnote": {
+                        "title": "原敬日記",
+                        "text": "『原敬日記』1900年5月12日条，第84頁。",
+                        "page_numbers": [84],
+                        "source_type": "diary",
+                    },
+                    "artifacts": {
+                        "source_match_order": ["2982135", "14077946"],
+                        "downloaded_page_range": [82, 86],
+                        "source_resolver_plan": {
+                            "source_type": "diary",
+                            "verification_mode": "date_volume_known_pid",
+                            "pid_scope_strategy": "known_pid_candidates",
+                            "source_level_cache_key": "原敬日記|1900-05-12",
+                            "known_pid_candidates": ["2982135"],
+                            "target_pid_queries": ["1900年5月12日", "1900年", "原敬日記"],
+                        },
+                        "known_pid_page_window_fallback": {
+                            "ndl_id": "2982135",
+                            "cited_book_pages": [84],
+                            "start_page": 82,
+                            "end_page": 86,
+                            "evidence_level": "diagnostic_until_ocr_llm_review",
+                        },
+                        "diary_date_pdf_page_fallback": {
+                            "ndl_id": "2982135",
+                            "selected_pdf_page": 84,
+                            "start_page": 82,
+                            "end_page": 86,
+                            "selected_query": "\u660e\u6cbb33\u5e74 \u7c73\u56fd \u5c06\u6765",
+                            "selected_match_scope": "context",
+                            "selected_lead_category": "body",
+                            "evidence_level": "routing_only_until_ocr_llm_review",
+                            "top_candidates": [
+                                {
+                                    "pdf_page": 84,
+                                    "claim_facets": ["economy", "future_influence", "us"],
+                                }
+                            ],
+                        },
+                        "diary_claim_facet_trigger_scope": "translation_text",
+                        "diary_date_lookup_diagnostic": {
+                            "source_type": "diary",
+                            "ndl_id": "2982135",
+                            "known_pid_candidates": ["2982135"],
+                            "date_queries": ["1900年5月12日", "1900年"],
+                            "date_hit_count": 0,
+                            "title_queries": ["原敬日記"],
+                            "title_hit_count": 4,
+                            "recommended_action": "toc_index_then_small_page_window_ocr",
+                            "small_page_window": {
+                                "cited_book_pages": [84],
+                                "start_page": 82,
+                                "end_page": 86,
+                                "page_window": 2,
+                            },
+                        },
+                        "ndl_fulltext_probe": {
+                            "pid": "2982135",
+                            "status": "no_direct_hit",
+                            "hit_count": 0,
+                            "specific_hit_count": 0,
+                            "pdf_page_hit_count": 0,
+                            "first_pdf_pages": [],
+                            "queries_tried": ["1900年5月12日", "原敬日記"],
+                        },
+                        "fulltext_lead_pid_group": [
+                            {
+                                "ndl_id": "14077946",
+                                "title": "影印原敬日記. 第1巻",
+                                "search_route": "ndl_digital_fulltext_api",
+                                "scope": "global_fulltext_lead_not_equivalent",
+                            }
+                        ],
+                        "non_equivalent_fulltext_lead_skipped_ids": ["14077946"],
+                    },
+                }
+            },
+            "artifacts": {},
+        }
+
+        report = render_resume_markdown_report(
+            document={"title": "テスト論文"},
+            checkpoint=checkpoint,
+            total_candidates=1,
+            output_dir=Path(tempfile.mkdtemp()),
+        )
+
+        self.assertIn("Adapter Candidate Order: 2982135 (known/resolver_config_known_pid)", report)
+        self.assertIn("Source-type diagnostic summary: source_type=diary", report)
+        self.assertIn("diag=source_type=diary", report)
+        self.assertIn("target_snippet=no_direct_hit/hits=0/specific=0", report)
+        self.assertIn("diary_date_hits=0/title_hits=4", report)
+        self.assertIn("next=toc/index + small page-window OCR", report)
+        self.assertIn("page_window=82-86", report)
+        self.assertIn("skipped_fulltext_leads=14077946", report)
+        self.assertIn("Target PID snippet probe: pid=2982135 | status=no_direct_hit", report)
+        self.assertIn("Known PID page-window fallback: PID=2982135", report)
+        self.assertIn("Diary date PDF-page route fallback: PID=2982135", report)
+        self.assertIn("selected_pdf_page=84", report)
+        self.assertIn("diary_pdf_route=p84/window=82-86", report)
+        self.assertIn("diary_claim_scope=translation_text", report)
+        self.assertIn("Diary claim facet trigger scope: translation_text", report)
+        self.assertIn("facets=economy,future_influence,us", report)
+        self.assertIn("routing_only_until_ocr_llm_review", report)
+        self.assertIn("scan_window=82-86", report)
+        self.assertIn("hits=0", report)
+        self.assertIn("全文线索 PID 组（非等价）", report)
+        self.assertIn("不能作为自动候选轮换的等价来源", report)
+        self.assertIn("全文 lead 人工回查建议", report)
+        self.assertIn("diary: 先确认日期对应卷册", report)
+        self.assertIn("先回查严格 PID 2982135", report)
+        self.assertIn("在目标 PID 内搜 1900年5月12日", report)
+        self.assertIn("非等价全文线索已跳过自动轮换: 14077946", report)
+        self.assertIn("PID=14077946", report)
+
+    def test_resume_report_indexes_three_source_type_diagnostics(self):
+        checkpoint = {
+            "results": {
+                "gaiko": {
+                    "candidate_id": "gaiko",
+                    "footnote_id": "g1",
+                    "translation_text": "门户开放。",
+                    "verification_status": "fulltext_only_hit",
+                    "support_status": "needs_manual_review",
+                    "matched_page": None,
+                    "matched_japanese": "",
+                    "notes": [],
+                    "ndl_matches": [
+                        {
+                            "title": "日本外交文書",
+                            "url": "https://dl.ndl.go.jp/pid/3448128",
+                            "ndl_id": "3448128",
+                            "score": 0.9,
+                            "metadata": {"search_route": "resolver_config_known_pid", "known_pid_candidate": True},
+                        }
+                    ],
+                    "footnote": {
+                        "title": "日本外交文書",
+                        "text": "日本外交文書第32巻，第216頁。",
+                        "page_numbers": [216],
+                    },
+                    "artifacts": {
+                        "source_resolver_plan": {
+                            "source_type": "volume_series",
+                            "known_pid_candidates": ["3448128"],
+                        },
+                        "ndl_fulltext_probe": {
+                            "pid": "3448128",
+                            "status": "direct_hit",
+                            "hit_count": 10,
+                            "specific_hit_count": 10,
+                            "pdf_page_hit_count": 10,
+                            "first_pdf_pages": [32],
+                        },
+                    },
+                },
+                "diary": {
+                    "candidate_id": "diary",
+                    "footnote_id": "d1",
+                    "translation_text": "1900年5月12日。",
+                    "verification_status": "source_found",
+                    "support_status": "needs_manual_review",
+                    "matched_page": None,
+                    "matched_japanese": "",
+                    "notes": [],
+                    "ndl_matches": [
+                        {
+                            "title": "原敬日記",
+                            "url": "https://dl.ndl.go.jp/pid/2982135",
+                            "ndl_id": "2982135",
+                            "score": 0.9,
+                            "metadata": {"search_route": "resolver_config_known_pid", "known_pid_candidate": True},
+                        }
+                    ],
+                    "footnote": {
+                        "title": "原敬日記",
+                        "text": "原敬日記，1900年5月12日，第84頁。",
+                        "page_numbers": [84],
+                    },
+                    "artifacts": {
+                        "source_resolver_plan": {
+                            "source_type": "diary",
+                            "known_pid_candidates": ["2982135"],
+                        },
+                        "ndl_fulltext_probe": {
+                            "pid": "2982135",
+                            "status": "no_direct_hit",
+                            "hit_count": 0,
+                            "specific_hit_count": 0,
+                            "pdf_page_hit_count": 0,
+                        },
+                        "diary_date_lookup_diagnostic": {
+                            "source_type": "diary",
+                            "ndl_id": "2982135",
+                            "date_hit_count": 0,
+                            "title_hit_count": 4,
+                            "small_page_window": {"cited_book_pages": [84], "start_page": 82, "end_page": 86},
+                        },
+                        "known_pid_page_window_fallback": {
+                            "ndl_id": "2982135",
+                            "cited_book_pages": [84],
+                            "start_page": 82,
+                            "end_page": 86,
+                        },
+                    },
+                },
+                "contained": {
+                    "candidate_id": "contained",
+                    "footnote_id": "c1",
+                    "translation_text": "山縣有朋意見書。",
+                    "verification_status": "fulltext_only_hit",
+                    "support_status": "needs_manual_review",
+                    "matched_page": None,
+                    "matched_japanese": "",
+                    "notes": [],
+                    "ndl_matches": [
+                        {
+                            "title": "山県有朋意見書",
+                            "url": "https://dl.ndl.go.jp/pid/3025431",
+                            "ndl_id": "3025431",
+                            "score": 0.9,
+                            "metadata": {"search_route": "resolver_config_known_pid", "known_pid_candidate": True},
+                        }
+                    ],
+                    "footnote": {
+                        "title": "山縣有朋意見書",
+                        "text": "山縣有朋意見書，第12頁。",
+                        "page_numbers": [12],
+                    },
+                    "artifacts": {
+                        "source_resolver_plan": {
+                            "source_type": "contained_document",
+                            "known_pid_candidates": ["3025431"],
+                        },
+                        "manual_search_recipe": {
+                            "reason": "contained_document_requires_host_discovery",
+                            "suggested_pid_scope": "3025431",
+                            "suggested_queries": ["山縣有朋意見書 復讐心"],
+                            "target_pid_queries": ["復讐心", "共同經營", "滿洲"],
+                            "query_buckets": {
+                                "contained": ["山縣有朋意見書"],
+                                "theme": ["滿洲"],
+                                "action": ["共同經營", "復讐心"],
+                                "page_near": ["外交政略"],
+                            },
+                        },
+                        "contained_document_lookup_diagnostic": {
+                            "source_type": "contained_document",
+                            "ndl_id": "3025431",
+                            "known_pid_candidates": ["3025431"],
+                            "host_missing": True,
+                            "contained_title": "山縣有朋意見書",
+                            "title_hit_count": 10,
+                        },
+                    },
+                },
+            },
+            "artifacts": {},
+        }
+
+        report = render_resume_markdown_report(
+            document={"title": "三类史料测试"},
+            checkpoint=checkpoint,
+            total_candidates=3,
+            output_dir=Path(tempfile.mkdtemp()),
+        )
+
+        self.assertIn("diag=source_type=volume_series", report)
+        self.assertIn("target_snippet=direct_hit/hits=10/specific=10", report)
+        self.assertIn("diag=source_type=diary", report)
+        self.assertIn("diary_date_hits=0/title_hits=4", report)
+        self.assertIn("diag=source_type=contained_document", report)
+        self.assertIn("next=known PID first, then host fallback", report)
+        self.assertIn("pid_query=復讐心, 共同經營, 滿洲", report)
+        self.assertIn("theme=滿洲", report)
+        self.assertIn("action=共同經營, 復讐心", report)
 
 
 if __name__ == "__main__":

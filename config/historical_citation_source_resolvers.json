@@ -1,0 +1,388 @@
+{
+  "schema_version": "historical_citation.source_resolvers.v1",
+  "updated_at": "2026-05-01",
+  "source": "NDL Digital Collection item/search and fulltext/search checks",
+  "nihon_gaiko_bunsho": {
+    "volumes": [
+      {
+        "volume": "第32巻",
+        "year": "明治32年",
+        "date_range": "自明治32年1月至明治32年12月",
+        "terms": [
+          "第32巻",
+          "第32卷",
+          "第三十二巻",
+          "第三十二卷",
+          "明治32年",
+          "明治三十二年",
+          "1899年"
+        ],
+        "pid": "3448126",
+        "title": "日本外交文書",
+        "note": "NDL Digital item/search: 第32巻 明治32年1月-12月, 日本国際連合協会, 1955"
+      },
+      {
+        "volume": "明治 第32巻",
+        "year": "明治32年",
+        "date_range": "自明治32年1月至明治32年12月",
+        "terms": [
+          "第32巻",
+          "第32卷",
+          "明治 第32巻",
+          "明治32年",
+          "明治三十二年",
+          "1899年"
+        ],
+        "pid": "2530174",
+        "title": "日本外交文書",
+        "note": "NDL Digital item/search: 明治 第32巻, 巖南堂書店 3版"
+      },
+      {
+        "volume": "第32巻",
+        "year": "明治32年",
+        "terms": [
+          "第32巻",
+          "第三十二巻",
+          "明治32年",
+          "明治三十二年",
+          "1899年",
+          "門戶開放",
+          "門戸開放",
+          "機會均等",
+          "機会均等",
+          "米國照會"
+        ],
+        "pid": "3448128",
+        "title": "日本外交文書",
+        "note": "NDL Digital fulltext/search returned this PID for 第三十二巻; retained as same-volume alternate"
+      },
+      {
+        "volume": "第38巻 第1冊",
+        "year": "明治38年",
+        "date_range": "明治38年",
+        "terms": [
+          "第38巻",
+          "第38卷",
+          "第三十八巻",
+          "第三十八卷",
+          "第1冊",
+          "第1册",
+          "明治38年",
+          "明治三十八年",
+          "1905年",
+          "桂太郎",
+          "タフト",
+          "桂・タフト",
+          "桂・タフト協定",
+          "桂・タフト覚書",
+          "タフト陸軍長官",
+          "THE TAFT-KATSURA AGREEMENT",
+          "Katsura",
+          "Taft",
+          "韓國",
+          "比島"
+        ],
+        "pid": "3448160",
+        "title": "日本外交文書",
+        "note": "NDL Digital fulltext/search: 日本外交文書 第38巻 桂・タフト; contains THE TAFT-KATSURA AGREEMENT and is preferred for 第38巻第1冊 pages 450-452"
+      },
+      {
+        "volume": "第38巻 第1冊",
+        "year": "明治38年",
+        "date_range": "明治38年",
+        "terms": [
+          "第38巻",
+          "第38卷",
+          "第三十八巻",
+          "第三十八卷",
+          "第1冊",
+          "第1册",
+          "明治38年",
+          "明治三十八年",
+          "1905年",
+          "ハリマン",
+          "南満洲鉄道"
+        ],
+        "pid": "2530367",
+        "title": "日本外交文書",
+        "note": "NDL Digital fulltext/search: 日本外交文書 第38巻 明治38年; retained as same-volume alternate for South Manchuria railway contexts"
+      },
+      {
+        "volume": "大正期 追補 [1]",
+        "year": "1971年",
+        "terms": [
+          "大正期 追補",
+          "大正期追補",
+          "追補 [1]",
+          "巴里講和會議經過概要",
+          "巴里講和会議経過概要",
+          "巴黎讲和会议经过概要",
+          "巴黎講和会議経過概要",
+          "パリ講和会議経過概要",
+          "巴黎讲和会议",
+          "巴里講和",
+          "講和會議",
+          "講和会議",
+          "牧野",
+          "1971年"
+        ],
+        "pid": "11923430",
+        "title": "日本外交文書 大正期 追補 [1] 巴里講和会議経過概要",
+        "note": "NDL Search/Digital record for 日本外交文書 大正期追補 巴里講和会議経過概要, 1971"
+      },
+      {
+        "volume": "ワシントン会議 上",
+        "year": "1977年",
+        "terms": [
+          "ワシントン会議",
+          "ワシントン會議",
+          "華盛頓會議",
+          "華盛頓会議",
+          "华盛顿会议",
+          "ワシントン会議 上",
+          "上巻",
+          "上卷",
+          "軍備制限問題",
+          "海軍軍備制限問題",
+          "主力艦",
+          "比率",
+          "内田康哉",
+          "加藤友三郎",
+          "ヒューズ",
+          "1977年"
+        ],
+        "pid": "11927523",
+        "title": "日本外交文書 ワシントン会議 上",
+        "note": "NDL Search/Digital record for 日本外交文書 ワシントン会議 上; used as the first strict PID for Washington-conference citations until 下巻/軍備制限問題 PID is separately confirmed"
+      }
+    ],
+    "claim_facets": [
+      {
+        "id": "paris_mandate",
+        "trigger_terms": ["巴黎", "巴里", "パリ", "講和", "牧野", "委任", "托管", "赤道", "南洋", "太平洋"],
+        "buckets": {
+          "document_title": ["巴里講和會議經過概要", "巴里講和会議経過概要", "パリ講和会議経過概要"],
+          "anchor": ["巴里講和会議経過概要", "牧野男", "牧野委員"],
+          "theme": ["委任統治", "赤道以北", "獨領南洋", "独領南洋", "南洋群島", "太平洋群島"],
+          "action": ["會議ノ決定", "会議ノ決定", "決定ヲ受諾"],
+          "page_near": ["帝國主張説明", "帝国主張説明", "牧野男", "赤道以北", "獨領南洋", "独領南洋"]
+        },
+        "target_pid_required_terms": ["委任統治", "赤道以北", "決定ヲ受諾"],
+        "pid_match_terms": ["巴里講和会議経過概要", "大正期追補", "1971年"]
+      },
+      {
+        "id": "washington_naval_limitation",
+        "trigger_terms": ["ワシントン", "華盛頓", "华盛顿", "軍備", "军备", "主力艦", "海軍", "十対六", "十對六", "10:10:6", "ヒューズ"],
+        "buckets": {
+          "document_title": ["ワシントン會議", "ワシントン会議", "華盛頓會議"],
+          "anchor": ["ワシントン会議", "ヒューズ", "内田", "加藤友三郎"],
+          "theme": ["軍備制限問題", "海軍軍備制限", "海軍軍備制限問題", "主力艦", "主力艦比率", "勢力比", "海軍勢力比", "比率", "十対六", "十對六", "米国案ノ十対六", "米國案ノ十對六"],
+          "action": ["製艦ヲ協定程度ニ制限", "協定", "制限"],
+          "page_near": ["米国案ノ十対六", "米國案ノ十對六", "日英米三国間", "日英米三國間", "防備"]
+        },
+        "target_pid_required_terms": ["米国案ノ十対六", "ヒューズ", "海軍勢力比"],
+        "pid_match_terms": ["ワシントン会議", "軍備制限問題", "1977年"]
+      },
+      {
+        "id": "open_door_hay",
+        "trigger_terms": ["门户开放", "門戸開放", "門戶開放", "机会均等", "機會均等", "John Hay", "海伊", "ヘイ", "照会", "回答"],
+        "buckets": {
+          "person": ["ジョン・ヘイ", "ヘイ", "ヘイ國務卿", "ヘイ国務卿", "米國務卿", "米国務卿"],
+          "anchor": ["ジョン・ヘイ", "ヘイ國務卿", "米國照會", "帝國政府回答"],
+          "theme": ["支那ニ於ケル商業上機會均等及門戸開放", "商業上機會均等及門戸開放", "門戶開放", "門戸開放", "商業上機會均等", "商業上機会均等"],
+          "action": ["米國照會", "米国照会", "帝國政府回答", "帝国政府回答", "各國回答", "各国回答", "承諾シタル"],
+          "page_near": ["合衆國ノ提議", "合衆国ノ提議", "合衆國政府ノ提議", "合衆国政府ノ提議", "日本國政府ハ", "日本国政府ハ"]
+        },
+        "target_pid_required_terms": ["支那ニ於ケル商業上機會均等及門戸開放", "米國照會", "帝國政府回答"],
+        "pid_match_terms": ["第32巻", "明治32年", "門戶開放", "機會均等"]
+      }
+    ]
+  },
+  "nihon_kindai_shiso_taikei": {
+    "claim_facets": [
+      {
+        "id": "jingu_taima_distribution",
+        "trigger_terms": ["大麻", "神宮大麻", "皇大神宮", "伊勢", "神棚", "御札", "流言", "蝶", "水火"],
+        "buckets": {
+          "anchor": ["神宮大麻", "皇大神宮大麻", "伊勢皇大神宮大麻"],
+          "theme": ["神宮大麻", "皇大神宮大麻", "御札", "神棚"],
+          "action": ["神棚ヲ不設", "大麻ヲ水火ニ投ズ", "水火ニ投ズ", "焼捨", "河流ニ投ジ"],
+          "page_near": ["大麻ノ神ノ字ガ蝶", "時疫", "伊勢皇大神宮大麻", "神宮大麻等", "静岡県で大麻につき流言"]
+        },
+        "target_pid_required_terms": ["大麻ノ神ノ字ガ蝶", "水火ニ投ズ", "神棚ヲ不設", "伊勢皇大神宮大麻"]
+      }
+    ]
+  },
+  "hara_takashi_diary": {
+    "volumes": [
+      {
+        "volume": "第1",
+        "title": "官界言論人",
+        "terms": [
+          "第1",
+          "第1巻",
+          "官界言論人"
+        ],
+        "pid": "2982132",
+        "note": "NDL Digital item/search: 原敬日記 第1 (官界言論人), 福村出版, 1965"
+      },
+      {
+        "volume": "第2",
+        "title": "政界進出",
+        "terms": [
+          "第2",
+          "第2巻",
+          "政界進出",
+          "明治33年",
+          "1900年"
+        ],
+        "pid": "2982135",
+        "note": "NDL Digital item/search: 原敬日記 第2 (政界進出), 福村出版, 1965"
+      },
+      {
+        "volume": "第3",
+        "title": "内務大臣",
+        "terms": [
+          "第3",
+          "第3巻",
+          "内務大臣"
+        ],
+        "pid": "2982136",
+        "note": "NDL Digital item/search: 原敬日記 第3 (内務大臣), 福村出版, 1965"
+      },
+      {
+        "volume": "第4",
+        "title": "総裁就任",
+        "terms": [
+          "第4",
+          "第4巻",
+          "総裁就任"
+        ],
+        "pid": "2982137",
+        "note": "NDL Digital item/search: 原敬日記 第4 (総裁就任), 福村出版, 1965"
+      },
+      {
+        "volume": "第5",
+        "title": "首相時代",
+        "terms": [
+          "第5",
+          "第5巻",
+          "首相時代"
+        ],
+        "pid": "2982138",
+        "note": "NDL Digital item/search: 原敬日記 第5 (首相時代), 福村出版, 1965"
+      }
+    ],
+    "claim_facets": [
+      {
+        "id": "us",
+        "role": "anchor",
+        "trigger_terms": ["美国", "美國", "America", "United States", "U.S."],
+        "terms": ["米国", "米國", "米"]
+      },
+      {
+        "id": "china",
+        "role": "anchor",
+        "trigger_terms": ["中国", "中國", "清国", "清國", "支那", "China"],
+        "terms": ["清国", "清國", "支那", "中国", "中國"]
+      },
+      {
+        "id": "korea",
+        "role": "anchor",
+        "trigger_terms": ["韩国", "韓國", "朝鲜", "朝鮮", "Korea"],
+        "terms": ["韓国", "韓國", "朝鮮", "韓"]
+      },
+      {
+        "id": "russia",
+        "role": "anchor",
+        "trigger_terms": ["俄国", "俄國", "俄罗斯", "ロシア", "Russia"],
+        "terms": ["露国", "露國", "ロシア", "俄国", "俄國"]
+      },
+      {
+        "id": "britain",
+        "role": "anchor",
+        "trigger_terms": ["英国", "英國", "イギリス", "Britain", "England"],
+        "terms": ["英国", "英國", "イギリス", "英"]
+      },
+      {
+        "id": "economy",
+        "role": "theme",
+        "trigger_terms": ["经济", "經濟", "経済", "不景气", "不景氣", "恐慌", "recession", "depression", "economy"],
+        "terms": ["経済", "經濟", "不景気", "不景氣", "景気", "景氣", "恐慌", "資本", "資本家"]
+      },
+      {
+        "id": "future_influence",
+        "role": "theme",
+        "trigger_terms": ["将来", "將來", "未来", "前景", "世界", "影响", "影響", "future", "world", "influence"],
+        "terms": ["将来", "將來", "世界", "影響", "前途", "光明", "洋々", "洋洋"]
+      },
+      {
+        "id": "vitality",
+        "role": "theme",
+        "trigger_terms": ["活力", "活气", "活氣", "有力", "energetic", "vital"],
+        "terms": ["活気", "活氣", "活力", "有力", "盛ん"]
+      },
+      {
+        "id": "diplomacy_policy",
+        "role": "theme",
+        "trigger_terms": ["外交", "政策", "条约", "條約", "协定", "協定", "交涉", "交渉", "diplomacy", "policy", "treaty"],
+        "terms": ["外交", "政策", "條約", "条約", "協定", "交涉", "交渉", "談判"]
+      },
+      {
+        "id": "cabinet_government",
+        "role": "institution",
+        "trigger_terms": ["政府", "内阁", "內閣", "内閣", "首相", "大臣", "government", "cabinet", "minister"],
+        "terms": ["政府", "内閣", "內閣", "首相", "大臣", "外務大臣", "國務大臣"]
+      }
+    ]
+  },
+  "contained_documents": {
+    "documents": [
+      {
+        "title": "山県有朋意見書",
+        "aliases": [
+          "山縣有朋意見書",
+          "山県有朋意見書"
+        ],
+        "pid": "3025431",
+        "note": "NDL Digital item/search: 山県有朋意見書, 原書房, 1966",
+        "person_terms": [
+          "山縣有朋",
+          "山県有朋",
+          "日本",
+          "露國",
+          "露国",
+          "日露"
+        ],
+        "theme_terms": [
+          "滿洲",
+          "満洲",
+          "東三省",
+          "韓國",
+          "韓国",
+          "清國",
+          "清国"
+        ],
+        "action_terms": [
+          "共同經營",
+          "共同経営",
+          "親交",
+          "親善",
+          "提携",
+          "競爭",
+          "競争",
+          "排斥",
+          "復讐",
+          "復讐心"
+        ],
+        "page_near_terms": [
+          "外交政略",
+          "東洋",
+          "利益線",
+          "主權線",
+          "主権線"
+        ]
+      }
+    ]
+  }
+}

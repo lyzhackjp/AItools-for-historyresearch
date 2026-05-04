@@ -13,6 +13,7 @@ import requests
 
 from .contained_sources import contained_source_search_titles, normalize_source_lookup_title
 from .docx_parser import clean_text
+from .footnote_parser import extract_volume_terms
 from .models import ParsedFootnote
 
 
@@ -175,18 +176,61 @@ def author_query_terms(author: str) -> List[str]:
     return authors[:2]
 
 
+def title_query_variants(title: str) -> List[str]:
+    """Generate conservative NDL title variants for compound Japanese titles."""
+
+    cleaned = clean_text(title)
+    if not cleaned:
+        return []
+    variants: List[str] = []
+
+    def add(value: str) -> None:
+        normalized = clean_text(value)
+        if normalized and normalized not in variants:
+            variants.append(normalized)
+
+    add(cleaned)
+    add(re.sub(r"[・·／/、，,;；]+", " ", cleaned))
+    add(re.sub(r"[\s　・·／/、，,;；]+", "", cleaned))
+    for part in re.split(r"[・·／/、，,;；]+", cleaned):
+        add(part)
+
+    orthographic_pairs = (("国", "國"), ("条", "條"), ("体", "體"), ("学", "學"), ("会", "會"))
+    snapshot = list(variants)
+    for variant in snapshot:
+        old_style = variant
+        new_style = variant
+        for modern, historical in orthographic_pairs:
+            old_style = old_style.replace(modern, historical)
+            new_style = new_style.replace(historical, modern)
+        add(old_style)
+        add(new_style)
+    return variants[:10]
+
+
 def iter_ndl_search_keywords(footnote: ParsedFootnote) -> List[str]:
     keywords: List[str] = []
     source_titles = contained_source_search_titles(footnote)
     host_title = getattr(footnote, "host_title", "") or ""
     contained_title = getattr(footnote, "contained_title", "") or ""
-    raw_candidates = [
-        *source_titles,
-        " ".join(part for part in [host_title, contained_title or footnote.title] if part).strip(),
-        footnote.ndl_keyword,
-        " ".join(part for part in [footnote.title, footnote.author] if part).strip(),
-        footnote.title,
+    volume_terms = extract_volume_terms(getattr(footnote, "text", "") or "")
+    volume_candidates = [
+        " ".join(part for part in [footnote.title, term] if part).strip()
+        for term in volume_terms
     ]
+    raw_candidates = []
+    if volume_terms and not host_title:
+        raw_candidates.extend([footnote.ndl_keyword, *volume_candidates])
+    raw_candidates.extend(
+        [
+            *source_titles,
+            " ".join(part for part in [host_title, contained_title or footnote.title] if part).strip(),
+            footnote.ndl_keyword,
+            " ".join(part for part in [footnote.title, footnote.author] if part).strip(),
+            footnote.title,
+            *title_query_variants(footnote.title),
+        ]
+    )
     compact_title = clean_text(re.sub(r"[：:「」『』《》\-\u2014\u3000]+", " ", footnote.title or ""))
     if compact_title:
         raw_candidates.append(compact_title)
@@ -773,7 +817,7 @@ def parse_ndl_sru_records(xml_text: str) -> List[Dict[str, Any]]:
         "foaf": "http://xmlns.com/foaf/0.1/",
     }
     records: List[Dict[str, Any]] = []
-    for record in root.findall(".//srw:recordData", namespaces):
+    for rank, record in enumerate(root.findall(".//srw:recordData", namespaces), start=1):
         inner_xml = html.unescape("".join(record.itertext())).strip()
         if not inner_xml:
             continue
@@ -822,7 +866,11 @@ def parse_ndl_sru_records(xml_text: str) -> List[Dict[str, Any]]:
                 "author": author or None,
                 "date": date or None,
                 "publisher": publisher or None,
-                "metadata": {"identifier": identifier},
+                "metadata": {
+                    "identifier": identifier,
+                    "search_route": "ndl_sru",
+                    "source_rank": rank,
+                },
             }
         )
     return records

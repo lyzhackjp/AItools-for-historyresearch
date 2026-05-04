@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import copy
+from dataclasses import dataclass, field
 import html
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ from urllib.parse import quote_plus, urljoin
 
 import requests
 
+from .footnote_parser import extract_volume_terms
 from .models import CitationCandidate, NDLSearchMatch, ParsedFootnote
 from .ndl_search import (
     iter_ndl_search_keywords,
@@ -27,6 +29,8 @@ from .source_acquisition import (
     is_likely_digital_ndl_pid,
     select_preferred_source_match,
 )
+from .source_graph import build_source_graph_node, build_source_query_plan
+from .source_resolvers import resolve_source
 
 
 JAPAN_SEARCH_SPARQL_URL = "https://jpsearch.go.jp/rdf/sparql/"
@@ -49,7 +53,13 @@ class SourcePlatformAdapter(Protocol):
 
     name: str
 
-    def search(self, footnote: ParsedFootnote, *, max_results: int = 5) -> List[NDLSearchMatch]:
+    def search(
+        self,
+        footnote: ParsedFootnote,
+        *,
+        max_results: int = 5,
+        claim_text: str = "",
+    ) -> List[NDLSearchMatch]:
         ...
 
     def select_preferred_match(self, matches: Sequence[NDLSearchMatch]) -> Optional[NDLSearchMatch]:
@@ -139,29 +149,54 @@ class NDLSourcePlatformAdapter:
     prefer_external_module: bool = False
     allow_external_fallback: bool = True
     name: str = "ndl"
+    metadata_search_cache: Dict[str, List[Any]] = field(default_factory=dict)
 
-    def search(self, footnote: ParsedFootnote, *, max_results: int = 5) -> List[NDLSearchMatch]:
+    def search(
+        self,
+        footnote: ParsedFootnote,
+        *,
+        max_results: int = 5,
+        claim_text: str = "",
+    ) -> List[NDLSearchMatch]:
         records: List[Any] = []
         if self.prefer_external_module:
             records = self._search_via_download_module(footnote, max_results=max_results, use_api=True)
         if not records:
             try:
-                records = search_ndl_public_api(footnote, max_results=max_results)
+                records = self._search_public_api_cached(footnote, max_results=max_results)
             except Exception:
                 records = []
         if not records and self.allow_external_fallback:
             records = self._search_via_download_module(footnote, max_results=max_results, use_api=True)
         if not records and self.allow_external_fallback:
             records = self._search_via_download_module(footnote, max_results=max_results, use_api=False)
+        configured_pid_records = self._configured_pid_records(footnote, claim_text=claim_text)
+        if configured_pid_records:
+            records = self._merge_records(configured_pid_records, records)
         fulltext_records: List[Any] = []
         has_host_title = bool(getattr(footnote, "host_title", ""))
+        skip_fulltext = os.environ.get("HISTORICAL_CITATION_SKIP_NDL_FULLTEXT") == "1"
+        force_fulltext = os.environ.get("HISTORICAL_CITATION_FORCE_NDL_FULLTEXT") == "1"
         should_try_fulltext = (
-            has_host_title
-            or not any(self._record_has_download_hint(record) for record in records)
-            or os.environ.get("HISTORICAL_CITATION_ENABLE_NDLSEARCH_HTML") == "1"
+            not skip_fulltext
+            and (
+                force_fulltext
+                or has_host_title
+                or (
+                    self.allow_external_fallback
+                    and (
+                        not any(self._record_has_download_hint(record) for record in records)
+                        or os.environ.get("HISTORICAL_CITATION_ENABLE_NDLSEARCH_HTML") == "1"
+                    )
+                )
+            )
         )
         if should_try_fulltext:
-            fulltext_records = self._search_via_ndlsearch_fulltext(footnote, max_results=max_results)
+            fulltext_records = self._search_via_ndlsearch_fulltext(
+                footnote,
+                max_results=max_results,
+                claim_text=claim_text,
+            )
         if fulltext_records:
             records = self._merge_records(records, fulltext_records)
 
@@ -192,12 +227,90 @@ class NDLSourcePlatformAdapter:
         matches.sort(
             key=lambda item: (
                 bool(item.metadata.get("source_mismatch")),
-                -self._effective_source_score(item),
-                0 if self._match_has_download_hint(item) else 1,
+                self._source_priority(item),
+                -self._effective_source_score(footnote, item, claim_text=claim_text),
                 int(item.metadata.get("source_rank") or 9999),
             )
         )
         return matches[:max_results]
+
+    def _search_public_api_cached(self, footnote: ParsedFootnote, *, max_results: int) -> List[Any]:
+        cache_key = self._metadata_cache_key(footnote, max_results=max_results)
+        if cache_key in self.metadata_search_cache:
+            return copy.deepcopy(self.metadata_search_cache[cache_key])
+        records = search_ndl_public_api(footnote, max_results=max_results)
+        self.metadata_search_cache[cache_key] = copy.deepcopy(records)
+        return records
+
+    def _metadata_cache_key(self, footnote: ParsedFootnote, *, max_results: int) -> str:
+        parts = [
+            str(max_results),
+            getattr(footnote, "title", "") or "",
+            getattr(footnote, "author", "") or "",
+            getattr(footnote, "year", "") or "",
+            getattr(footnote, "publisher", "") or "",
+            getattr(footnote, "host_title", "") or "",
+            getattr(footnote, "contained_title", "") or "",
+            getattr(footnote, "ndl_keyword", "") or "",
+        ]
+        return "\x1f".join(parts)
+
+    def _configured_pid_records(self, footnote: ParsedFootnote, *, claim_text: str = "") -> List[Dict[str, Any]]:
+        resolver_plan = resolve_source(footnote, claim_text=claim_text)
+        if not resolver_plan.known_pid_candidates:
+            return []
+        source_graph = build_source_graph_node(footnote, claim_text=claim_text)
+        records: List[Dict[str, Any]] = []
+        title = self._configured_pid_record_title(footnote, resolver_plan.source_family)
+        for rank, pid in enumerate(resolver_plan.known_pid_candidates, start=1):
+            pid = str(pid or "").strip()
+            if not pid:
+                continue
+            records.append(
+                {
+                    "title": title,
+                    "author": getattr(footnote, "author", None),
+                    "date": getattr(footnote, "year", None),
+                    "publisher": getattr(footnote, "publisher", None),
+                    "url": f"https://dl.ndl.go.jp/pid/{pid}",
+                    "ndl_id": pid,
+                    "metadata": {
+                        "search_route": "resolver_config_known_pid",
+                        "search_routes": ["resolver_config_known_pid"],
+                        "known_pid_candidate": True,
+                        "configured_pid_rank": rank,
+                        "resolver": resolver_plan.resolver,
+                        "source_family": resolver_plan.source_family,
+                        "source_type": resolver_plan.source_type,
+                        "source_level_cache_key": resolver_plan.source_level_cache_key,
+                        "evidence_mode": resolver_plan.evidence_mode,
+                        "verification_mode": resolver_plan.verification_mode,
+                        "pid_scope_strategy": resolver_plan.pid_scope_strategy,
+                        "availability_hint": source_graph.availability,
+                        "candidate_note": "resolver_known_pid_requires_evidence_collection",
+                    },
+                }
+            )
+        return records
+
+    def _configured_pid_record_title(self, footnote: ParsedFootnote, source_family: str) -> str:
+        values: List[Any] = []
+        generic_families = {"generic", "contained_document", ""}
+        if source_family not in generic_families:
+            values.extend([getattr(footnote, "host_title", ""), source_family])
+        values.extend(
+            [
+                getattr(footnote, "host_title", ""),
+                getattr(footnote, "title", ""),
+                getattr(footnote, "ndl_keyword", ""),
+                source_family,
+            ]
+        )
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                return text
+        return "NDL Digital configured source"
 
     def _match_has_download_hint(self, match: NDLSearchMatch) -> bool:
         return bool(
@@ -206,14 +319,82 @@ class NDLSourcePlatformAdapter:
             or "dl.ndl.go.jp" in str(getattr(match, "url", "") or "")
         )
 
-    def _effective_source_score(self, match: NDLSearchMatch) -> float:
+    def _effective_source_score(
+        self,
+        footnote: ParsedFootnote,
+        match: NDLSearchMatch,
+        *,
+        claim_text: str = "",
+    ) -> float:
         score = float(getattr(match, "score", 0) or 0)
+        source_graph = build_source_graph_node(footnote, claim_text=claim_text)
+        match_id = str(getattr(match, "ndl_id", None) or getattr(match, "platform_item_id", None) or "")
+        if match_id and match_id in source_graph.known_pid_candidates:
+            score += 0.70
+        if source_graph.source_type == "volume_series":
+            volume_terms = [normalize_match_text(term) for term in source_graph.volume_terms]
+            match_text = normalize_match_text(
+                " ".join(
+                    str(value or "")
+                    for value in [match.title, match.date, match.publisher]
+                )
+            )
+            if any(term and term in match_text for term in volume_terms):
+                score += 0.25
         if self._match_has_download_hint(match):
             score += 0.12
         metadata = getattr(match, "metadata", {}) or {}
         if isinstance(metadata, dict) and metadata.get("fulltext_hints"):
             score += 0.10
+            score += self._fulltext_specificity_score(footnote, match)
         return score
+
+    def _fulltext_specificity_score(self, footnote: ParsedFootnote, match: NDLSearchMatch) -> float:
+        metadata = getattr(match, "metadata", {}) or {}
+        hints = metadata.get("fulltext_hints") if isinstance(metadata, dict) else None
+        if not isinstance(hints, list):
+            return 0.0
+        contained = normalize_match_text(getattr(footnote, "contained_title", "") or "")
+        host = normalize_match_text(getattr(footnote, "host_title", "") or "")
+        title = normalize_match_text(getattr(footnote, "title", "") or "")
+        volume_terms = [normalize_match_text(term) for term in extract_volume_terms(getattr(footnote, "text", "") or "")]
+        best = 0.0
+        for hint in hints:
+            if not isinstance(hint, dict):
+                continue
+            query = normalize_match_text(str(hint.get("query") or ""))
+            snippet = normalize_match_text(str(hint.get("snippet") or ""))
+            local = 0.0
+            if contained and (contained in query or contained in snippet):
+                local += 0.45
+            if host and (host in query or host in snippet):
+                local += 0.20
+            if title and title != contained and (title in query or title in snippet):
+                local += 0.15
+            if any(term and (term in query or term in snippet) for term in volume_terms):
+                local += 0.30
+            if hint.get("pdf_page"):
+                local += 0.05
+            best = max(best, local)
+        return best
+
+    def _source_priority(self, match: NDLSearchMatch) -> int:
+        metadata = getattr(match, "metadata", {}) or {}
+        routes = set(metadata.get("search_routes") or [])
+        route = metadata.get("search_route")
+        if route:
+            routes.add(str(route))
+        if metadata.get("known_pid_candidate") or "resolver_config_known_pid" in routes:
+            return 0
+        if getattr(match, "pdf_url", None):
+            return 0
+        if self._match_has_download_hint(match) and "ndlsearch_html_fulltext" not in routes:
+            return 1
+        if metadata.get("fulltext_hints") and "ndl_digital_fulltext_api" in routes:
+            return 2
+        if "ndlsearch_html_fulltext" in routes:
+            return 4
+        return 3
 
     def _merge_records(self, *record_groups: Sequence[Any]) -> List[Any]:
         merged: List[Any] = []
@@ -330,13 +511,22 @@ class NDLSourcePlatformAdapter:
         footnote: ParsedFootnote,
         *,
         max_results: int,
+        claim_text: str = "",
     ) -> List[Any]:
         collected: List[Any] = []
         seen_keys: set[str] = set()
+        plan = build_source_query_plan(footnote, claim_text=claim_text)
+        resolver_plan = resolve_source(footnote, claim_text=claim_text)
         fulltext_keywords: List[str] = []
         contained_title = str(getattr(footnote, "contained_title", "") or "")
         if contained_title:
             fulltext_keywords.append(contained_title)
+        for keyword in resolver_plan.global_queries:
+            if keyword not in fulltext_keywords:
+                fulltext_keywords.append(keyword)
+        for keyword in plan.global_fulltext_queries(max_queries=max(8, max_results * 3)):
+            if keyword not in fulltext_keywords:
+                fulltext_keywords.append(keyword)
         for keyword in iter_ndl_search_keywords(footnote):
             if keyword not in fulltext_keywords:
                 fulltext_keywords.append(keyword)
@@ -961,6 +1151,7 @@ class SourcePlatformRegistry:
         *,
         max_results: int = 5,
         platform_names: Optional[Iterable[str]] = None,
+        claim_text: str = "",
     ) -> List[NDLSearchMatch]:
         allowed = set(platform_names or [])
         matches: List[NDLSearchMatch] = []
@@ -968,7 +1159,15 @@ class SourcePlatformRegistry:
         for platform in self.platforms:
             if allowed and platform.name not in allowed:
                 continue
-            for match in platform.search(footnote, max_results=max_results):
+            if platform.name == "ndl":
+                platform_matches = platform.search(
+                    footnote,
+                    max_results=max_results,
+                    claim_text=claim_text,
+                )
+            else:
+                platform_matches = platform.search(footnote, max_results=max_results)
+            for match in platform_matches:
                 key = f"{match.platform}:{match.platform_item_id or match.ndl_id or match.url or match.title}"
                 if key and key not in seen_keys:
                     seen_keys.add(key)

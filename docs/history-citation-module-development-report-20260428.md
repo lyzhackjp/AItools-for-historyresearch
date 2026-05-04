@@ -137,6 +137,10 @@ NDL 检索顺序随之调整：下载/馆藏发现优先宿主书；全文命中
 
 - `scripts/resume_historical_citation_verifier.py`
 - `scripts/review_historical_citation_checkpoint.py`
+- `scripts/run_historical_citation_pdf_verifier.py`
+- `scripts/run_historical_citation_pdf_fullrun.py`
+- `scripts/refine_historical_citation_pdf_next_stage.py`
+- `scripts/probe_historical_citation_source_types.py`
 - `scripts/probe_ndl_fulltext_context.py`
 - `scripts/cross_validate_ndl_fulltext_ocr.py`
 - `scripts/migrate_historical_citation_checkpoint.py`
@@ -152,6 +156,11 @@ NDL 检索顺序随之调整：下载/馆藏发现优先宿主书；全文命中
 - OCR/fulltext cross-validation report
 - LLM review report
 - source trial / unavailable source list
+
+整理后的阶段性文档保存在 `docs/`：
+
+- `docs/history-citation-current-results-report-20260504.md`
+- `docs/history-citation-fullrun-optimization-plan-20260430.md`
 
 ### 4.4 Skill 产物
 
@@ -174,3 +183,14 @@ NDL 检索顺序随之调整：下载/馆藏发现优先宿主书；全文命中
 8. 建立本地小模型评估基线，区分“可用于摘要/流程执行”的模型与“可用于证据判断”的模型。
 9. 对安全检查脚本提示的既有 tracked 高风险配置文件进行单独清理或迁移。
 10. 在报告中加入证据等级图例，让人工核验者快速区分 OCR 证据、全文弱证据、候选线索和不可判断状态。
+
+## 6. PDF 输入扩展边界
+
+PDF 扩展只新增输入解析和最小 CLI 入口，不另建独立报告体系。PDF 论文解析后必须复用既有 Word 路径的候选、下载/OCR、NDL 全文、LLM 精核和 `partial_resume_report.md` 信息层级。
+
+输出要求：
+
+- 正式 Markdown 报告统一采用 Word 成功范例的结构：总览、状态细分、不可下载清单、快速索引、逐条脚注详情、候选来源、OCR/全文/LLM 证据。
+- NDL Digital Collection (`dl.ndl.go.jp`) 是全文命中和下载判断的主入口；`ndlsearch.ndl.go.jp` 只作为补充元数据桥接。
+- `remote_copy_only_no_print`、`download_failed`、`source_unavailable`、`page_mapping_unavailable` 等不可下载状态必须继续尝试目标 PID 的 NDL fulltext SNIPPET。成功时标为 `fulltext_only_hit`，并在报告中显示 PID、PDF 页、`cid`、查询词、SNIPPET 和接龙上下文。
+- 正式 LLM 精核固定使用 Ollama `gemma4:e4b`；Qwen 系模型只能作为对照测试，不得作为正式证据判断模型。

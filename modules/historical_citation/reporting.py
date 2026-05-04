@@ -7,6 +7,8 @@ from typing import Any, Dict, Optional, Sequence
 
 from .download_index import refresh_download_range_index
 from .models import CitationCandidate
+from .models import ParsedFootnote
+from .source_graph import build_manual_search_recipe, build_source_graph_node
 from .source_trials import source_trials_from_legacy
 from .status import (
     classify_candidate_status,
@@ -115,6 +117,401 @@ def _source_attempt_lines(artifacts: Dict[str, Any], *, current: Optional[Dict[s
     return lines
 
 
+def _match_dict_value(match: Any, key: str, default: Any = None) -> Any:
+    if isinstance(match, dict):
+        return match.get(key, default)
+    return getattr(match, key, default)
+
+
+def _format_adapter_candidate_order(result: Dict[str, Any], *, limit: int = 6) -> Optional[str]:
+    artifacts = result.get("artifacts") or {}
+    matches = result.get("ndl_matches") or []
+    by_id: Dict[str, Dict[str, Any]] = {}
+    derived_order: list[str] = []
+    for match in matches:
+        source_id = str(
+            _match_dict_value(match, "ndl_id")
+            or _match_dict_value(match, "platform_item_id")
+            or _match_dict_value(match, "url")
+            or ""
+        )
+        if not source_id:
+            continue
+        metadata = _match_dict_value(match, "metadata", {}) or {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        by_id[source_id] = {
+            "route": metadata.get("search_route") or metadata.get("source_route") or "",
+            "known": bool(metadata.get("known_pid_candidate")),
+        }
+        if source_id not in derived_order:
+            derived_order.append(source_id)
+
+    raw_order = artifacts.get("source_match_order") or artifacts.get("adapter_candidate_order") or []
+    order: list[str] = []
+    for item in raw_order if isinstance(raw_order, list) else []:
+        if isinstance(item, dict):
+            source_id = str(item.get("ndl_id") or item.get("source_id") or item.get("pid") or "")
+            if source_id:
+                by_id.setdefault(
+                    source_id,
+                    {
+                        "route": item.get("search_route") or item.get("route") or "",
+                        "known": bool(item.get("known_pid_candidate")),
+                    },
+                )
+        else:
+            source_id = str(item or "")
+        if source_id and source_id not in order:
+            order.append(source_id)
+    if not order:
+        order = derived_order
+    if not order:
+        return None
+
+    labels: list[str] = []
+    for source_id in order[:limit]:
+        meta = by_id.get(source_id, {})
+        route = str(meta.get("route") or "")
+        known = "known" if meta.get("known") else "candidate"
+        suffix = f"{known}/{route}" if route else known
+        labels.append(f"{source_id} ({suffix})")
+    if len(order) > limit:
+        labels.append(f"+{len(order) - limit} more")
+    return f"- Adapter Candidate Order: {' -> '.join(labels)}"
+
+
+def _format_ndl_fulltext_probe(artifacts: Dict[str, Any]) -> Optional[str]:
+    probe = artifacts.get("ndl_fulltext_probe") or {}
+    if not isinstance(probe, dict) or not probe:
+        return None
+    queries = probe.get("queries_tried") or []
+    if isinstance(queries, list):
+        query_label = "; ".join(str(query) for query in queries[:3] if str(query).strip())
+    else:
+        query_label = str(queries)
+    first_pages = probe.get("first_pdf_pages") or []
+    if isinstance(first_pages, list) and first_pages:
+        page_label = ",".join(str(page) for page in first_pages[:5])
+    else:
+        page_label = "n/a"
+    return (
+        f"- Target PID snippet probe: pid={probe.get('pid') or 'n/a'} "
+        f"| status={probe.get('status') or 'unknown'} "
+        f"| hits={probe.get('hit_count', 0)} "
+        f"| specific_hits={probe.get('specific_hit_count', 0)} "
+        f"| pdf_page_hits={probe.get('pdf_page_hit_count', 0)} "
+        f"| pdf_pages={page_label}"
+        f"{(' | queries=' + query_label) if query_label else ''}"
+    )
+
+
+def _format_fulltext_context_candidates(artifacts: Dict[str, Any], *, limit: int = 5) -> List[str]:
+    candidates = artifacts.get("fulltext_context_candidates") or []
+    if not isinstance(candidates, list) or not candidates:
+        return []
+    selected_context_id = str(artifacts.get("fulltext_selected_context_id") or "")
+    lines = ["- 全文上下文候选 Top N:"]
+    for item in candidates[:limit]:
+        if not isinstance(item, dict):
+            continue
+        context_id = str(item.get("context_id") or "ctx")
+        selected = " | selected" if selected_context_id and context_id == selected_context_id else ""
+        page = item.get("pdf_page") or "n/a"
+        category = item.get("lead_category") or "unknown"
+        score = item.get("score", "n/a")
+        query = truncate_text(str(item.get("query") or ""), limit=90)
+        lines.append(
+            f"  - {context_id}{selected} | score={score} | {category} | pdf_page={page} | query={query}"
+        )
+        cleaned = item.get("cleaned_context") or item.get("expanded_context") or item.get("snippet") or ""
+        if cleaned:
+            lines.append(f"    - 清洗后上下文: {truncate_text(str(cleaned), limit=360)}")
+        reasons = item.get("score_reasons") or []
+        if isinstance(reasons, list) and reasons:
+            lines.append(f"    - score reasons: {', '.join(str(reason) for reason in reasons[:5])}")
+    return lines
+
+
+def _format_fulltext_compound_evidence_packet(artifacts: Dict[str, Any]) -> List[str]:
+    packet = artifacts.get("fulltext_compound_evidence_packet") or {}
+    if not isinstance(packet, dict) or not packet:
+        return []
+    facets = packet.get("facets") or []
+    if not isinstance(facets, list) or not facets:
+        return []
+    complete = bool(packet.get("complete"))
+    supporting_context_ids = packet.get("supporting_context_ids") or []
+    if isinstance(supporting_context_ids, list):
+        supporting_label = ", ".join(str(item) for item in supporting_context_ids[:6])
+    else:
+        supporting_label = ""
+    lines = [
+        "- 复合证据包: "
+        f"type={packet.get('packet_type') or 'unknown'} | "
+        f"complete={complete}"
+        f"{(' | contexts=' + supporting_label) if supporting_label else ''}"
+    ]
+    for facet in facets:
+        if not isinstance(facet, dict):
+            continue
+        hits = facet.get("hits") or []
+        hit_labels: List[str] = []
+        if isinstance(hits, list):
+            for hit in hits[:3]:
+                if not isinstance(hit, dict):
+                    continue
+                terms = hit.get("matched_terms") or []
+                term_label = "/".join(str(term) for term in terms[:3]) if isinstance(terms, list) else ""
+                hit_labels.append(
+                    f"{hit.get('context_id') or 'ctx?'}"
+                    f"@p{hit.get('pdf_page') or 'n/a'}"
+                    f"{(':' + term_label) if term_label else ''}"
+                )
+        lines.append(
+            "  - "
+            f"{facet.get('facet_id') or 'facet'} | "
+            f"covered={bool(facet.get('covered'))} | "
+            f"{'; '.join(hit_labels) if hit_labels else 'no hit'}"
+        )
+    gap = artifacts.get("fulltext_compound_evidence_review_gap") or {}
+    if isinstance(gap, dict) and gap:
+        lines.append(
+            "- 复合证据复核提示: 已覆盖必要 facet，但最终精核未判 direct_support，"
+            f"当前判定={gap.get('decision') or 'unknown'}"
+        )
+    return lines
+
+
+def _format_iiif_image_ocr_availability(artifacts: Dict[str, Any]) -> Optional[str]:
+    manifest = artifacts.get("iiif_image_ocr_available") or {}
+    fulltext = artifacts.get("ndl_fulltext_json_available") or {}
+    if not isinstance(manifest, dict):
+        manifest = {}
+    if not isinstance(fulltext, dict):
+        fulltext = {}
+    if not manifest and not fulltext:
+        return None
+    bits: list[str] = []
+    if manifest:
+        bits.append(
+            f"IIIF manifest pid={manifest.get('ndl_id') or 'n/a'} canvases={manifest.get('canvas_count', 'n/a')}"
+        )
+    if fulltext:
+        bits.append(f"fulltext-json pid={fulltext.get('ndl_id') or 'n/a'}")
+    return f"- 可读图像/OCR 路径: {' | '.join(bits)}"
+
+
+def _format_known_pid_page_window_fallback(artifacts: Dict[str, Any]) -> Optional[str]:
+    fallback = artifacts.get("known_pid_page_window_fallback") or {}
+    if not isinstance(fallback, dict) or not fallback:
+        return None
+    start_page = fallback.get("start_page")
+    end_page = fallback.get("end_page")
+    window = f"{start_page}-{end_page}" if start_page is not None and end_page is not None else "n/a"
+    cited_pages = format_page_list(fallback.get("cited_book_pages") or [])
+    return (
+        f"- Known PID page-window fallback: PID={fallback.get('ndl_id') or 'n/a'} "
+        f"| cited_pages={cited_pages} | scan_window={window} "
+        f"| evidence={fallback.get('evidence_level') or 'diagnostic'}"
+    )
+
+
+def _format_diary_date_pdf_page_fallback(artifacts: Dict[str, Any]) -> Optional[str]:
+    fallback = artifacts.get("diary_date_pdf_page_fallback") or {}
+    if not isinstance(fallback, dict) or not fallback:
+        return None
+    start_page = fallback.get("start_page")
+    end_page = fallback.get("end_page")
+    window = f"{start_page}-{end_page}" if start_page is not None and end_page is not None else "n/a"
+    top_candidates = fallback.get("top_candidates") or []
+    top_candidate: Dict[str, Any] = {}
+    if isinstance(top_candidates, list) and top_candidates and isinstance(top_candidates[0], dict):
+        top_candidate = top_candidates[0]
+    claim_facets = top_candidate.get("claim_facets") or []
+    if isinstance(claim_facets, list) and claim_facets:
+        facet_label = ",".join(str(facet) for facet in claim_facets[:6])
+    else:
+        facet_label = "n/a"
+    return (
+        f"- Diary date PDF-page route fallback: PID={fallback.get('ndl_id') or 'n/a'} "
+        f"| selected_pdf_page={fallback.get('selected_pdf_page') or 'n/a'} "
+        f"| scan_window={window} "
+        f"| query={truncate_text(fallback.get('selected_query') or 'n/a', limit=120)} "
+        f"| scope={fallback.get('selected_match_scope') or 'n/a'} "
+        f"| lead={fallback.get('selected_lead_category') or 'n/a'} "
+        f"| facets={facet_label} "
+        f"| evidence={fallback.get('evidence_level') or 'routing_only_until_ocr_llm_review'}"
+    )
+
+
+def _format_diary_date_lookup_diagnostic(artifacts: Dict[str, Any]) -> Optional[str]:
+    diagnostic = artifacts.get("diary_date_lookup_diagnostic") or {}
+    if not isinstance(diagnostic, dict) or not diagnostic:
+        return None
+    window = diagnostic.get("small_page_window") or {}
+    if not isinstance(window, dict):
+        window = {}
+    start_page = window.get("start_page")
+    end_page = window.get("end_page")
+    window_label = f"{start_page}-{end_page}" if start_page is not None and end_page is not None else "n/a"
+    date_queries = ", ".join(str(query) for query in (diagnostic.get("date_queries") or [])[:3]) or "n/a"
+    return (
+        f"- Diary date lookup diagnostic: PID={diagnostic.get('ndl_id') or 'n/a'} "
+        f"| date_hits={diagnostic.get('date_hit_count', 0)} "
+        f"| title_hits={diagnostic.get('title_hit_count', 0)} "
+        f"| date_queries={date_queries} "
+        f"| next=toc/index + small page-window OCR "
+        f"| cited_pages={format_page_list(window.get('cited_book_pages') or [])} "
+        f"| scan_window={window_label}"
+    )
+
+
+def _format_contained_document_lookup_diagnostic(artifacts: Dict[str, Any]) -> Optional[str]:
+    diagnostic = artifacts.get("contained_document_lookup_diagnostic") or {}
+    if not isinstance(diagnostic, dict) or not diagnostic:
+        return None
+    known_pids = ", ".join(str(pid) for pid in (diagnostic.get("known_pid_candidates") or []) if str(pid or "")) or "n/a"
+    host = diagnostic.get("host_title") or ("missing" if diagnostic.get("host_missing") else "n/a")
+    contained = diagnostic.get("contained_title") or "n/a"
+    return (
+        f"- Contained document lookup diagnostic: PID={diagnostic.get('ndl_id') or 'n/a'} "
+        f"| known_pids={known_pids} "
+        f"| contained={contained} "
+        f"| host={host} "
+        f"| title_hits={diagnostic.get('title_hit_count', 0)} "
+        f"| next=known document PID first, then host fallback"
+    )
+
+
+def _format_source_type_diagnostic_summary(result: Dict[str, Any]) -> Optional[str]:
+    artifacts = result.get("artifacts") or {}
+    if not isinstance(artifacts, dict):
+        return None
+    resolver_plan = artifacts.get("source_resolver_plan") or {}
+    source_graph = artifacts.get("source_graph") or {}
+    if not isinstance(resolver_plan, dict):
+        resolver_plan = {}
+    if not isinstance(source_graph, dict):
+        source_graph = {}
+    source_type = str(resolver_plan.get("source_type") or source_graph.get("source_type") or "")
+    if not source_type:
+        return None
+    known_pids = [
+        str(pid)
+        for pid in [
+            *(resolver_plan.get("known_pid_candidates") or []),
+            *(source_graph.get("known_pid_candidates") or []),
+        ]
+        if str(pid or "")
+    ]
+    known_pids = list(dict.fromkeys(known_pids))
+    bits = [f"source_type={source_type}"]
+    if known_pids:
+        bits.append(f"strict_pid={', '.join(known_pids[:3])}")
+
+    probe = artifacts.get("ndl_fulltext_probe") or {}
+    if isinstance(probe, dict) and probe:
+        bits.append(
+            f"target_snippet={probe.get('status') or 'unknown'}"
+            f"/hits={probe.get('hit_count', 0)}"
+            f"/specific={probe.get('specific_hit_count', 0)}"
+        )
+        first_pages = probe.get("first_pdf_pages") or []
+        if isinstance(first_pages, list) and first_pages:
+            bits.append(f"pdf_pages={','.join(str(page) for page in first_pages[:3])}")
+
+    diary_diagnostic = artifacts.get("diary_date_lookup_diagnostic") or {}
+    diary_pdf_route = artifacts.get("diary_date_pdf_page_fallback") or {}
+    known_window = artifacts.get("known_pid_page_window_fallback") or {}
+    contained_diagnostic = artifacts.get("contained_document_lookup_diagnostic") or {}
+    if isinstance(diary_diagnostic, dict) and diary_diagnostic:
+        bits.append(
+            f"diary_date_hits={diary_diagnostic.get('date_hit_count', 0)}"
+            f"/title_hits={diary_diagnostic.get('title_hit_count', 0)}"
+        )
+        bits.append("next=toc/index + small page-window OCR")
+    if isinstance(diary_pdf_route, dict) and diary_pdf_route:
+        selected_page = diary_pdf_route.get("selected_pdf_page")
+        start_page = diary_pdf_route.get("start_page")
+        end_page = diary_pdf_route.get("end_page")
+        route_label = f"diary_pdf_route=p{selected_page or 'n/a'}"
+        if start_page is not None and end_page is not None:
+            route_label += f"/window={start_page}-{end_page}"
+        bits.append(route_label)
+        bits.append(f"route_evidence={diary_pdf_route.get('evidence_level') or 'routing_only_until_ocr_llm_review'}")
+    diary_claim_scope = artifacts.get("diary_claim_facet_trigger_scope")
+    if diary_claim_scope:
+        bits.append(f"diary_claim_scope={diary_claim_scope}")
+    if isinstance(known_window, dict) and known_window:
+        start_page = known_window.get("start_page")
+        end_page = known_window.get("end_page")
+        if start_page is not None and end_page is not None:
+            bits.append(f"page_window={start_page}-{end_page}")
+        else:
+            bits.append("page_window=planned")
+    if isinstance(contained_diagnostic, dict) and contained_diagnostic:
+        contained = contained_diagnostic.get("contained_title") or "n/a"
+        host = contained_diagnostic.get("host_title") or ("missing" if contained_diagnostic.get("host_missing") else "n/a")
+        bits.append(f"contained={contained}")
+        bits.append(f"host={host}")
+        bits.append(f"title_hits={contained_diagnostic.get('title_hit_count', 0)}")
+        bits.append("next=known PID first, then host fallback")
+
+    skipped_fulltext_leads = artifacts.get("non_equivalent_fulltext_lead_skipped_ids") or []
+    if isinstance(skipped_fulltext_leads, list) and skipped_fulltext_leads:
+        bits.append(f"skipped_fulltext_leads={', '.join(str(item) for item in skipped_fulltext_leads[:4])}")
+    if len(bits) <= 1:
+        return None
+    return f"- Source-type diagnostic summary: {' | '.join(bits)}"
+
+
+def _compact_source_type_diagnostic_summary(result: Dict[str, Any], *, limit: int = 220) -> str:
+    summary = _format_source_type_diagnostic_summary(result) or ""
+    summary = summary.replace("- Source-type diagnostic summary:", "").strip()
+    return truncate_text(summary, limit=limit).replace("\n", " ")
+
+
+def _format_fulltext_lead_manual_hint(artifacts: Dict[str, Any]) -> Optional[str]:
+    fulltext_leads = artifacts.get("fulltext_lead_pid_group") or []
+    if not isinstance(fulltext_leads, list) or not fulltext_leads:
+        return None
+    resolver_plan = artifacts.get("source_resolver_plan") or {}
+    if not isinstance(resolver_plan, dict):
+        resolver_plan = {}
+    source_graph = artifacts.get("source_graph") or {}
+    if not isinstance(source_graph, dict):
+        source_graph = {}
+    source_type = str(resolver_plan.get("source_type") or source_graph.get("source_type") or "")
+    strict_pids = [str(pid) for pid in (resolver_plan.get("known_pid_candidates") or []) if str(pid or "")]
+    target_queries = [str(query) for query in (resolver_plan.get("target_pid_queries") or []) if str(query or "")]
+    lead_pids = [
+        str(item.get("ndl_id") or item.get("source_id") or item.get("pid") or "")
+        for item in fulltext_leads
+        if isinstance(item, dict) and str(item.get("ndl_id") or item.get("source_id") or item.get("pid") or "")
+    ]
+    bits: list[str] = []
+    if source_type == "volume_series":
+        bits.append("volume_series: 先核对卷册/年份/文书题名，避免同题名错卷")
+    elif source_type == "diary":
+        bits.append("diary: 先确认日期对应卷册；若日期 snippet 为 0，改查目录/索引和小页窗 OCR")
+    elif source_type in {"contained_document", "source_collection"}:
+        host_title = str(source_graph.get("host_title") or resolver_plan.get("host_title") or "")
+        contained_title = str(source_graph.get("contained_title") or resolver_plan.get("contained_title") or "")
+        host_bit = f"host={host_title}" if host_title else "host PID"
+        contained_bit = f"contained={contained_title}" if contained_title else "析出题名"
+        bits.append(f"contained_document: 先确认 {host_bit} 与 {contained_bit}，只在 host/严格 PID 内搜析出文献")
+    else:
+        bits.append("先区分严格等价来源与全站全文线索")
+    if strict_pids:
+        bits.append(f"先回查严格 PID {', '.join(strict_pids[:4])}")
+    if target_queries:
+        bits.append(f"在目标 PID 内搜 {', '.join(target_queries[:3])}")
+    if lead_pids:
+        bits.append(f"全文 lead {', '.join(lead_pids[:4])} 仅用于判断是否误入其它卷册")
+    return f"- 全文 lead 人工回查建议: {'；'.join(bits)}" if bits else None
+
+
 def _current_evidence_status(result: Dict[str, Any]) -> str:
     artifacts = result.get("artifacts") or {}
     if result.get("matched_japanese"):
@@ -123,6 +520,18 @@ def _current_evidence_status(result: Dict[str, Any]) -> str:
         if provider:
             return f"ocr_aligned_with_{provider}_review"
         return "ocr_aligned"
+    if artifacts.get("known_pid_page_window_fallback"):
+        return "known_pid_page_window_diagnostic_ocr"
+    if artifacts.get("diary_date_lookup_diagnostic"):
+        return "diary_date_lookup_diagnostic"
+    if artifacts.get("contained_document_lookup_diagnostic"):
+        return "contained_document_lookup_diagnostic"
+    if artifacts.get("fulltext_lead_only"):
+        return "ndl_fulltext_lead_only"
+    if artifacts.get("fulltext_only_hit") or artifacts.get("ndl_fulltext_hints"):
+        return "ndl_fulltext_only_weak_evidence"
+    if artifacts.get("iiif_image_ocr_available") or artifacts.get("ndl_fulltext_json_available"):
+        return "iiif_image_ocr_available"
     if artifacts.get("source_pdf"):
         return "pdf_acquired_without_alignment"
     availability = artifacts.get("source_availability") if isinstance(artifacts, dict) else None
@@ -131,6 +540,197 @@ def _current_evidence_status(result: Dict[str, Any]) -> str:
     if artifacts.get("page_mapping_required_but_unavailable"):
         return "page_mapping_blocked"
     return "no_current_evidence"
+
+
+def _footnote_from_result(result: Dict[str, Any]) -> ParsedFootnote:
+    payload = result.get("footnote") or {}
+    return ParsedFootnote(
+        id=str(payload.get("id") or result.get("footnote_id") or ""),
+        text=str(payload.get("text") or ""),
+        title=str(payload.get("title") or ""),
+        author=str(payload.get("author") or ""),
+        publisher=str(payload.get("publisher") or ""),
+        publication_place=str(payload.get("publication_place") or ""),
+        year=str(payload.get("year") or ""),
+        page_label=str(payload.get("page_label") or ""),
+        page_numbers=list(payload.get("page_numbers") or []),
+        page_span_type=str(payload.get("page_span_type") or ""),
+        page_span_source=str(payload.get("page_span_source") or ""),
+        source_type=str(payload.get("source_type") or "book"),
+        ndl_keyword=str(payload.get("ndl_keyword") or ""),
+        host_title=str(payload.get("host_title") or ""),
+        contained_title=str(payload.get("contained_title") or ""),
+        source_relation=str(payload.get("source_relation") or ""),
+        notes=list(payload.get("notes") or []),
+    )
+
+
+def _source_graph_from_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    artifacts = result.get("artifacts") or {}
+    source_graph = artifacts.get("source_graph")
+    if isinstance(source_graph, dict) and source_graph:
+        return source_graph
+    footnote = _footnote_from_result(result)
+    return build_source_graph_node(
+        footnote,
+        claim_text=str(result.get("translation_text") or result.get("paragraph_text") or ""),
+    ).to_dict()
+
+
+def _manual_search_recipe_from_result(result: Dict[str, Any], *, current_status: str) -> Dict[str, Any]:
+    artifacts = result.get("artifacts") or {}
+    recipe = artifacts.get("manual_search_recipe")
+    if isinstance(recipe, dict) and recipe:
+        return recipe
+    footnote = _footnote_from_result(result)
+    return build_manual_search_recipe(
+        footnote,
+        claim_text=str(result.get("translation_text") or result.get("paragraph_text") or ""),
+        current_status=current_status,
+    )
+
+
+def _format_manual_recipe_values(values: Any, *, limit: int = 3, text_limit: int = 80) -> str:
+    if not isinstance(values, list):
+        values = [values]
+    labels: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in labels:
+            continue
+        labels.append(truncate_text(text, limit=text_limit))
+        if len(labels) >= limit:
+            break
+    return ", ".join(labels)
+
+
+def _format_manual_search_recipe(manual_recipe: Dict[str, Any]) -> Optional[str]:
+    if not isinstance(manual_recipe, dict) or not manual_recipe:
+        return None
+    reason = manual_recipe.get("reason") or "manual_review"
+    recipe_bits: list[str] = []
+    pid_scope = manual_recipe.get("suggested_pid_scope") or ""
+    if pid_scope:
+        recipe_bits.append(f"PID={pid_scope}")
+
+    suggested_queries = manual_recipe.get("suggested_queries") or []
+    suggested_label = _format_manual_recipe_values(suggested_queries, limit=2)
+    if suggested_label:
+        recipe_bits.append(f"query={suggested_label}")
+
+    target_pid_queries = manual_recipe.get("target_pid_queries") or []
+    target_label = _format_manual_recipe_values(target_pid_queries, limit=4)
+    if target_label:
+        recipe_bits.append(f"pid_query={target_label}")
+
+    query_buckets = manual_recipe.get("query_buckets") or {}
+    if isinstance(query_buckets, dict) and query_buckets:
+        bucket_bits: list[str] = []
+        seen: set[str] = set()
+        priority = [
+            "document_title",
+            "document_heading",
+            "anchor",
+            "contained",
+            "host",
+            "volume",
+            "date",
+            "person",
+            "theme",
+            "action",
+            "policy",
+            "page_near",
+            "special_term",
+            "title",
+            "blocked_standalone",
+        ]
+        for bucket_name in [*priority, *sorted(str(key) for key in query_buckets.keys())]:
+            if bucket_name in seen:
+                continue
+            seen.add(bucket_name)
+            values = query_buckets.get(bucket_name)
+            value_label = _format_manual_recipe_values(values, limit=3, text_limit=48)
+            if value_label:
+                bucket_bits.append(f"{bucket_name}={value_label}")
+            if len(bucket_bits) >= 6:
+                break
+        if bucket_bits:
+            recipe_bits.append("buckets=" + truncate_text("; ".join(bucket_bits), limit=320))
+
+    blocked_terms = manual_recipe.get("blocked_standalone_terms") or []
+    blocked_label = _format_manual_recipe_values(blocked_terms, limit=3)
+    if blocked_label and "blocked_standalone" not in str(query_buckets):
+        recipe_bits.append(f"blocked={blocked_label}")
+    return f"- 人工检索建议: {reason}{(' | ' + ' | '.join(recipe_bits)) if recipe_bits else ''}"
+
+
+def _processing_history_lines(result: Dict[str, Any]) -> list[str]:
+    artifacts = result.get("artifacts") or {}
+    lines: list[str] = []
+    if artifacts.get("download_timeout"):
+        timeout = artifacts.get("download_timeout") or {}
+        timeout_seconds = timeout.get("timeout_seconds") if isinstance(timeout, dict) else None
+        lines.append(f"download_timeout: {timeout_seconds or 'unknown'}s")
+    if artifacts.get("candidate_rotation_after_not_supported"):
+        rotation = artifacts.get("candidate_rotation_after_not_supported") or {}
+        if isinstance(rotation, dict):
+            lines.append(
+                "candidate_rotation_after_not_supported: "
+                f"attempted={bool(rotation.get('attempted'))}, resolved={rotation.get('resolved', 'n/a')}"
+            )
+    if artifacts.get("source_attempts"):
+        lines.append(f"source_attempts: {len(artifacts.get('source_attempts') or [])}")
+    if artifacts.get("source_unavailable_attempts"):
+        lines.append(f"source_unavailable_attempts: {len(artifacts.get('source_unavailable_attempts') or [])}")
+    known_window = artifacts.get("known_pid_page_window_fallback") or {}
+    if isinstance(known_window, dict) and known_window:
+        lines.append(
+            "known_pid_page_window_fallback: "
+            f"pid={known_window.get('ndl_id') or 'n/a'}, "
+            f"pages={format_page_list(known_window.get('cited_book_pages') or [])}, "
+            f"window={known_window.get('start_page') or 'n/a'}-{known_window.get('end_page') or 'n/a'}"
+        )
+    diary_pdf_route = artifacts.get("diary_date_pdf_page_fallback") or {}
+    if isinstance(diary_pdf_route, dict) and diary_pdf_route:
+        lines.append(
+            "diary_date_pdf_page_fallback: "
+            f"pid={diary_pdf_route.get('ndl_id') or 'n/a'}, "
+            f"selected_pdf_page={diary_pdf_route.get('selected_pdf_page') or 'n/a'}, "
+            f"window={diary_pdf_route.get('start_page') or 'n/a'}-{diary_pdf_route.get('end_page') or 'n/a'}, "
+            f"evidence={diary_pdf_route.get('evidence_level') or 'routing_only_until_ocr_llm_review'}"
+        )
+    diary_diagnostic = artifacts.get("diary_date_lookup_diagnostic") or {}
+    if isinstance(diary_diagnostic, dict) and diary_diagnostic:
+        lines.append(
+            "diary_date_lookup_diagnostic: "
+            f"pid={diary_diagnostic.get('ndl_id') or 'n/a'}, "
+            f"date_hits={diary_diagnostic.get('date_hit_count', 0)}, "
+            f"title_hits={diary_diagnostic.get('title_hit_count', 0)}, "
+            "next=toc/index + small page-window OCR"
+        )
+    contained_diagnostic = artifacts.get("contained_document_lookup_diagnostic") or {}
+    if isinstance(contained_diagnostic, dict) and contained_diagnostic:
+        lines.append(
+            "contained_document_lookup_diagnostic: "
+            f"pid={contained_diagnostic.get('ndl_id') or 'n/a'}, "
+            f"title_hits={contained_diagnostic.get('title_hit_count', 0)}, "
+            "next=known document PID first, then host fallback"
+        )
+    for note in result.get("notes") or []:
+        note_text = str(note)
+        if any(
+            marker in note_text
+            for marker in (
+                "timeout",
+                "retry",
+                "candidate_rotation",
+                "page_mapping",
+                "known_pid_page_window",
+                "diary_date_pdf_page",
+            )
+        ):
+            lines.append(note_text)
+    return lines[:10]
 
 
 def _llm_review_counters(results: Sequence[Dict[str, Any]]) -> Dict[str, int]:
@@ -357,6 +957,11 @@ def render_verification_markdown_report(
                 f"- 出处有效性: {support_status_label(support_status)} (`{support_status}`)",
                 f"- 有效性依据: {support_reason or '尚未生成'}",
                 f"- 证据范围: {evidence_scope or '未记录'}",
+                f"- Source graph: {(item.artifacts.get('source_graph') or {}).get('source_type', 'unknown')} | "
+                f"family={(item.artifacts.get('source_graph') or {}).get('source_family', 'unknown')} | "
+                f"resolver={(item.artifacts.get('source_graph') or {}).get('resolver', 'unknown')}",
+                f"- Resolver plan: mode={(item.artifacts.get('source_resolver_plan') or {}).get('verification_mode', 'unknown')} | "
+                f"pid_scope={(item.artifacts.get('source_resolver_plan') or {}).get('pid_scope_strategy', 'unknown')}",
                 f"- 来源: {item.footnote.author}《{item.footnote.title}》 {item.footnote.page_label}".strip(),
                 f"- 置信度: {item.confidence if item.confidence is not None else 'N/A'}",
                 f"- 页码信息: {describe_page_trace(item)}",
@@ -377,7 +982,11 @@ def render_verification_markdown_report(
             for match in item.ndl_matches[:3]:
                 label = match.title or "未命名结果"
                 platform = match.platform or "unknown"
-                lines.append(f"- [{platform}] {label} | score={match.score:.3f} | {match.url or '无链接'}")
+                route = (match.metadata or {}).get("search_route") or ""
+                route_label = f" | route={route}" if route else ""
+                lines.append(
+                    f"- [{platform}] {label} | score={match.score:.3f}{route_label} | {match.url or '无链接'}"
+                )
             lines.append("")
         source_attempts = _source_attempt_lines(
             item.artifacts,
@@ -435,6 +1044,9 @@ def render_verification_markdown_report(
             "ocr_failed",
             "page_mapping_unavailable",
             "needs_manual_review",
+            "fulltext_only_hit",
+            "fulltext_lead_only",
+            "iiif_image_ocr_available",
         )
     ]
     if pending_items:
@@ -442,9 +1054,12 @@ def render_verification_markdown_report(
         lines.append("")
         for item in pending_items:
             refined_status = classify_candidate_status(item)
+            diagnostic = _compact_source_type_diagnostic_summary(item.to_dict())
+            diagnostic_suffix = f" | diag={diagnostic}" if diagnostic else ""
             lines.append(
                 f"- 脚注 {item.footnote_id} | {item.verification_status} / {refined_status} | "
                 f"{item.footnote.title or item.footnote.text[:40]}"
+                f"{diagnostic_suffix}"
             )
         lines.append("")
     return "\n".join(lines)
@@ -586,10 +1201,13 @@ def render_resume_markdown_report(
             if refined_status != status_label:
                 status_label = f"{status_label} / {refined_status}"
             support_status = result.get("support_status") or "unassessed"
+            diagnostic = _compact_source_type_diagnostic_summary(result)
+            diagnostic_suffix = f" | diag={diagnostic}" if diagnostic else ""
             lines.append(
                 f"- 脚注 {result.get('footnote_id')} | {status_label} | "
                 f"{support_status_label(support_status)} | "
                 f"{footnote.get('title') or footnote.get('text', '')[:40]}"
+                f"{diagnostic_suffix}"
             )
         lines.append("")
 
@@ -606,6 +1224,7 @@ def render_resume_markdown_report(
             lines.append("")
             lines.append(f"- 候选 ID: {result.get('candidate_id')}")
             lines.append(f"- 状态说明: {refined_status_label(refined_status)}")
+            lines.append(f"- 当前状态: {refined_status}")
             lines.append(f"- 当前证据状态: {_current_evidence_status(result)}")
             support_status = result.get("support_status") or "unassessed"
             support_reason = result.get("support_reason") or ""
@@ -613,6 +1232,48 @@ def render_resume_markdown_report(
             lines.append(f"- 出处有效性: {support_status_label(support_status)} (`{support_status}`)")
             lines.append(f"- 有效性依据: {support_reason or '尚未生成'}")
             lines.append(f"- 证据范围: {evidence_scope or '未记录'}")
+            source_graph = _source_graph_from_result(result)
+            if source_graph:
+                lines.append(
+                    f"- Source graph: {source_graph.get('source_type') or 'unknown'} "
+                    f"| family={source_graph.get('source_family') or 'unknown'} "
+                    f"| resolver={source_graph.get('resolver') or 'unknown'}"
+                )
+                if source_graph.get("host_title"):
+                    lines.append(f"- Host title: {source_graph.get('host_title')}")
+                if source_graph.get("contained_title"):
+                    lines.append(f"- Contained title: {source_graph.get('contained_title')}")
+                if source_graph.get("volume_terms"):
+                    lines.append(f"- 卷册线索: {', '.join(str(item) for item in source_graph.get('volume_terms') or [])}")
+                if source_graph.get("known_pid_candidates"):
+                    lines.append(
+                        f"- 已知 PID 候选: {', '.join(str(item) for item in source_graph.get('known_pid_candidates') or [])}"
+                    )
+            resolver_plan = artifacts.get("source_resolver_plan") or {}
+            if isinstance(resolver_plan, dict) and resolver_plan:
+                lines.append(
+                    f"- Resolver plan: mode={resolver_plan.get('verification_mode') or 'unknown'} "
+                    f"| pid_scope={resolver_plan.get('pid_scope_strategy') or 'unknown'} "
+                    f"| cache={resolver_plan.get('source_level_cache_key') or 'n/a'}"
+                )
+                if resolver_plan.get("warnings"):
+                    lines.append(f"- Resolver warnings: {', '.join(str(item) for item in resolver_plan.get('warnings') or [])}")
+            source_type_summary = _format_source_type_diagnostic_summary(result)
+            if source_type_summary:
+                lines.append(source_type_summary)
+            adapter_order_line = _format_adapter_candidate_order(result)
+            if adapter_order_line:
+                lines.append(adapter_order_line)
+            history_lines = _processing_history_lines(result)
+            if history_lines:
+                lines.append(f"- 处理历史: {'; '.join(history_lines)}")
+            manual_recipe = _manual_search_recipe_from_result(result, current_status=refined_status)
+            manual_recipe_line = _format_manual_search_recipe(manual_recipe)
+            if manual_recipe_line:
+                lines.append(manual_recipe_line)
+            evidence_level = artifacts.get("evidence_level")
+            if evidence_level:
+                lines.append(f"- 证据等级: {evidence_level}")
             citation_unit = artifacts.get("citation_unit") or {}
             if isinstance(citation_unit, dict):
                 lines.append(
@@ -635,6 +1296,11 @@ def render_resume_markdown_report(
             if artifacts.get("downloaded_page_range"):
                 page_range = artifacts["downloaded_page_range"]
                 lines.append(f"- 下载/抽取页范围: {page_range[0]}-{page_range[1]}")
+            if artifacts.get("source_level_ocr_cache_hit"):
+                cache_hit = artifacts.get("source_level_ocr_cache_hit") or {}
+                lines.append(
+                    f"- Source-level OCR cache: hit | pages={format_page_list(cache_hit.get('pages') or [])}"
+                )
             if artifacts.get("mapped_footnote_pages"):
                 mapped_pages = ", ".join(str(page) for page in artifacts["mapped_footnote_pages"])
                 lines.append(f"- 双开页换算后的扫描页: {mapped_pages}")
@@ -643,6 +1309,39 @@ def render_resume_markdown_report(
                 reason = availability.get("reason") or "unknown"
                 detail = availability.get("detail") or ""
                 lines.append(f"- 来源可下载性: unavailable / {reason}{(' / ' + str(detail)) if detail else ''}")
+            known_pid_fallback_line = _format_known_pid_page_window_fallback(artifacts)
+            if known_pid_fallback_line:
+                lines.append(known_pid_fallback_line)
+            diary_pdf_route_line = _format_diary_date_pdf_page_fallback(artifacts)
+            if diary_pdf_route_line:
+                lines.append(diary_pdf_route_line)
+            diary_claim_scope = artifacts.get("diary_claim_facet_trigger_scope")
+            if diary_claim_scope:
+                lines.append(f"- Diary claim facet trigger scope: {diary_claim_scope}")
+            skipped_fulltext_leads = artifacts.get("non_equivalent_fulltext_lead_skipped_ids") or []
+            if isinstance(skipped_fulltext_leads, list) and skipped_fulltext_leads:
+                lines.append(
+                    "- 非等价全文线索已跳过自动轮换: "
+                    f"{', '.join(str(item) for item in skipped_fulltext_leads)}"
+                )
+            fulltext_probe_line = _format_ndl_fulltext_probe(artifacts)
+            if fulltext_probe_line:
+                lines.append(fulltext_probe_line)
+            iiif_line = _format_iiif_image_ocr_availability(artifacts)
+            if iiif_line:
+                lines.append(iiif_line)
+            fulltext_context_lines = _format_fulltext_context_candidates(artifacts)
+            if fulltext_context_lines:
+                lines.extend(fulltext_context_lines)
+            compound_packet_lines = _format_fulltext_compound_evidence_packet(artifacts)
+            if compound_packet_lines:
+                lines.extend(compound_packet_lines)
+            diary_diagnostic_line = _format_diary_date_lookup_diagnostic(artifacts)
+            if diary_diagnostic_line:
+                lines.append(diary_diagnostic_line)
+            contained_diagnostic_line = _format_contained_document_lookup_diagnostic(artifacts)
+            if contained_diagnostic_line:
+                lines.append(contained_diagnostic_line)
             ndl_fulltext_hints = artifacts.get("ndl_fulltext_hints") or []
             if isinstance(ndl_fulltext_hints, list) and ndl_fulltext_hints:
                 lines.append("- NDL 全文命中线索: available_snippet_hint")
@@ -655,6 +1354,11 @@ def render_resume_markdown_report(
                     lines.append(
                         f"  - pdf_page={pdf_page or 'n/a'} | {page_status} | {snippet}"
                     )
+                    expanded_context = hint.get("expanded_context")
+                    if expanded_context:
+                        lines.append(
+                            f"    - 接龙上下文: {truncate_text(str(expanded_context), limit=260)}"
+                        )
             if result.get("matched_page") is not None:
                 lines.append(f"- 当前最佳匹配页: {result.get('matched_page')}")
             if result.get("confidence") is not None:
@@ -679,12 +1383,28 @@ def render_resume_markdown_report(
                 )
                 if llm_review.get("reason"):
                     lines.append(f"- LLM 精核理由: {llm_review.get('reason')}")
+                if llm_review.get("supporting_context_ids"):
+                    lines.append(
+                        "- LLM 组合上下文: "
+                        + ", ".join(str(item) for item in llm_review.get("supporting_context_ids") or [])
+                    )
+                if llm_review.get("compound_evidence_packet_used"):
+                    added = llm_review.get("compound_evidence_added_context_ids") or []
+                    facets = llm_review.get("compound_evidence_facet_ids") or []
+                    lines.append(
+                        "- LLM 复合证据补齐: "
+                        f"contexts={', '.join(str(item) for item in added) if isinstance(added, list) else added} "
+                        f"| facets={', '.join(str(item) for item in facets) if isinstance(facets, list) else facets}"
+                    )
+                if artifacts.get("fulltext_llm_review_basis"):
+                    lines.append(f"- LLM 精核证据基底: {artifacts.get('fulltext_llm_review_basis')}")
             llm_runtime = artifacts.get("llm_review_runtime") or {}
             if isinstance(llm_runtime, dict) and llm_runtime:
                 lines.append(
                     f"- 本地模型健康检查: {llm_runtime.get('provider')} "
                     f"available={llm_runtime.get('available')} "
-                    f"model={llm_runtime.get('selected_model') or 'n/a'}"
+                    f"model={llm_runtime.get('selected_model') or 'n/a'} "
+                    f"timeout={llm_runtime.get('timeout_seconds') or 'n/a'}s"
                 )
             if artifacts.get("page_distance_from_citation") is not None:
                 lines.append(f"- 与脚注页码距离: {artifacts.get('page_distance_from_citation')}")
@@ -709,6 +1429,44 @@ def render_resume_markdown_report(
                 lines.append("")
 
             ndl_matches = result.get("ndl_matches") or []
+            claim_queries = artifacts.get("claim_fulltext_global_queries") or []
+            if isinstance(claim_queries, list) and claim_queries:
+                lines.append("**NDL 全文查询层**")
+                lines.append("")
+                for query in claim_queries[:6]:
+                    lines.append(f"- {truncate_text(str(query), limit=180)}")
+                lines.append("")
+            equivalent_group = artifacts.get("equivalent_pid_group") or []
+            if isinstance(equivalent_group, list) and equivalent_group:
+                lines.append("**严格等价 PID 组**")
+                lines.append("")
+                for item in equivalent_group[:6]:
+                    if not isinstance(item, dict):
+                        continue
+                    title = item.get("title") or item.get("ndl_id") or "未命名"
+                    ndl_id = item.get("ndl_id") or "n/a"
+                    date = item.get("date") or ""
+                    route = item.get("search_route") or item.get("fulltext_query") or ""
+                    suffix = f" | {route}" if route else ""
+                    lines.append(f"- {title} | PID={ndl_id} | {date}{suffix}")
+                lines.append("")
+            fulltext_leads = artifacts.get("fulltext_lead_pid_group") or []
+            if isinstance(fulltext_leads, list) and fulltext_leads:
+                lines.append("**全文线索 PID 组（非等价）**")
+                lines.append("")
+                lines.append("- 说明: 这些 PID 来自全站全文命中，只能用于人工回查或二次检索，不能作为自动候选轮换的等价来源。")
+                fulltext_lead_hint = _format_fulltext_lead_manual_hint(artifacts)
+                if fulltext_lead_hint:
+                    lines.append(fulltext_lead_hint)
+                for item in fulltext_leads[:6]:
+                    if not isinstance(item, dict):
+                        continue
+                    title = item.get("title") or item.get("ndl_id") or "未命名"
+                    ndl_id = item.get("ndl_id") or "n/a"
+                    route = item.get("search_route") or item.get("fulltext_query") or ""
+                    suffix = f" | {route}" if route else ""
+                    lines.append(f"- {title} | PID={ndl_id}{suffix}")
+                lines.append("")
             if ndl_matches:
                 lines.append("**NDL 候选**")
                 lines.append("")
@@ -716,7 +1474,10 @@ def render_resume_markdown_report(
                     label = match.get("title") or match.get("ndl_id") or "未命名"
                     score = match.get("score")
                     url = match.get("url") or ""
-                    lines.append(f"- {label} | score={score} | {url}")
+                    metadata = match.get("metadata") if isinstance(match.get("metadata"), dict) else {}
+                    route = metadata.get("search_route") or ""
+                    route_label = f" | route={route}" if route else ""
+                    lines.append(f"- {label} | score={score}{route_label} | {url}")
                 lines.append("")
 
             source_attempts = _source_attempt_lines(

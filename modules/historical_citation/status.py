@@ -6,12 +6,29 @@ from typing import Any, Dict, Iterable
 from .models import CitationCandidate
 
 
+FULLTEXT_REVIEW_STATUSES = {
+    "fulltext_only_hit",
+    "fulltext_only_direct_support",
+    "fulltext_only_partial_support",
+    "fulltext_only_not_supported",
+    "fulltext_lead_only",
+}
+
+
 REFINED_STATUS_LABELS = {
     "matched": "已形成对照",
     "needs_manual_review": "待人工复核",
+    "parsed": "已解析，尚未检索",
+    "source_found": "已找到来源，待下载/OCR 核验",
     "source_not_found": "NDL 未检到来源",
     "source_mismatch": "NDL 候选疑似误配",
     "source_unavailable": "可检索但当前不可下载",
+    "fulltext_only_hit": "NDL 全文弱证据命中",
+    "fulltext_only_direct_support": "NDL 全文弱证据 + 精核直接支持",
+    "fulltext_only_partial_support": "NDL 全文弱证据 + 精核部分支持",
+    "fulltext_only_not_supported": "NDL 全文命中但精核判定不支持",
+    "fulltext_lead_only": "NDL 全文仅作线索",
+    "iiif_image_ocr_available": "无 PDF 但 IIIF/全文 JSON 可读",
     "restricted_download_failed": "受限下载失败",
     "page_mapping_unavailable": "页码映射未校准",
     "download_timeout": "下载或处理超时",
@@ -20,13 +37,21 @@ REFINED_STATUS_LABELS = {
     "alignment_failed": "对齐失败",
     "skipped_same_source_failed": "同源失败跳过",
     "download_failed": "下载失败",
+    "download_pending": "待下载/OCR 核验",
     "unknown": "未知状态",
 }
 
 SUPPORT_STATUS_LABELS = {
     "direct_support": "可作为直接出处",
+    "supported": "可作为出处",
     "page_mismatch_but_support": "原文对应但脚注页码疑似不准",
     "partial_support": "部分对应或只能作背景材料",
+    "fulltext_only_hit": "NDL 全文弱证据，待 OCR 或人工复核",
+    "fulltext_only_direct_support": "NDL 全文弱证据，精核判定直接支持",
+    "fulltext_only_partial_support": "NDL 全文弱证据，精核判定部分支持",
+    "fulltext_only_not_supported": "NDL 全文命中，但精核判定不支持",
+    "fulltext_lead_only": "NDL 全文仅作线索，尚未构成出处证据",
+    "iiif_image_ocr_available": "无 PDF 但可继续走 IIIF/OCR 或全文 JSON",
     "not_supported": "未构成有效对应",
     "needs_manual_review": "需人工复核出处有效性",
     "unassessed": "尚未判断出处有效性",
@@ -74,12 +99,22 @@ def _notes_indicate_source_unavailable(joined_notes: str) -> bool:
 
 def classify_status(verification_status: str, notes: Iterable[Any] = ()) -> str:
     status = verification_status or "unknown"
+    if status in FULLTEXT_REVIEW_STATUSES:
+        return status
     joined_notes = _join_notes(notes)
 
     if _notes_indicate_source_unavailable(joined_notes):
         return "source_unavailable"
 
-    if status in {"matched", "needs_manual_review", "source_not_found", "ocr_failed", "page_mapping_unavailable"}:
+    if status in {
+        "matched",
+        "needs_manual_review",
+        "source_not_found",
+        "ocr_failed",
+        "iiif_image_ocr_available",
+            "page_mapping_unavailable",
+            *FULLTEXT_REVIEW_STATUSES,
+        }:
         return status
     if status == "download_failed":
         if (
@@ -111,6 +146,21 @@ def classify_status(verification_status: str, notes: Iterable[Any] = ()) -> str:
 def classify_result_status(result: Dict[str, Any]) -> str:
     artifacts = result.get("artifacts") or {}
     status = str(result.get("verification_status") or "unknown")
+    if status in FULLTEXT_REVIEW_STATUSES:
+        return status
+    if artifacts.get("fulltext_only_hit"):
+        review = artifacts.get("llm_review") if isinstance(artifacts, dict) else None
+        if isinstance(review, dict):
+            decision = str(review.get("decision") or "")
+            if decision == "direct_support":
+                return "fulltext_only_direct_support"
+            if decision == "partial_support":
+                return "fulltext_only_partial_support"
+            if decision == "not_supported":
+                return "fulltext_only_not_supported"
+        return "fulltext_only_hit"
+    if artifacts.get("fulltext_lead_only"):
+        return "fulltext_lead_only"
     has_material_evidence = bool(
         result.get("matched_japanese")
         or artifacts.get("source_pdf")

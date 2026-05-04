@@ -38,6 +38,10 @@ def normalize_page_mapping(mapping: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "confidence",
         "sample_toc_excerpt",
         "sample_body_excerpt",
+        "ndl_id",
+        "source_level_cache_key",
+        "source_level_cache_alias",
+        "source_level_cache_note",
     ):
         value = mapping.get(optional_key)
         if value is not None:

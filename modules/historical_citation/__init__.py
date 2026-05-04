@@ -15,6 +15,7 @@ from .docx_parser import (
     local_name,
     parse_docx_document,
 )
+from .pdf_paper_parser import parse_pdf_paper
 from .cross_validation import (
     FulltextOcrCrossValidationResult,
     classify_fulltext_page_check,
@@ -28,6 +29,7 @@ from .footnote_parser import (
     DEFAULT_QUOTE_PATTERNS,
     DEFAULT_STOPWORD_PREFIXES,
     DEFAULT_TITLE_PATTERNS,
+    apply_footnote_title_aliases,
     detect_source_type,
     extract_author,
     extract_pages,
@@ -37,6 +39,13 @@ from .footnote_parser import (
     is_verifiable_footnote,
     parse_footnote_text,
     pick_translation_text,
+)
+from .fullrun import (
+    finalize_partial_file,
+    finalize_partial_payload,
+    merge_result_payloads,
+    partial_payload_is_complete,
+    summarize_result_dicts,
 )
 from .models import CitationCandidate, NDLSearchMatch, ParsedFootnote, ParsedParagraph
 from .ndl_fulltext_context import (
@@ -59,6 +68,7 @@ from .ndl_search import (
     score_ndl_record,
     search_ndl_public_api,
     title_query_terms,
+    title_query_variants,
 )
 from .page_mapping import (
     PAGE_MAPPING_CACHE_FILENAME,
@@ -116,6 +126,22 @@ from .source_platforms import (
     is_plausible_source_match,
     normalize_source_record,
 )
+from .source_graph import (
+    SourceGraphNode,
+    SourceQueryPlan,
+    attach_source_graph_artifacts,
+    build_manual_search_recipe,
+    build_source_graph_node,
+    build_source_query_plan,
+    candidate_deduplication_key,
+    dedupe_candidates,
+    dedupe_result_dicts,
+)
+from .source_resolvers import (
+    ResolvedSourcePlan,
+    SourceResolverRegistry,
+    resolve_source,
+)
 
 __all__ = [
     "CitationCandidate",
@@ -133,13 +159,19 @@ __all__ = [
     "NDL_SRU_URL",
     "ParsedFootnote",
     "ParsedParagraph",
+    "SourceGraphNode",
     "SourcePlatformAdapter",
     "SourcePlatformRegistry",
+    "SourceQueryPlan",
+    "ResolvedSourcePlan",
+    "SourceResolverRegistry",
     "DEFAULT_PAGE_PATTERNS",
     "DEFAULT_QUOTE_PATTERNS",
     "DEFAULT_STOPWORD_PREFIXES",
     "DEFAULT_TITLE_PATTERNS",
     "align_translation",
+    "apply_footnote_title_aliases",
+    "attach_source_graph_artifacts",
     "build_alignment_prompt",
     "build_citation_candidates",
     "build_passage_candidates",
@@ -148,7 +180,10 @@ __all__ = [
     "classify_fulltext_page_check",
     "cross_validate_fulltext_ocr_case",
     "cross_validate_fulltext_ocr_cases",
+    "candidate_deduplication_key",
     "detect_spread_gutter_x",
+    "dedupe_candidates",
+    "dedupe_result_dicts",
     "extract_pages_directly",
     "extract_pdf_page_text",
     "extract_pdf_spread_page_texts",
@@ -159,15 +194,21 @@ __all__ = [
     "extract_publisher",
     "extract_quotes",
     "extract_title",
+    "finalize_partial_file",
+    "finalize_partial_payload",
     "is_verifiable_footnote",
     "local_name",
     "map_target_page",
+    "merge_result_payloads",
     "ocr_image_text",
     "author_query_terms",
     "build_ndl_sru_queries",
     "build_download_page_plan",
     "build_item_fulltext_target_and_page_map",
+    "build_manual_search_recipe",
     "build_restricted_download_requests",
+    "build_source_graph_node",
+    "build_source_query_plan",
     "iter_ndl_search_keywords",
     "normalize_match_text",
     "normalize_source_record",
@@ -176,6 +217,8 @@ __all__ = [
     "resolve_ndlsearch_detail_url",
     "parse_footnote_text",
     "parse_docx_document",
+    "parse_pdf_paper",
+    "partial_payload_is_complete",
     "pick_translation_text",
     "parse_llm_json",
     "score_alignment_candidate",
@@ -192,6 +235,7 @@ __all__ = [
     "select_fulltext_hit",
     "select_preferred_source_match",
     "title_query_terms",
+    "title_query_variants",
     "PAGE_MAPPING_CACHE_FILENAME",
     "build_artifact_summary",
     "build_scan_page_range",
@@ -207,6 +251,7 @@ __all__ = [
     "split_double_page_image",
     "summarize_candidates",
     "summarize_checkpoint",
+    "summarize_result_dicts",
     "truncate_text",
     "classify_candidate_status",
     "classify_result_status",
@@ -214,5 +259,6 @@ __all__ = [
     "count_refined_candidate_statuses",
     "count_refined_result_statuses",
     "refined_status_label",
+    "resolve_source",
     "wait_for_pdf_ready",
 ]

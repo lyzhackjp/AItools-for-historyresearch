@@ -134,11 +134,12 @@ def infer_host_titles_from_footnote_text(title: str, footnote_text: str) -> List
     title_lookup = normalize_source_lookup_title(title)
     hosts: List[str] = []
     relation_words = ("所収", "所載", "収録", "收録", "載録", "收入", "収め")
+    first_title_is_contained = normalize_source_lookup_title(quoted_titles[0]) == title_lookup
     for quoted in quoted_titles:
         quoted_lookup = normalize_source_lookup_title(quoted)
         if not quoted_lookup or quoted_lookup == title_lookup:
             continue
-        if any(word in footnote_text for word in relation_words):
+        if first_title_is_contained or any(word in footnote_text for word in relation_words):
             hosts.append(quoted)
     return hosts
 

@@ -8,6 +8,44 @@ from datetime import datetime
 from typing import Any, Dict, Optional, TextIO
 
 
+PROGRESS_SCHEMA_VERSION = "historical_citation.progress.v1"
+
+
+def build_progress_event(
+    event: str,
+    *,
+    phase: Optional[str] = None,
+    current: Optional[int] = None,
+    total: Optional[int] = None,
+    global_current: Optional[int] = None,
+    global_total: Optional[int] = None,
+    candidate_id: Optional[str] = None,
+    footnote_id: Optional[str] = None,
+    status: Optional[str] = None,
+    metrics: Optional[Dict[str, Any]] = None,
+    **payload: Any,
+) -> Dict[str, Any]:
+    message: Dict[str, Any] = {
+        "schema_version": PROGRESS_SCHEMA_VERSION,
+        "event": event,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+    }
+    optional = {
+        "phase": phase,
+        "current": current,
+        "total": total,
+        "global_current": global_current,
+        "global_total": global_total,
+        "candidate_id": candidate_id,
+        "footnote_id": footnote_id,
+        "status": status,
+        "metrics": metrics,
+        **payload,
+    }
+    message.update({key: value for key, value in optional.items() if value is not None})
+    return message
+
+
 class ProgressReporter:
     """Emit JSONL progress events and optional periodic heartbeats."""
 
@@ -40,12 +78,7 @@ class ProgressReporter:
             return
         with self._lock:
             state = dict(self._state)
-        message = {
-            "event": event,
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-            **state,
-            **{key: value for key, value in payload.items() if value is not None},
-        }
+        message = build_progress_event(event, **{**state, **payload})
         print(json.dumps(message, ensure_ascii=False), file=self.stream, flush=True)
 
     def close(self) -> None:
