@@ -81,22 +81,20 @@ fi
 rm -rf "$APP_BUNDLE"
 mkdir -p "$MACOS_DIR" "$APP_RESOURCE_DIR"
 
-rsync -a "$ROOT/" "$APP_RESOURCE_DIR/" \
-  --exclude '.git/' \
-  --exclude '.runtime/' \
-  --exclude 'dist-macos/' \
-  --exclude 'dist-windows/' \
-  --exclude 'frontend/node_modules/' \
-  --exclude 'secrets/' \
-  --exclude 'config/api_config.json' \
-  --exclude 'config/current_environment.json' \
-  --exclude 'config/external_config.json' \
-  --exclude 'config/*.local.json' \
-  --exclude '.env' \
-  --exclude '.env.*' \
-  --exclude '*.log' \
-  --exclude '__pycache__/' \
-  --exclude '.pytest_cache/'
+(
+  cd "$ROOT"
+  git ls-files -z \
+    ':!:config/api_config.json' \
+    ':!:config/current_environment.json' \
+    ':!:config/external_config.json' \
+    ':!:config/*.local.json' \
+    | rsync -a --from0 --files-from=- "$ROOT/" "$APP_RESOURCE_DIR/"
+)
+
+if [[ -d "$ROOT/frontend/dist" ]]; then
+  mkdir -p "$APP_RESOURCE_DIR/frontend"
+  rsync -a "$ROOT/frontend/dist/" "$APP_RESOURCE_DIR/frontend/dist/"
+fi
 
 mkdir -p "$APP_RESOURCE_DIR/.runtime"
 rsync -a "$ROOT/.runtime/venv/" "$APP_RESOURCE_DIR/.runtime/venv/"

@@ -59,6 +59,7 @@ env/
 models/
 dist-windows/
 dist-macos/
+dist-release/
 TraeAI-*/
 
 # ===========================================
