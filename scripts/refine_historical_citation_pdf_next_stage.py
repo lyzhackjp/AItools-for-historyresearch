@@ -638,6 +638,10 @@ def has_kana(text: str) -> bool:
     return bool(re.search(r"[\u3040-\u30ff]", text or ""))
 
 
+def has_japanese_source_markers(text: str) -> bool:
+    return bool(re.search(r"[「『]|(?:紀要|学会|學會|頁|号|號|東京|編)", text or ""))
+
+
 def has_parenthetical_original(text: str) -> bool:
     return bool(re.search(r"[（(][^）)]{0,120}[：:]\s*[「『《].+?[」』》]", text or ""))
 
@@ -648,7 +652,7 @@ def looks_like_non_ndl_direct_source(item: Dict[str, Any]) -> Dict[str, Any]:
     text = str(footnote.get("text") or "")
     source_type = str(footnote.get("source_type") or "")
     reasons: List[str] = []
-    if source_type == "article" and not has_kana(title + text):
+    if source_type == "article" and not has_kana(title + text) and not has_japanese_source_markers(title + text):
         reasons.append("中文或非日文期刊论文来源")
     if "《" in text and "》" in text and re.search(r"\d{4}年?第?\d+期", text):
         reasons.append("期刊卷期型引用，通常不进入 NDL 史料下载/OCR 流")

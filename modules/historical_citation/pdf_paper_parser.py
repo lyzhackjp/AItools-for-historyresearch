@@ -43,6 +43,7 @@ FOOTNOTE_MARKERS = [
     "⑳",
 ]
 FOOTNOTE_MARKER_PATTERN = re.compile(r"^(\*|[①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳]|[\ue000-\uf8ff][^\s　、，：:]{0,4})[\s　]*")
+FOOTNOTE_AVG_SIZE_MAX = 11.6
 
 
 @dataclass
@@ -130,12 +131,17 @@ def _looks_like_footnote_start(text: str) -> bool:
     return bool(FOOTNOTE_MARKER_PATTERN.match(stripped))
 
 
+def _looks_like_running_page_number(line: PdfLine, page_height: float) -> bool:
+    text = line.text.strip()
+    return bool(re.fullmatch(r"\d{1,4}", text)) and (line.y0 > page_height - 80 or line.y0 < 44)
+
+
 def _infer_footnote_top(lines: Sequence[PdfLine], page_height: float) -> float:
     candidates = [
         line.y0
         for line in lines
         if line.y0 > page_height * 0.55
-        and line.avg_size <= 8.9
+        and line.avg_size <= FOOTNOTE_AVG_SIZE_MAX
         and (line.x0 < 120 or _looks_like_footnote_start(line.text))
         and _looks_like_footnote_start(line.text)
     ]
@@ -145,7 +151,10 @@ def _infer_footnote_top(lines: Sequence[PdfLine], page_height: float) -> float:
     small_bottom_lines = [
         line.y0
         for line in lines
-        if line.y0 > page_height * 0.70 and line.avg_size <= 8.9 and line.x0 < 140
+        if line.y0 > page_height * 0.70
+        and line.avg_size <= FOOTNOTE_AVG_SIZE_MAX
+        and line.x0 < 140
+        and not _looks_like_running_page_number(line, page_height)
     ]
     if small_bottom_lines:
         return min(small_bottom_lines) - 2
@@ -156,12 +165,16 @@ def _strip_running_header_footer(lines: Sequence[PdfLine], page_height: float) -
     body: List[PdfLine] = []
     for line in lines:
         text = line.text.strip()
-        if line.y0 > page_height - 48 and re.fullmatch(r"\d{2,4}", text):
+        if _looks_like_running_page_number(line, page_height):
             continue
-        if line.y0 < 44 and (re.fullmatch(r"\d{2,4}", text) or len(text) <= 24):
+        if line.y0 < 44 and len(text) <= 24:
             continue
         body.append(line)
     return body
+
+
+def _strip_footnote_footer(lines: Sequence[PdfLine], page_height: float) -> List[PdfLine]:
+    return [line for line in lines if not _looks_like_running_page_number(line, page_height)]
 
 
 def _line_text(lines: Sequence[PdfLine]) -> str:
@@ -355,7 +368,10 @@ def parse_pdf_paper(
                 [line for line in lines if line.y0 < footnote_top],
                 page_height,
             )
-            footnote_lines = [line for line in lines if line.y0 >= footnote_top and line.y0 < page_height - 45]
+            footnote_lines = _strip_footnote_footer(
+                [line for line in lines if line.y0 >= footnote_top and line.y0 < page_height - 35],
+                page_height,
+            )
             page_footnotes, marker_to_id = _parse_page_footnotes(
                 page_number,
                 footnote_lines,

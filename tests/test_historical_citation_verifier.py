@@ -430,6 +430,48 @@ class TestHistoricalCitationVerifier(unittest.TestCase):
         self.assertIn("pdf_page_ocr_fallback_used", parsed["quality_flags"])
         self.assertEqual(parsed["pdf_parse_debug"][0]["parser_mode"], "ocr_text_fallback")
 
+    def test_pdf_paper_parser_detects_larger_footnote_text_layer(self):
+        from modules.historical_citation.pdf_paper_parser import (
+            PdfLine,
+            _infer_footnote_top,
+            _parse_page_footnotes,
+            _strip_footnote_footer,
+        )
+
+        lines = [
+            PdfLine("正文说明①", 65.0, 470.0, 300.0, 484.0, 12.0, 12.0),
+            PdfLine("① 佐藤一郎：『史料』、東京：出版社、2001 年、第1 頁。", 65.0, 618.0, 500.0, 632.0, 10.5, 11.4),
+            PdfLine("125", 486.0, 730.0, 505.0, 742.0, 10.5, 10.5),
+        ]
+
+        footnote_top = _infer_footnote_top(lines, 793.7)
+        footnote_lines = _strip_footnote_footer([line for line in lines if line.y0 >= footnote_top], 793.7)
+        footnotes, marker_to_id = _parse_page_footnotes(2, footnote_lines, parse_footnote=parse_footnote_text)
+
+        self.assertLess(footnote_top, 618.0)
+        self.assertEqual(len(footnotes), 1)
+        self.assertEqual(marker_to_id["①"], "p2n1")
+        self.assertIn("佐藤一郎", footnotes[0].text)
+        self.assertNotIn("125", footnotes[0].text)
+
+    def test_next_stage_non_ndl_classifier_keeps_all_kanji_japanese_article_sources(self):
+        from scripts.refine_historical_citation_pdf_next_stage import looks_like_non_ndl_direct_source
+
+        classified = looks_like_non_ndl_direct_source(
+            {
+                "candidate_id": "p14-fp14n6",
+                "footnote_id": "p14n6",
+                "footnote": {
+                    "source_type": "article",
+                    "title": "『三条教則』関係資料一（解題）",
+                    "text": "三宅守常：「『三条教則』関係資料一（解題）」、『明治聖徳記念学会紀要』第15号、1995年、第92頁。",
+                    "page_numbers": [92],
+                },
+            }
+        )
+
+        self.assertEqual(classified["reasons"], [])
+
     def test_pdf_next_stage_rechecks_source_not_found_and_mismatch(self):
         from scripts.refine_historical_citation_pdf_next_stage import select_recheck_items
 
@@ -1623,6 +1665,25 @@ class TestHistoricalCitationVerifier(unittest.TestCase):
         self.assertIn("日本近代思想大系 5：宗教と国家", plan.host_bucket)
         self.assertIn("神祇官を復し教導寮等設置につき建白", plan.contained_bucket)
         self.assertEqual(recipe["suggested_pid_scope"], "13260166")
+
+    def test_kindai_shiso_taikei_other_volumes_use_volume_specific_pid(self):
+        footnote = parse_footnote_text(
+            "1",
+            "［日］植木枝盛：《尊王論》，《日本近代思想大系 2：天皇と華族》，第 163 页。",
+        )
+
+        node = build_source_graph_node(footnote)
+        plan = resolve_source(footnote)
+
+        self.assertEqual(node.resolver, "NihonKindaiShisoTaikeiResolver")
+        self.assertEqual(plan.resolver, "NihonKindaiShisoTaikeiResolver")
+        self.assertEqual(node.known_pid_candidates, ["13264501"])
+        self.assertEqual(plan.known_pid_candidates, ["13264501"])
+        self.assertNotIn("13260166", node.known_pid_candidates)
+        self.assertNotIn("13260166", plan.known_pid_candidates)
+        self.assertIn("日本近代思想大系 2：天皇と華族", plan.query_buckets["host"])
+        self.assertNotIn("日本近代思想大系 5：宗教と国家", plan.query_buckets["host"])
+        self.assertIn("尊王論", plan.query_buckets["contained"])
 
     def test_source_graph_models_downloadable_imperial_gikai_as_reusable_type(self):
         footnote = parse_footnote_text(
