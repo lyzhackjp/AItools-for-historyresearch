@@ -188,14 +188,29 @@ def _has_any(text_key: str, markers: Sequence[str]) -> bool:
     return any(normalize_source_key(marker) in text_key for marker in markers)
 
 
+def _is_nihon_kindai_shiso_taikei(text_key: str) -> bool:
+    return _has_any(text_key, ("日本近代思想大系", "宗教と国家"))
+
+
+def _is_nihon_kindai_shiso_taikei_religion_state(text_key: str) -> bool:
+    return _has_any(text_key, ("宗教と国家", "宗教と國家", "日本近代思想大系5", "日本近代思想大系第5"))
+
+
+def _is_nihon_kindai_shiso_taikei_tenno_kazoku(text_key: str) -> bool:
+    return _has_any(text_key, ("天皇と華族", "日本近代思想大系2", "日本近代思想大系第2"))
+
+
 SOURCE_PID_HINTS: Dict[str, List[str]] = {
     "nihon_kindai_shiso_taikei_religion_state": ["13260166"],
+    "nihon_kindai_shiso_taikei_tenno_kazoku": ["13264501"],
     "imperial_constitution_gikai": ["1272168"],
 }
 
 
 SOURCE_AVAILABILITY_HINTS: Dict[str, str] = {
+    "nihon_kindai_shiso_taikei": "mixed",
     "nihon_kindai_shiso_taikei_religion_state": "fulltext-only",
+    "nihon_kindai_shiso_taikei_tenno_kazoku": "fulltext-only",
     "nihon_gaiko_bunsho": "mixed",
     "hara_takashi_diary": "mixed",
     "imperial_constitution_gikai": "downloadable",
@@ -324,12 +339,15 @@ def build_source_graph_node(footnote: ParsedFootnote, *, claim_text: str = "") -
     evidence_route = "metadata_bridge"
     known_pids: List[str] = []
 
-    if _has_any(blob_key, ("日本近代思想大系", "宗教と国家")):
+    if _is_nihon_kindai_shiso_taikei(blob_key):
         source_family = "日本近代思想大系"
         source_type = "source_collection"
         resolver = "NihonKindaiShisoTaikeiResolver"
         evidence_route = "pid_snippet"
-        known_pids = list(SOURCE_PID_HINTS["nihon_kindai_shiso_taikei_religion_state"])
+        if _is_nihon_kindai_shiso_taikei_religion_state(blob_key):
+            known_pids = list(SOURCE_PID_HINTS["nihon_kindai_shiso_taikei_religion_state"])
+        elif _is_nihon_kindai_shiso_taikei_tenno_kazoku(blob_key):
+            known_pids = list(SOURCE_PID_HINTS["nihon_kindai_shiso_taikei_tenno_kazoku"])
     elif _has_any(blob_key, ("日本外交文書", "日本外交文书")):
         source_family = "日本外交文書"
         source_type = "volume_series"
@@ -379,7 +397,13 @@ def build_source_graph_node(footnote: ParsedFootnote, *, claim_text: str = "") -
         special_terms.append("神宮大麻")
 
     availability_key = {
-        "NihonKindaiShisoTaikeiResolver": "nihon_kindai_shiso_taikei_religion_state",
+        "NihonKindaiShisoTaikeiResolver": (
+            "nihon_kindai_shiso_taikei_religion_state"
+            if _is_nihon_kindai_shiso_taikei_religion_state(blob_key)
+            else "nihon_kindai_shiso_taikei_tenno_kazoku"
+            if _is_nihon_kindai_shiso_taikei_tenno_kazoku(blob_key)
+            else "nihon_kindai_shiso_taikei"
+        ),
         "NihonGaikoBunshoResolver": "nihon_gaiko_bunsho",
         "DiaryDateResolver": "hara_takashi_diary",
         "DownloadableMonographResolver": "imperial_constitution_gikai",

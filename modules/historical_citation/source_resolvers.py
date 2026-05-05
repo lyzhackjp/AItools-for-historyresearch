@@ -70,6 +70,18 @@ def _has_any(blob_key: str, markers: Sequence[str]) -> bool:
     return any(resolver_key(marker) in blob_key for marker in markers)
 
 
+def _is_nihon_kindai_shiso_taikei(blob_key: str) -> bool:
+    return _has_any(blob_key, ("日本近代思想大系", "宗教と国家"))
+
+
+def _is_nihon_kindai_shiso_taikei_religion_state(blob_key: str) -> bool:
+    return _has_any(blob_key, ("宗教と国家", "宗教と國家", "日本近代思想大系5", "日本近代思想大系第5"))
+
+
+def _is_nihon_kindai_shiso_taikei_tenno_kazoku(blob_key: str) -> bool:
+    return _has_any(blob_key, ("天皇と華族", "日本近代思想大系2", "日本近代思想大系第2"))
+
+
 def _sort_volume_terms(terms: Sequence[str]) -> List[str]:
     return sorted(
         _unique(terms),
@@ -710,18 +722,33 @@ class NihonKindaiShisoTaikeiResolver(SourceResolver):
     pid_scope_strategy = "fixed_host_pid_then_contained_snippet"
 
     def matches(self, footnote: ParsedFootnote, claim_text: str = "") -> bool:
-        return _has_any(_blob_key(footnote, claim_text), ("日本近代思想大系", "宗教と国家"))
+        return _is_nihon_kindai_shiso_taikei(_blob_key(footnote, claim_text))
 
     def resolve(self, footnote: ParsedFootnote, claim_text: str = "") -> ResolvedSourcePlan:
         plan = super().resolve(footnote, claim_text)
+        blob_key = _blob_key(footnote, claim_text)
+        host_title = _clean(footnote.host_title)
+        is_religion_state = _is_nihon_kindai_shiso_taikei_religion_state(blob_key)
+        is_tenno_kazoku = _is_nihon_kindai_shiso_taikei_tenno_kazoku(blob_key)
+        known_pid_candidates: List[str] = []
+        fallback_host = ""
+        cache_title = host_title or footnote.title
+        if is_religion_state:
+            known_pid_candidates = ["13260166"]
+            fallback_host = "日本近代思想大系 5：宗教と国家"
+            cache_title = "宗教と国家"
+        elif is_tenno_kazoku:
+            known_pid_candidates = ["13264501"]
+            fallback_host = "日本近代思想大系 2：天皇と華族"
+            cache_title = "天皇と華族"
         plan.resolver = self.resolver_name
         plan.source_family = self.source_family
         plan.source_type = self.source_type
         plan.evidence_mode = self.evidence_mode
         plan.verification_mode = self.verification_mode
         plan.pid_scope_strategy = self.pid_scope_strategy
-        plan.known_pid_candidates = ["13260166"]
-        plan.query_buckets["host"] = _unique([footnote.host_title, "日本近代思想大系 5：宗教と国家"])
+        plan.known_pid_candidates = known_pid_candidates
+        plan.query_buckets["host"] = _unique([host_title, fallback_host])
         plan.query_buckets["contained"] = _unique([footnote.contained_title, footnote.title])
         special, blocked = _special_terms(_blob(footnote, claim_text))
         plan.query_buckets["special_term"] = special
@@ -745,9 +772,15 @@ class NihonKindaiShisoTaikeiResolver(SourceResolver):
             max_terms=12,
         )
         plan.global_queries = _build_global_queries(plan.query_buckets)
-        plan.source_level_cache_key = _source_cache_key(self.source_family, "宗教と国家", plan.volume_terms, plan.dates)
+        plan.source_level_cache_key = _source_cache_key(
+            self.source_family,
+            cache_title,
+            plan.volume_terms,
+            plan.dates,
+        )
         plan.manual_steps = [
-            "固定宿主 PID 后，只在该 PID 内搜索析出题名和限定关键词。",
+            "若已知宿主 PID，则固定宿主 PID 后只在该 PID 内搜索析出题名和限定关键词。",
+            "若不是已配置卷册，不得复用其他卷册 PID；先按宿主题名检索正确卷册。",
             "contained title 命中优先于 host title 命中。",
             "只命中目录或题名层时标为 lead，不作为最终支持证据。",
         ]
