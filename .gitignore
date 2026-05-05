@@ -11,6 +11,7 @@ secret/**
 *.key
 .env
 .env.local
+.env.local_llm
 .env.*.local
 
 # API密钥文件
@@ -55,7 +56,9 @@ env/
 .venv*/
 *_venv/
 .runtime/
+models/
 dist-windows/
+dist-macos/
 TraeAI-*/
 
 # ===========================================
@@ -251,6 +254,9 @@ reference_documents/
 materials/
 sources/
 corpus/
+
+# Personal local knowledge base - private literature, manifests, RAG indexes
+local_knowledge_base/
 
 # Historical citation verification artifacts
 historical_citation_*run*/

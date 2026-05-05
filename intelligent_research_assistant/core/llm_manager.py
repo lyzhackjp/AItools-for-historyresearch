@@ -21,6 +21,12 @@ try:
 except ImportError:
     HAS_LLM_CLIENT = False
 
+try:
+    from config.local_llm_config import get_local_model
+except Exception:  # pragma: no cover
+    def get_local_model(role: str = "chat_primary") -> str:
+        return "qwen36-27b-academic"
+
 
 class LLMManager:
     """
@@ -106,7 +112,7 @@ class LLMManager:
             'minimax': 'abab6-chat',
             'zhipu': 'glm-4',
             'deepseek': 'deepseek-chat',
-            'ollama': 'llama2',
+            'ollama': get_local_model('chat_primary'),
             'anthropic': 'claude-3-sonnet-20240229'
         }
         

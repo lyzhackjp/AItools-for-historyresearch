@@ -1635,4 +1635,8 @@ def serve_frontend_asset(path):
 
 if __name__ == '__main__':
     debug = _parse_bool(os.getenv('FLASK_DEBUG'), False)
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', '5000')), debug=debug)
+    app.run(
+        host=os.getenv('HOST', '0.0.0.0'),
+        port=int(os.getenv('PORT', '5000')),
+        debug=debug,
+    )

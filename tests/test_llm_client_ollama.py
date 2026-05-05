@@ -59,6 +59,37 @@ class LLMClientOllamaTests(unittest.TestCase):
         self.assertIn("empty_content", result["quality_flags"])
         self.assertIn("length_limited", result["quality_flags"])
 
+    def test_ollama_chat_sends_profile_options(self):
+        client = create_llm_client(
+            {
+                "provider": "ollama",
+                "model": "qwen36-27b-academic",
+                "num_ctx": 32768,
+                "top_p": 0.9,
+                "repeat_penalty": 1.08,
+                "keep_alive": "10m",
+            }
+        )
+
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "message": {"content": "OK"},
+            "prompt_eval_count": 2,
+            "eval_count": 1,
+        }
+
+        with patch("modules.llm_client.requests.post", return_value=response) as post:
+            result = client.chat([{"role": "user", "content": "Say OK only."}], max_tokens=64)
+
+        payload = post.call_args.kwargs["json"]
+        self.assertEqual(payload["model"], "qwen36-27b-academic")
+        self.assertEqual(payload["options"]["num_ctx"], 32768)
+        self.assertEqual(payload["options"]["top_p"], 0.9)
+        self.assertEqual(payload["options"]["repeat_penalty"], 1.08)
+        self.assertEqual(payload["keep_alive"], "10m")
+        self.assertEqual(result["content"], "OK")
+
     def test_ollama_capabilities_are_small_model_friendly(self):
         client = create_llm_client(
             {

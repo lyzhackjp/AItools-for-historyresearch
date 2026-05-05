@@ -775,7 +775,7 @@ class OllamaChatClient:
             return False
         if policy.get("loaded") or os.environ.get("HISTORICAL_CITATION_REVIEW_MODEL_POLICY"):
             return _model_matches_marker(model, policy.get("allowlist") or [])
-        return allow_unevaluated
+        return allow_unevaluated or is_preferred_review_model(model)
 
     def health_check(self) -> Dict[str, Any]:
         started = time.time()

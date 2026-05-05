@@ -213,11 +213,13 @@
       "enabled": true,
       "base_url": "http://localhost:11434",
       "_base_url_comment": "本地测试服务器",
-      "default_model": "llama2",
+      "default_model": "gemma4:e4b",
       "_default_model_comment": "使用本地模型",
       "available_models": [
-        "llama2",
-        "qwen"
+        "gemma4:e4b",
+        "qwen36-27b-academic",
+        "gemma4-31b-reason",
+        "bge-m3"
       ],
       "stream": true,
       "temperature_range": [0.0, 2.0],

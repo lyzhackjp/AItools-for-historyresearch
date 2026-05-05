@@ -16,6 +16,18 @@ from rag_module.adapters.base_adapter import (
     RAGQueryResult, RAGResponse, RAGIndexStats
 )
 
+try:
+    from config.local_llm_config import get_rag_defaults
+except Exception:  # pragma: no cover - fallback for partial installs
+    def get_rag_defaults() -> Dict[str, Any]:
+        return {
+            'embedding_model': 'ollama-local',
+            'generation_model': 'qwen36-27b-academic',
+            'chunk_size': 1000,
+            'chunk_overlap': 150,
+            'retrieval_top_k': 10,
+        }
+
 
 class BuiltInRAGAdapter(BaseRAGAdapter):
     """自研RAG适配器"""
@@ -33,15 +45,18 @@ class BuiltInRAGAdapter(BaseRAGAdapter):
         """初始化自研RAG引擎"""
         try:
             from rag_module.core import RAGEngine, RAGConfig
+            local_defaults = get_rag_defaults()
             
             self._rag_config = RAGConfig(
-                chunk_size=self.config.get('chunk_size', 500),
-                chunk_overlap=self.config.get('chunk_overlap', 50),
+                chunk_size=self.config.get('chunk_size', local_defaults.get('chunk_size', 1000)),
+                chunk_overlap=self.config.get('chunk_overlap', local_defaults.get('chunk_overlap', 150)),
                 vector_store=self.config.get('vector_store', 'chroma'),
                 vector_store_path=self.config.get('vector_store_path', './data/rag_index'),
-                embedding_model=self.config.get('embedding_model', 'bge-m3'),
-                llm_provider=self.config.get('llm_provider', 'qwen'),
-                retrieval_top_k=self.config.get('retrieval_top_k', 5),
+                embedding_model=self.config.get('embedding_model', local_defaults.get('embedding_model', 'ollama-local')),
+                embedding_dimension=self.config.get('embedding_dimension', local_defaults.get('embedding_dimension', 1024)),
+                llm_provider=self.config.get('llm_provider', 'ollama'),
+                llm_model=self.config.get('llm_model', local_defaults.get('generation_model', 'qwen36-27b-academic')),
+                retrieval_top_k=self.config.get('retrieval_top_k', local_defaults.get('retrieval_top_k', 10)),
                 retrieval_threshold=self.config.get('retrieval_threshold', 0.0)
             )
             

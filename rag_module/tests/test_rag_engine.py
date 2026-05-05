@@ -39,6 +39,18 @@ class TestRAGConfig(unittest.TestCase):
         self.assertEqual(config.chunk_overlap, 100)
         self.assertEqual(config.retrieval_top_k, 7)
         self.assertTrue(config.enable_reranking)
+
+    def test_config_for_local_history_research(self):
+        """测试本地大模型史学配置"""
+        config = RAGConfig.for_local_history_research()
+
+        self.assertEqual(config.embedding_model, 'ollama-local')
+        self.assertEqual(config.embedding_dimension, 1024)
+        self.assertEqual(config.chunk_size, 1000)
+        self.assertEqual(config.chunk_overlap, 150)
+        self.assertEqual(config.retrieval_top_k, 10)
+        self.assertEqual(config.llm_provider, 'ollama')
+        self.assertEqual(config.llm_model, 'qwen36-27b-academic')
     
     def test_config_to_dict(self):
         """测试配置序列化"""

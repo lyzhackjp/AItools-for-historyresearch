@@ -25,11 +25,23 @@
 import json
 import hashlib
 import math
+import os
 import random
 from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
+
+import requests
+
+try:
+    from config.local_llm_config import get_local_model, get_ollama_base_url
+except Exception:  # pragma: no cover - fallback for partial installs
+    def get_local_model(role: str = "embedding") -> str:
+        return os.getenv("OLLAMA_EMBED_MODEL", "bge-m3")
+
+    def get_ollama_base_url() -> str:
+        return os.getenv("OLLAMA_BASE_URL", os.getenv("OLLAMA_HOST", "http://localhost:11434")).rstrip("/")
 
 try:
     import numpy as np
@@ -657,18 +669,12 @@ class EmbeddingManager:
 
     def _load_ollama_model(self) -> bool:
         """加载Ollama模型"""
-        try:
-            import ollama
-
-            self.model_instance = {
-                'type': 'ollama',
-                'client': ollama
-            }
-
-            return True
-        except ImportError:
-            print("警告: ollama库未安装，使用模拟模式")
-            return False
+        self.model_instance = {
+            'type': 'ollama',
+            'model': get_local_model('embedding'),
+            'base_url': get_ollama_base_url()
+        }
+        return True
 
     def _load_transformers_model(self, model_name: str) -> bool:
         """加载transformers模型"""
@@ -681,10 +687,16 @@ class EmbeddingManager:
             }
 
             model_path = model_map.get(model_name, model_name)
+            local_files_only = os.getenv("LOCAL_EMBEDDING_LOCAL_FILES_ONLY", "true").lower() not in {
+                "0",
+                "false",
+                "no",
+                "off",
+            }
 
             self.model_instance = {
                 'type': 'transformers',
-                'model': SentenceTransformer(model_path)
+                'model': SentenceTransformer(model_path, local_files_only=local_files_only)
             }
 
             return True
@@ -719,12 +731,23 @@ class EmbeddingManager:
 
         if model_type == 'ollama':
             try:
-                response = self.model_instance['client'].embeddings.create(
-                    model='nomic-embed-text',
-                    input=text
+                response = requests.post(
+                    f"{self.model_instance.get('base_url', get_ollama_base_url()).rstrip('/')}/api/embed",
+                    json={
+                        'model': self.model_instance.get('model') or get_local_model('embedding'),
+                        'input': text,
+                    },
+                    timeout=120,
                 )
-                return np.array(response.data[0].embedding) if np is not None else list(response.data[0].embedding)
-            except:
+                response.raise_for_status()
+                payload = response.json()
+                embeddings = payload.get('embeddings')
+                if embeddings:
+                    vector = embeddings[0]
+                else:
+                    vector = payload.get('embedding', [])
+                return np.array(vector) if np is not None else list(vector)
+            except Exception:
                 return self._get_mock_embedding(text)
 
         elif model_type == 'transformers':

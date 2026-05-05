@@ -715,7 +715,7 @@ class SetupAssistant:
             except Exception as e:
                 return False, f"启动失败: {str(e)}"
         elif action == 'install_model':
-            model_name = kwargs.get('model', 'llama2')
+            model_name = kwargs.get('model', 'qwen36-27b-academic')
             try:
                 subprocess.run(['ollama', 'pull', model_name], check=True)
                 return True, f"模型 {model_name} 安装成功"

@@ -7,9 +7,14 @@ Use this when a task needs local LLM testing, small-model compatibility, or `loc
 - Provider: `ollama`
 - Backend: `local_llm`
 - Base URL: `http://localhost:11434`
+- Workspace primary model: `qwen36-27b-academic`
+- Workspace fast smoke model: `gemma4:e4b`
+- Workspace embedding model through Ollama: `bge-m3`
 - OpenAI-compatible URLs ending in `/v1` must be normalized before calling Ollama native `/api/chat`.
 - Preferred smoke prompt: `Say OK only.`
 - Conservative smoke params: `temperature=0.1`, `max_tokens<=64`, `timeout>=120`.
+
+The local model profile lives in `config/local_llm_profiles.json`; use `config.local_llm_config` helpers instead of hard-coding model names in new code.
 
 ## Small-Model Prompt Rules
 

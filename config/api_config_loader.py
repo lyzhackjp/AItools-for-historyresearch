@@ -476,9 +476,9 @@ def create_llm_config(provider: Optional[str] = None,
     if provider is None:
         if module_name:
             module_config = get_config().get('modules', {}).get(module_name, {})
-            provider = module_config.get('provider', 'dashscope')
+            provider = os.getenv('LLM_PROVIDER') or module_config.get('provider', 'ollama')
         else:
-            provider = 'dashscope'
+            provider = os.getenv('LLM_PROVIDER') or config.get('environment', {}).get('default_provider', 'ollama')
 
     provider_config = get_provider_config(provider)
 
@@ -495,13 +495,22 @@ def create_llm_config(provider: Optional[str] = None,
         temperature = 0.7
         max_tokens = 2000
 
+    if provider == 'ollama':
+        model = os.getenv('LLM_MODEL') or os.getenv('OLLAMA_MODEL') or model
+
+    base_url = provider_config.get('base_url')
+    if provider == 'ollama':
+        base_url = os.getenv('LLM_BASE_URL') or os.getenv('OLLAMA_BASE_URL') or os.getenv('OLLAMA_HOST') or base_url
+    elif os.getenv('LLM_BASE_URL'):
+        base_url = os.getenv('LLM_BASE_URL')
+
     base_settings = config.get('api', {}).get('base_settings', {})
 
     llm_config = {
         'provider': provider,
         'model': model,
         'api_key': api_key,
-        'base_url': provider_config.get('base_url'),
+        'base_url': base_url,
         'max_retries': base_settings.get('max_retries', 3),
         'retry_delay': base_settings.get('retry_delay', 1),
         'timeout': base_settings.get('timeout', 60),

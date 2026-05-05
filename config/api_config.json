@@ -127,51 +127,51 @@
     "ollama": {
       "enabled": true,
       "base_url": "http://localhost:11434",
-      "default_model": "llama3.1",
-      "available_models": ["llama3.1", "qwen2.5", "gemma"],
+      "default_model": "qwen36-27b-academic",
+      "available_models": ["qwen36-27b-academic", "gemma4-31b-reason", "gemma4:e4b", "bge-m3", "qwen3-embedding:0.6b"],
       "stream": true,
       "temperature_range": [0.0, 1.0]
     }
   },
   "modules": {
     "academic_note_generator": {
-      "provider": "dashscope",
-      "model": "qwen-turbo",
+      "provider": "ollama",
+      "model": "qwen36-27b-academic",
       "temperature": 0.3,
-      "max_tokens": 2000,
+      "max_tokens": 4096,
       "test_mode": false
     },
     "academic_summarizer": {
-      "provider": "dashscope",
-      "model": "qwen-turbo",
+      "provider": "ollama",
+      "model": "qwen36-27b-academic",
       "temperature": 0.2,
-      "max_tokens": 2000,
+      "max_tokens": 4096,
       "test_mode": false
     },
     "virtual_persona_chatbot": {
-      "provider": "dashscope",
-      "model": "qwen-turbo",
+      "provider": "ollama",
+      "model": "gemma4-31b-reason",
       "temperature": 0.7,
-      "max_tokens": 2000,
+      "max_tokens": 4096,
       "test_mode": false
     },
     "style_transfer": {
-      "provider": "dashscope",
-      "model": "qwen-turbo",
+      "provider": "ollama",
+      "model": "qwen36-27b-academic",
       "temperature": 0.4,
-      "max_tokens": 3000,
+      "max_tokens": 4096,
       "test_mode": false
     },
     "ner_processor": {
-      "provider": "dashscope",
-      "model": "qwen-turbo",
+      "provider": "ollama",
+      "model": "qwen36-27b-academic",
       "temperature": 0.1,
       "max_tokens": 2000,
       "test_mode": false
     },
     "embedding_manager": {
       "provider": "ollama",
-      "model": "llama3.1",
+      "model": "bge-m3",
       "temperature": 0.0,
       "max_tokens": 512,
       "test_mode": false

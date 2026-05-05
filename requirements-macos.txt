@@ -1,0 +1,23 @@
+# macOS compatibility constraints.
+#
+# Install with:
+#   pip install -r requirements.txt -c requirements-macos.txt
+#
+# These pins keep the Windows-first base requirements usable on macOS while
+# avoiding slow resolver backtracking and known Apple Python compatibility
+# warnings observed during the first macOS initialization pass.
+
+# torch==2.1.0 pairs with torchvision 0.16.x.
+torchvision==0.16.0
+
+# torch==2.1.0 emits NumPy 2.x compatibility warnings.
+numpy<2
+
+# requests==2.31.0 can otherwise install urllib3 2.x, which warns on the
+# LibreSSL build used by Apple's system Python 3.9.
+urllib3<2
+
+# The broad ranges in requirements.txt resolve to these working macOS versions.
+opencv-python==4.11.0.86
+pdfplumber==0.11.8
+sentence-transformers==3.0.1

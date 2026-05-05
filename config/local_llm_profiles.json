@@ -1,0 +1,173 @@
+{
+  "_comment": "Local LLM profiles for History Research AI. Public defaults only; no keys or private paths.",
+  "schema_version": "2026-05-01",
+  "default_profile": "m5_pro_48gb_history_research",
+  "profiles": {
+    "m5_pro_48gb_history_research": {
+      "description": "Apple M-series Pro laptop with 48GB unified memory; local-first academic history workflow.",
+      "runtime": {
+        "provider": "ollama",
+        "base_url": "http://localhost:11434",
+        "keep_alive": "10m",
+        "large_model_policy": "keep_one_large_model_resident"
+      },
+      "models": {
+        "chat_primary": {
+          "id": "qwen36-27b-academic",
+          "base_model": "qwen3.6:27b",
+          "role": "Chinese academic writing, translation, notes, literature review, historical concepts",
+          "num_ctx": 32768,
+          "temperature": 0.35,
+          "top_p": 0.9,
+          "repeat_penalty": 1.08,
+          "num_predict": 4096
+        },
+        "reasoning_multimodal": {
+          "id": "gemma4-31b-reason",
+          "base_model": "gemma4:31b",
+          "role": "English papers, reasoning, code review, image/table/chart understanding, cross-review",
+          "num_ctx": 32768,
+          "temperature": 0.45,
+          "top_p": 0.9,
+          "repeat_penalty": 1.05,
+          "num_predict": 4096
+        },
+        "fast_local": {
+          "id": "gemma4:e4b",
+          "base_model": "gemma4:e4b",
+          "role": "Fast smoke tests, short summaries, lightweight local fallback",
+          "num_ctx": 16384,
+          "temperature": 0.2,
+          "top_p": 0.9,
+          "repeat_penalty": 1.05,
+          "num_predict": 1024
+        },
+        "embedding": {
+          "id": "bge-m3",
+          "base_model": "bge-m3",
+          "role": "Default multilingual RAG embedding for Chinese, Japanese, and English history materials",
+          "num_ctx": 8192,
+          "dimension": 1024
+        },
+        "embedding_alt": {
+          "id": "qwen3-embedding:0.6b",
+          "base_model": "qwen3-embedding:0.6b",
+          "role": "Longer-context multilingual retrieval alternative",
+          "num_ctx": 32768,
+          "dimension": 1024
+        }
+      },
+      "task_routing": {
+        "default": "chat_primary",
+        "academic_note": "chat_primary",
+        "academic_summarizer": "chat_primary",
+        "paper_polish": "chat_primary",
+        "style_transfer": "chat_primary",
+        "ocr_correction": "chat_primary",
+        "ner": "chat_primary",
+        "citation_normalize": "chat_primary",
+        "reverse_outline": "reasoning_multimodal",
+        "entity_disambiguation": "reasoning_multimodal",
+        "virtual_persona": "reasoning_multimodal",
+        "text_summary_smoke": "fast_local"
+      },
+      "rag": {
+        "embedding_model": "ollama-local",
+        "embedding_ollama_model": "bge-m3",
+        "embedding_dimension": 1024,
+        "generation_model": "qwen36-27b-academic",
+        "chunk_size": 1000,
+        "chunk_overlap": 150,
+        "retrieval_top_k": 10,
+        "rerank_top_n": 5
+      },
+      "install_plan": {
+        "core_models": [
+          "qwen3.6:27b",
+          "bge-m3"
+        ],
+        "full_models": [
+          "qwen3.6:27b",
+          "gemma4:31b",
+          "gemma4:e4b",
+          "bge-m3",
+          "qwen3-embedding:0.6b"
+        ],
+        "custom_ollama_models": [
+          "qwen36-27b-academic",
+          "gemma4-31b-reason"
+        ]
+      }
+    },
+    "m5_pro_48gb_mlx_history_research": {
+      "description": "Apple Silicon Mac using a local MLX-LM OpenAI-compatible server for chat and local sentence-transformer embeddings for RAG.",
+      "runtime": {
+        "provider": "mlx",
+        "base_url": "http://127.0.0.1:8080/v1",
+        "server_command": "python -m mlx_lm.server --host 127.0.0.1 --port 8080 --model ${MLX_MODEL}",
+        "large_model_policy": "prefer_one_mlx_chat_model_resident"
+      },
+      "models": {
+        "chat_primary": {
+          "id": "mlx-local-model",
+          "role": "Chinese academic writing, translation, notes, literature review, historical concepts through a locally deployed MLX chat model",
+          "num_ctx": 32768,
+          "temperature": 0.35,
+          "top_p": 0.9,
+          "num_predict": 4096
+        },
+        "reasoning_multimodal": {
+          "id": "mlx-local-model",
+          "role": "Reasoning and cross-review through the same locally deployed MLX chat endpoint unless overridden",
+          "num_ctx": 32768,
+          "temperature": 0.45,
+          "top_p": 0.9,
+          "num_predict": 4096
+        },
+        "fast_local": {
+          "id": "mlx-local-model",
+          "role": "Fast smoke tests and short summaries through the local MLX endpoint unless overridden",
+          "num_ctx": 16384,
+          "temperature": 0.2,
+          "top_p": 0.9,
+          "num_predict": 1024
+        },
+        "embedding": {
+          "id": "bge-m3",
+          "role": "Default multilingual local RAG embedding when MLX chat is used",
+          "num_ctx": 8192,
+          "dimension": 1024
+        }
+      },
+      "task_routing": {
+        "default": "chat_primary",
+        "academic_note": "chat_primary",
+        "academic_summarizer": "chat_primary",
+        "paper_polish": "chat_primary",
+        "style_transfer": "chat_primary",
+        "ocr_correction": "chat_primary",
+        "ner": "chat_primary",
+        "citation_normalize": "chat_primary",
+        "reverse_outline": "reasoning_multimodal",
+        "entity_disambiguation": "reasoning_multimodal",
+        "virtual_persona": "reasoning_multimodal",
+        "text_summary_smoke": "fast_local"
+      },
+      "rag": {
+        "embedding_model": "bge-m3",
+        "embedding_dimension": 1024,
+        "generation_model": "mlx-local-model",
+        "chunk_size": 1000,
+        "chunk_overlap": 150,
+        "retrieval_top_k": 10,
+        "rerank_top_n": 5
+      },
+      "install_plan": {
+        "runtime": "Use an existing mlx-lm installation, then set MLX_MODEL to the local model id used by mlx_lm.server.",
+        "core_models": [],
+        "full_models": [],
+        "custom_ollama_models": []
+      }
+    }
+  }
+}

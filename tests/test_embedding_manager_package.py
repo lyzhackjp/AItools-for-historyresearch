@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import Mock, patch
 
 from modules.embedding_manager import EmbeddingManager, create_embedding_manager
 
@@ -55,6 +56,22 @@ class EmbeddingManagerPackageTest(unittest.TestCase):
         self.assertTrue(package["needs_review"])
         self.assertIn("index_not_initialized", package["quality_flags"])
         self.assertEqual(package["confidence"], 0.0)
+
+    def test_ollama_embedding_uses_local_embed_endpoint(self):
+        manager = create_embedding_manager(default_model="ollama-local")
+        with patch.dict("os.environ", {"OLLAMA_EMBED_MODEL": "bge-m3", "OLLAMA_BASE_URL": "http://localhost:11434"}):
+            self.assertTrue(manager.load_embedding_model("ollama-local"))
+
+            response = Mock()
+            response.raise_for_status.return_value = None
+            response.json.return_value = {"embeddings": [[0.1, 0.2, 0.3]]}
+
+            with patch("modules.embedding_manager.requests.post", return_value=response) as post:
+                vector = manager._get_embedding("Edo administration")
+
+        self.assertEqual(post.call_args.args[0], "http://localhost:11434/api/embed")
+        self.assertEqual(post.call_args.kwargs["json"]["model"], "bge-m3")
+        self.assertEqual(vector.tolist() if hasattr(vector, "tolist") else vector, [0.1, 0.2, 0.3])
 
 
 if __name__ == "__main__":

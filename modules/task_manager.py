@@ -23,6 +23,15 @@ from modules.module_adapters import (
 from modules.secure_api_key_manager import get_secure_key_manager
 from modules.unified_task_executor import TaskConfig, TaskResult, TaskType, UnifiedTaskExecutor
 
+try:
+    from config.local_llm_config import get_local_model, get_model_role_for_task
+except Exception:  # pragma: no cover - fallback for partial installs
+    def get_local_model(role: str = "chat_primary") -> str:
+        return os.getenv("OLLAMA_MODEL", "llama3.1")
+
+    def get_model_role_for_task(task_type: str) -> str:
+        return "chat_primary"
+
 
 @dataclass
 class TaskPreset:
@@ -66,6 +75,16 @@ class TaskManager:
             max_tokens=2000,
             description="Detailed remote LLM NER pass.",
         ),
+        "ner_local_academic": TaskPreset(
+            name="ner_local_academic",
+            task_type="ner",
+            provider="ollama",
+            model=get_local_model(get_model_role_for_task("ner")),
+            backend="local_llm",
+            temperature=0.1,
+            max_tokens=2000,
+            description="Local Qwen NER pass for historical texts.",
+        ),
         "note_standard": TaskPreset(
             name="note_standard",
             task_type="academic_note",
@@ -75,6 +94,16 @@ class TaskManager:
             max_tokens=3000,
             description="Standard academic note generation.",
         ),
+        "note_local_academic": TaskPreset(
+            name="note_local_academic",
+            task_type="academic_note",
+            provider="ollama",
+            model=get_local_model(get_model_role_for_task("academic_note")),
+            backend="local_llm",
+            temperature=0.3,
+            max_tokens=4096,
+            description="Local Qwen academic note generation.",
+        ),
         "polish_conservative": TaskPreset(
             name="polish_conservative",
             task_type="paper_polish",
@@ -83,6 +112,16 @@ class TaskManager:
             temperature=0.2,
             max_tokens=4000,
             description="Conservative paper polish.",
+        ),
+        "polish_local_academic": TaskPreset(
+            name="polish_local_academic",
+            task_type="paper_polish",
+            provider="ollama",
+            model=get_local_model(get_model_role_for_task("paper_polish")),
+            backend="local_llm",
+            temperature=0.2,
+            max_tokens=4096,
+            description="Local conservative academic polish.",
         ),
         "summary_short": TaskPreset(
             name="summary_short",
@@ -97,12 +136,22 @@ class TaskManager:
             name="summary_local_small",
             task_type="text_summary",
             provider="ollama",
-            model=os.getenv("OLLAMA_MODEL", "gemma4:e4b"),
+            model=get_local_model("fast_local"),
             backend="local_llm",
             temperature=0.1,
             max_tokens=256,
             custom_prompt="用不超过{max_length}个汉字概括下列文本，只输出摘要：\n{text}",
             description="Small local Ollama model summary smoke preset.",
+        ),
+        "outline_local_reason": TaskPreset(
+            name="outline_local_reason",
+            task_type="reverse_outline",
+            provider="ollama",
+            model=get_local_model(get_model_role_for_task("reverse_outline")),
+            backend="local_llm",
+            temperature=0.2,
+            max_tokens=4096,
+            description="Local Gemma reverse-outline and logic review.",
         ),
         "outline_standard": TaskPreset(
             name="outline_standard",
@@ -121,6 +170,16 @@ class TaskManager:
             temperature=0.1,
             max_tokens=4000,
             description="OCR cleanup preset.",
+        ),
+        "ocr_correct_local": TaskPreset(
+            name="ocr_correct_local",
+            task_type="ocr_correction",
+            provider="ollama",
+            model=get_local_model(get_model_role_for_task("ocr_correction")),
+            backend="local_llm",
+            temperature=0.1,
+            max_tokens=4096,
+            description="Local LLM OCR text cleanup preset.",
         ),
         "citation_gb": TaskPreset(
             name="citation_gb",

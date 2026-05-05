@@ -8,6 +8,20 @@ from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
 from .types import ChunkStrategy, VectorStoreType, RetrievalStrategy
 
+try:
+    from config.local_llm_config import get_rag_defaults
+except Exception:  # pragma: no cover - fallback for partial installs
+    def get_rag_defaults() -> Dict[str, Any]:
+        return {
+            'embedding_model': 'ollama-local',
+            'embedding_dimension': 1024,
+            'generation_model': 'qwen36-27b-academic',
+            'chunk_size': 1000,
+            'chunk_overlap': 150,
+            'retrieval_top_k': 10,
+            'rerank_top_n': 5,
+        }
+
 
 @dataclass
 class RAGConfig:
@@ -136,6 +150,23 @@ class RAGConfig:
             llm_model='qwen-max',
             enable_reranking=True,
             rerank_top_n=5
+        )
+
+    @classmethod
+    def for_local_history_research(cls) -> 'RAGConfig':
+        defaults = get_rag_defaults()
+        return cls(
+            embedding_model=defaults.get('embedding_model', 'ollama-local'),
+            embedding_dimension=int(defaults.get('embedding_dimension', 1024)),
+            chunk_size=int(defaults.get('chunk_size', 1000)),
+            chunk_overlap=int(defaults.get('chunk_overlap', 150)),
+            retrieval_top_k=int(defaults.get('retrieval_top_k', 10)),
+            llm_provider='ollama',
+            llm_model=defaults.get('generation_model', 'qwen36-27b-academic'),
+            llm_temperature=0.35,
+            llm_max_tokens=4096,
+            enable_reranking=True,
+            rerank_top_n=int(defaults.get('rerank_top_n', 5)),
         )
     
     @classmethod

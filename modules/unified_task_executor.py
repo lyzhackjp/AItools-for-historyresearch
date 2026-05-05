@@ -13,6 +13,34 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Seque
 
 from modules.secure_api_key_manager import SecureAPIKeyManager, get_secure_key_manager
 
+try:
+    from config.local_llm_config import (
+        get_local_base_url,
+        get_local_model,
+        get_local_model_options,
+        get_local_provider,
+        get_mlx_base_url,
+        get_ollama_base_url,
+    )
+except Exception:  # pragma: no cover - fallback when config files are unavailable
+    def get_local_base_url(provider: str = "ollama") -> str:
+        return "http://127.0.0.1:8080/v1" if provider == "mlx" else "http://localhost:11434"
+
+    def get_local_model(role: str = "chat_primary") -> str:
+        return "llama3.1"
+
+    def get_local_model_options(role: str = "chat_primary") -> Dict[str, Any]:
+        return {}
+
+    def get_local_provider() -> str:
+        return "ollama"
+
+    def get_mlx_base_url() -> str:
+        return "http://127.0.0.1:8080/v1"
+
+    def get_ollama_base_url() -> str:
+        return "http://localhost:11434"
+
 
 class ExecutionMode(Enum):
     API = "api"
@@ -54,6 +82,9 @@ PROVIDER_ALIASES = {
     "chatgpt": "openai",
     "claude": "anthropic",
     "local": "ollama",
+    "mlx-lm": "mlx",
+    "mlx_lm": "mlx",
+    "local-mlx": "mlx",
 }
 
 REMOTE_PROVIDER_LABELS = [
@@ -80,6 +111,18 @@ def _normalize_task_type(task_type: Union[TaskType, str]) -> TaskType:
     if value in TASK_NAME_ALIASES:
         return TASK_NAME_ALIASES[value]
     return TaskType(value)
+
+
+def _infer_local_model_role(model: Optional[str], fallback: str = "chat_primary") -> str:
+    if not model:
+        return fallback
+    for role in ("chat_primary", "reasoning_multimodal", "fast_local", "embedding"):
+        try:
+            if model == get_local_model(role):
+                return role
+        except Exception:
+            continue
+    return fallback
 
 
 class _FormatDict(dict):
@@ -236,10 +279,16 @@ class BaseTaskHandler:
     def execute_api(self, input_data: Dict[str, Any], config: TaskConfig) -> Any:
         llm_client = self._create_llm_client(config)
         prompt = self._render_prompt(input_data, config)
+        call_kwargs = {
+            "temperature": config.temperature,
+            "max_tokens": config.max_tokens,
+        }
+        for option_name in ("num_ctx", "top_p", "repeat_penalty", "keep_alive", "timeout"):
+            if option_name in config.extra_params:
+                call_kwargs[option_name] = config.extra_params[option_name]
         response = llm_client._call_llm(  # noqa: SLF001 - legacy compatibility
             prompt,
-            temperature=config.temperature,
-            max_tokens=config.max_tokens,
+            **call_kwargs,
         )
         content = response.get("content", "")
         quality_flags = response.get("quality_flags", [])
@@ -282,9 +331,9 @@ class BaseTaskHandler:
                     name="local_llm",
                     kind="local",
                     label="Local LLM",
-                    description="Uses a local model endpoint such as Ollama.",
+                    description="Uses a local model endpoint such as MLX-LM or Ollama.",
                     available=True,
-                    metadata={"default_provider": "ollama"},
+                    metadata={"default_provider": get_local_provider(), "providers": ["mlx", "ollama"]},
                 )
             )
         for registration in executor.list_external_backends(self.task_type):
@@ -304,14 +353,16 @@ class BaseTaskHandler:
         if normalized in {"api", "llm_api"}:
             return self.execute_api(input_data, config)
         if normalized == "local_llm":
-            local_provider = config.extra_params.get("local_provider", "ollama")
-            local_model = config.extra_params.get("local_model") or config.model or "llama3.1"
-            local_base_url = config.extra_params.get("local_base_url") or "http://localhost:11434"
+            local_provider = _normalize_provider(config.extra_params.get("local_provider") or get_local_provider())
+            local_model = config.extra_params.get("local_model") or config.model or get_local_model("chat_primary")
+            local_base_url = config.extra_params.get("local_base_url") or get_local_base_url(provider=local_provider)
+            local_role = config.extra_params.get("local_role") or _infer_local_model_role(local_model)
+            local_options = get_local_model_options(local_role)
             local_config = replace(
                 config,
                 provider=local_provider,
                 model=local_model,
-                extra_params={**config.extra_params, "base_url": local_base_url},
+                extra_params={**local_options, **config.extra_params, "base_url": local_base_url},
             )
             return self.execute_api(input_data, local_config)
 
@@ -330,13 +381,26 @@ class BaseTaskHandler:
         from modules.llm_client import create_llm_client
 
         provider = _normalize_provider(config.provider)
-        if provider == "ollama":
+        if provider in {"ollama", "mlx"}:
+            local_role = config.extra_params.get("local_role") or _infer_local_model_role(config.model)
+            local_options = get_local_model_options(local_role)
             llm_config = {
-                "provider": "ollama",
-                "model": config.model or "llama3.1",
-                "base_url": config.extra_params.get("base_url") or "http://localhost:11434",
+                "provider": provider,
+                "model": config.model or get_local_model("chat_primary"),
+                "base_url": (
+                    config.extra_params.get("base_url")
+                    or (get_mlx_base_url() if provider == "mlx" else get_ollama_base_url())
+                ),
                 "api_key": config.extra_params.get("api_key"),
             }
+            llm_config.update(local_options)
+            llm_config.update(
+                {
+                    key: config.extra_params[key]
+                    for key in ("num_ctx", "top_p", "repeat_penalty", "keep_alive")
+                    if key in config.extra_params
+                }
+            )
             return create_llm_client(llm_config)
 
         llm_config = self.key_manager.create_provider_config(provider)
@@ -1029,6 +1093,14 @@ class UnifiedTaskExecutor:
             {
                 "name": "ollama",
                 "label": "Local LLM / Ollama",
+                "kind": "local",
+                "configured": True,
+            }
+        )
+        providers.append(
+            {
+                "name": "mlx",
+                "label": "Local LLM / MLX",
                 "kind": "local",
                 "configured": True,
             }

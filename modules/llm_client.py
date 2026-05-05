@@ -17,6 +17,26 @@ except ImportError:  # pragma: no cover - optional dependency at runtime
 
 from modules.secure_api_key_manager import get_secure_key_manager
 
+try:
+    from config.local_llm_config import (
+        get_local_model,
+        get_mlx_base_url,
+        get_ollama_base_url,
+        get_ollama_keep_alive,
+    )
+except Exception:  # pragma: no cover - config fallback for partial installs
+    def get_local_model(role: str = "chat_primary") -> str:
+        return os.getenv("OLLAMA_MODEL", "llama3.1")
+
+    def get_mlx_base_url() -> str:
+        return os.getenv("MLX_BASE_URL", os.getenv("LLM_BASE_URL", "http://127.0.0.1:8080/v1")).rstrip("/")
+
+    def get_ollama_base_url() -> str:
+        return os.getenv("OLLAMA_BASE_URL", os.getenv("OLLAMA_HOST", "http://localhost:11434")).rstrip("/")
+
+    def get_ollama_keep_alive() -> str:
+        return os.getenv("OLLAMA_KEEP_ALIVE", "10m")
+
 
 class LLMClient:
     """Unified LLM client for the project's supported providers."""
@@ -30,6 +50,7 @@ class LLMClient:
         "volcano",
         "deepseek",
         "ollama",
+        "mlx",
         "custom",
     ]
 
@@ -37,6 +58,9 @@ class LLMClient:
         "qwen": "dashscope",
         "chatgpt": "openai",
         "claude": "anthropic",
+        "mlx-lm": "mlx",
+        "mlx_lm": "mlx",
+        "local-mlx": "mlx",
     }
 
     def __init__(
@@ -85,7 +109,8 @@ class LLMClient:
             "zhipu": "glm-4",
             "volcano": "doubao-seed-1-8-251228",
             "deepseek": "deepseek-chat",
-            "ollama": os.getenv("OLLAMA_MODEL", "llama3.1"),
+            "ollama": get_local_model("chat_primary"),
+            "mlx": get_local_model("chat_primary"),
             "custom": "gpt-4",
         }
         return defaults.get(self.provider, "gpt-4")
@@ -105,6 +130,7 @@ class LLMClient:
             "zhipu": "zhipu",
             "volcano": "volcano",
             "ollama": "ollama",
+            "mlx": "mlx",
             "custom": "custom",
         }
 
@@ -122,6 +148,7 @@ class LLMClient:
             "volcano": "VOLCANO_API_KEY",
             "deepseek": "DEEPSEEK_API_KEY",
             "ollama": None,
+            "mlx": None,
             "custom": "LLM_API_KEY",
         }
         env_var = env_vars.get(self.provider)
@@ -129,7 +156,8 @@ class LLMClient:
 
     def _get_base_url(self) -> Optional[str]:
         base_urls = {
-            "ollama": "http://localhost:11434",
+            "ollama": get_ollama_base_url(),
+            "mlx": get_mlx_base_url(),
             "deepseek": "https://api.deepseek.com",
             "zhipu": "https://open.bigmodel.cn/api/paas/v4",
             "custom": os.getenv("LLM_BASE_URL"),
@@ -143,17 +171,23 @@ class LLMClient:
             self.client = Anthropic(api_key=self.api_key)
             return
 
-        openai_like_providers = {"openai", "deepseek", "zhipu", "ollama", "custom"}
+        if self.provider == "ollama":
+            # Native Ollama chat is handled through /api/chat; avoid tying local
+            # model use to the optional OpenAI SDK/httpx dependency stack.
+            self.client = None
+            return
+
+        if self.provider == "mlx":
+            # MLX-LM exposes an OpenAI-compatible HTTP endpoint, but using
+            # requests keeps local model use independent of the optional SDK.
+            self.client = None
+            return
+
+        openai_like_providers = {"openai", "deepseek", "zhipu", "custom"}
         if self.provider in openai_like_providers:
             if OpenAI is None:
                 return
-            if self.provider == "ollama":
-                self.client = OpenAI(
-                    api_key=self.api_key or "ollama",
-                    base_url=self._ollama_openai_base_url(),
-                )
-            else:
-                self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+            self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
 
     def academic_polish(self, text: str, language: str = "zh") -> Dict[str, Any]:
         prompts = {
@@ -224,6 +258,8 @@ class LLMClient:
                     return self._chat_zhipu(messages, **kwargs)
                 if self.provider == "ollama":
                     return self._chat_ollama(messages, **kwargs)
+                if self.provider == "mlx":
+                    return self._chat_mlx(messages, **kwargs)
                 if self.provider == "deepseek":
                     return self._chat_openai_compatible(messages, **kwargs)
                 return self._chat_openai_compatible(messages, **kwargs)
@@ -396,14 +432,24 @@ class LLMClient:
         }
 
     def _chat_ollama(self, messages: List[Dict[str, str]], **kwargs: Any) -> Dict[str, Any]:
+        options = {
+            "temperature": kwargs.get("temperature", self.config.get("temperature", 0.3)),
+            "num_predict": kwargs.get(
+                "max_tokens",
+                kwargs.get("num_predict", self.config.get("num_predict", 512)),
+            ),
+        }
+        for option_name in ("num_ctx", "top_p", "repeat_penalty", "top_k", "seed"):
+            value = kwargs.get(option_name, self.config.get(option_name))
+            if value is not None:
+                options[option_name] = value
+
         payload = {
             "model": self.model,
             "messages": messages,
             "stream": False,
-            "options": {
-                "temperature": kwargs.get("temperature", 0.3),
-                "num_predict": kwargs.get("max_tokens", kwargs.get("num_predict", 512)),
-            },
+            "options": options,
+            "keep_alive": kwargs.get("keep_alive", self.config.get("keep_alive", get_ollama_keep_alive())),
         }
         response = requests.post(
             f"{self._ollama_native_base_url()}/api/chat",
@@ -429,6 +475,54 @@ class LLMClient:
             "quality_flags": quality_flags,
         }
 
+    def _chat_mlx(self, messages: List[Dict[str, str]], **kwargs: Any) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": kwargs.get("temperature", self.config.get("temperature", 0.3)),
+            "max_tokens": kwargs.get(
+                "max_tokens",
+                kwargs.get("num_predict", self.config.get("num_predict", 1024)),
+            ),
+        }
+        top_p = kwargs.get("top_p", self.config.get("top_p"))
+        if top_p is not None:
+            payload["top_p"] = top_p
+
+        response = requests.post(
+            f"{self._mlx_openai_base_url()}/chat/completions",
+            json=payload,
+            timeout=kwargs.get("timeout", max(self.timeout, 300)),
+        )
+        response.raise_for_status()
+        result = response.json()
+        choices = result.get("choices") or []
+        first_choice = choices[0] if choices else {}
+        message = first_choice.get("message") or {}
+        content = message.get("content", "")
+        if isinstance(content, list):
+            content = "".join(
+                str(item.get("text", item)) if isinstance(item, dict) else str(item)
+                for item in content
+            )
+
+        quality_flags = []
+        if not str(content).strip():
+            quality_flags.append("empty_content")
+        if first_choice.get("finish_reason") == "length":
+            quality_flags.append("length_limited")
+
+        return {
+            "content": content,
+            "usage": result.get("usage", {}),
+            "provider": self.provider,
+            "model": self.model,
+            "backend": "local_llm",
+            "done_reason": first_choice.get("finish_reason"),
+            "needs_review": bool(quality_flags),
+            "quality_flags": quality_flags,
+        }
+
     def _ollama_native_base_url(self) -> str:
         base_url = (self.base_url or "http://localhost:11434").rstrip("/")
         if base_url.endswith("/v1"):
@@ -437,6 +531,14 @@ class LLMClient:
 
     def _ollama_openai_base_url(self) -> str:
         return f"{self._ollama_native_base_url()}/v1"
+
+    def _mlx_openai_base_url(self) -> str:
+        base_url = (self.base_url or "http://127.0.0.1:8080/v1").rstrip("/")
+        if base_url.endswith("/chat/completions"):
+            base_url = base_url[: -len("/chat/completions")].rstrip("/")
+        if not base_url.endswith("/v1"):
+            base_url = f"{base_url}/v1"
+        return base_url
 
     def _normalize_ollama_usage(self, result: Dict[str, Any]) -> Dict[str, Any]:
         usage = result.get("usage")
@@ -483,22 +585,30 @@ class LLMClient:
     def get_capabilities(self) -> Dict[str, Any]:
         """Return a small, agent-friendly provider capability snapshot."""
         is_ollama = self.provider == "ollama"
+        is_mlx = self.provider == "mlx"
+        is_local = is_ollama or is_mlx
         return {
             "type": "llm_provider",
             "schema_version": "2026-04-25",
             "provider": self.provider,
             "model": self.model,
-            "backend": "local_llm" if is_ollama else "llm_api",
-            "base_url": self._ollama_native_base_url() if is_ollama else self.base_url,
-            "api_key_required": not is_ollama,
+            "backend": "local_llm" if is_local else "llm_api",
+            "base_url": (
+                self._ollama_native_base_url()
+                if is_ollama
+                else self._mlx_openai_base_url()
+                if is_mlx
+                else self.base_url
+            ),
+            "api_key_required": not is_local,
             "supports_chat": True,
-            "small_model_friendly": is_ollama,
+            "small_model_friendly": is_local,
             "recommended_smoke": {
                 "max_tokens": 64,
                 "temperature": 0.1,
                 "prompt": "Say OK only.",
             },
-            "quality_flags": [] if (is_ollama or self.api_key) else ["missing_api_key"],
+            "quality_flags": [] if (is_local or self.api_key) else ["missing_api_key"],
         }
 
 

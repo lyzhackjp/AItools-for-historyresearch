@@ -3,7 +3,33 @@ from dotenv import load_dotenv
 
 from modules.secure_api_key_manager import get_secure_key_manager
 
+try:
+    from config.local_llm_config import (
+        get_local_model,
+        get_local_provider,
+        get_mlx_base_url,
+        get_ollama_base_url,
+        get_ollama_keep_alive,
+    )
+except Exception:  # pragma: no cover - fallback for partial installs
+    def get_local_model(role='chat_primary'):
+        return os.getenv('OLLAMA_MODEL', 'llama3.1')
+
+    def get_local_provider():
+        provider = os.getenv('LOCAL_LLM_PROVIDER') or os.getenv('LLM_PROVIDER') or 'ollama'
+        return provider if provider in {'ollama', 'mlx'} else 'ollama'
+
+    def get_mlx_base_url():
+        return os.getenv('MLX_BASE_URL', os.getenv('LLM_BASE_URL', 'http://127.0.0.1:8080/v1')).rstrip('/')
+
+    def get_ollama_base_url():
+        return os.getenv('OLLAMA_BASE_URL', os.getenv('OLLAMA_HOST', 'http://localhost:11434')).rstrip('/')
+
+    def get_ollama_keep_alive():
+        return os.getenv('OLLAMA_KEEP_ALIVE', '10m')
+
 load_dotenv()
+load_dotenv('.env.local_llm', override=False)
 
 
 _KEY_MANAGER = get_secure_key_manager()
@@ -13,6 +39,9 @@ def _default_provider() -> str:
     env_provider = os.getenv('LLM_PROVIDER')
     if env_provider:
         return env_provider
+    local_enabled = os.getenv('LOCAL_LLM_ENABLED', 'true').lower() not in {'0', 'false', 'no', 'off'}
+    if local_enabled:
+        return get_local_provider()
     if _KEY_MANAGER.has_key('qwen'):
         return 'dashscope'
     if _KEY_MANAGER.has_key('openai'):
@@ -30,7 +59,8 @@ def _default_model(provider: str) -> str:
         'deepseek': 'deepseek-chat',
         'zhipu': 'glm-4',
         'volcano': 'doubao-seed-1-8-251228',
-        'ollama': 'llama2',
+        'ollama': get_local_model('chat_primary'),
+        'mlx': get_local_model('chat_primary'),
     }
     return os.getenv('LLM_MODEL', defaults.get(provider, 'gpt-4'))
 
@@ -43,9 +73,21 @@ def _default_api_key(provider: str):
         'deepseek': 'deepseek',
         'zhipu': 'zhipu',
         'volcano': 'volcano',
+        'mlx': 'mlx',
+        'ollama': 'ollama',
     }
+    if provider in {'ollama', 'mlx'}:
+        return None
     service = provider_map.get(provider, provider)
     return _KEY_MANAGER.get_key(service)
+
+
+def _default_base_url(provider: str):
+    if provider == 'ollama':
+        return get_ollama_base_url()
+    if provider == 'mlx':
+        return get_mlx_base_url()
+    return os.getenv('LLM_BASE_URL')
 
 
 class Config:
@@ -65,7 +107,8 @@ class Config:
         'provider': _provider,
         'model': _default_model(_provider),
         'api_key': _default_api_key(_provider),
-        'base_url': os.getenv('LLM_BASE_URL'),
+        'base_url': _default_base_url(_provider),
+        'keep_alive': get_ollama_keep_alive() if _provider == 'ollama' else None,
         'max_retries': int(os.getenv('LLM_MAX_RETRIES', '3')),
         'retry_delay': float(os.getenv('LLM_RETRY_DELAY', '1'))
     }

@@ -9,6 +9,15 @@ import json
 from pathlib import Path
 from typing import Optional, Any, Dict, List
 
+try:
+    from config.local_llm_config import get_local_model, get_ollama_base_url
+except Exception:  # pragma: no cover
+    def get_local_model(role: str = "chat_primary") -> str:
+        return "qwen36-27b-academic"
+
+    def get_ollama_base_url() -> str:
+        return "http://localhost:11434"
+
 
 class ConfigManager:
     """
@@ -352,11 +361,11 @@ class ConfigManager:
                 },
                 'ollama': {
                     'provider': 'ollama',
-                    'model': 'llama2',
-                    'base_url': 'http://localhost:11434',
-                    'enabled': False,
-                    'max_tokens': 2000,
-                    'temperature': 0.7
+                    'model': get_local_model('chat_primary'),
+                    'base_url': get_ollama_base_url(),
+                    'enabled': True,
+                    'max_tokens': 4096,
+                    'temperature': 0.35
                 }
             },
             'search_platforms': {
